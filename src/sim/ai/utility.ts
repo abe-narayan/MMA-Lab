@@ -193,10 +193,20 @@ function mustNotCurve(isMustNot: boolean, effectiveIqTier: number): number {
   if (!isMustNot) return 1;
   if (effectiveIqTier <= 0) return 1;
   if (effectiveIqTier === 1) return 0.5;
-  return 0.15;
+  return CURVE_FLOOR;
 }
 
-/** §2.2.2 `c.pace`: strikes above the intended rate are damped, never blocked. */
+/**
+ * §2.2.2 `c.pace`: `1 - 0.5(x - 1)` above the intended rate, where `x` is the
+ * *landed* rate over `intent.paceTarget` (§2.5.5 P-6). The curve reaches 0 at
+ * three times the target and the score is a product, so a fighter who is
+ * landing at triple his plan's rate stops throwing until the 30 s window
+ * drains — that hard edge is the only brake the chapter gives the volume, and
+ * it is what keeps `w_plan x w_style` (up to x3 on a jab) from running the
+ * pace away.
+ */
+export const CURVE_FLOOR = 0.15;
+
 function paceCurve(family: ActionFamily, ratio: number): number {
   if (!STRIKE_FAMILIES.has(family)) return 1;
   if (ratio <= 1) return 1;

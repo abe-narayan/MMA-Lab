@@ -296,6 +296,37 @@ describe('referee', () => {
     expect(out.ended!.lagS).toBeGreaterThan(0);
   });
 
+  it('does not call a strike TKO on a grounded fighter nobody is striking', () => {
+    // "Covering without positional change" is a cover *of something*. Keyed on
+    // `tSinceDefenceS` alone it also fired on a fighter grounded by a body shot
+    // and on one the §04 battle was holding still, and ended bouts in which no
+    // strike had been thrown at all.
+    const ref = new Referee(MMA, { rng: new RNG('quiet-ground') });
+    const quiet = neutralObservables();
+    quiet.grounded = true;
+    quiet.intelligentDefence = false;
+    quiet.tSinceDefenceS = 30;
+    for (let i = 0; i < 60; i++) {
+      const out = ref.tick(input([fighter(0), fighter(1, { obs: quiet })],
+        { t: i * 0.1, tick: i, dt: 0.1 }));
+      expect(out.ended).toBeNull();
+    }
+
+    // The same fighter, now eating them: the rule fires as the chapter intends.
+    const struck = neutralObservables();
+    struck.grounded = true;
+    struck.intelligentDefence = false;
+    struck.tSinceDefenceS = 30;
+    struck.unansweredHead = 2;
+    const hit = new Referee(MMA, { rng: new RNG('loud-ground') });
+    let ended = null as ReturnType<Referee['tick']>['ended'];
+    for (let i = 0; i < 200 && !ended; i++) {
+      ended = hit.tick(input([fighter(0), fighter(1, { obs: struck })],
+        { t: i * 0.1, tick: i, dt: 0.1 })).ended;
+    }
+    expect(ended?.method).toBe('tko_strikes');
+  });
+
   it('cancels a pending TKO when the fighter starts defending again', () => {
     const ref = new Referee(MMA, { rng: new RNG('letwork') });
     const hurt = neutralObservables();

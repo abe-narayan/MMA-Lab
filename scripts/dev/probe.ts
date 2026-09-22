@@ -25,7 +25,9 @@ for (let i = 0; i < N; i++) {
     kd += f.knockdowns; sub += f.subAttempts; ctrl += f.controlSeconds;
   }
 }
-const perFighterMin = secs / 60 / 2;
+// Total fighter-minutes: both fighters are in the cage for the whole bout, so
+// N bouts of `secs` total seconds is 2*secs/60 = secs/30 fighter-minutes.
+const perFighterMin = secs / 30;
 const pct = (a: number, b: number) => (b > 0 ? `${((100 * a) / b).toFixed(0)}%` : '-');
 console.log(`${A.name} vs ${B.name}  |  ${N} bouts`);
 console.log(`mean duration   ${(secs / N / 60).toFixed(1)} min           target 10.6`);

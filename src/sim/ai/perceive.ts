@@ -27,7 +27,7 @@ import type { FighterRuntime } from '../fighter';
 import type { ActionFamily } from './contracts';
 import {
   MY_LAST_FAMILIES, MY_LAST_FAMILY_COUNT, OPP_FAMILIES, OPP_FAMILY_COUNT,
-  THREAT_WEIGHT, oppFamilyIndex, oppFamilyOf, myLastFamilyOf,
+  STRIKE_FAMILIES, THREAT_WEIGHT, oppFamilyIndex, oppFamilyOf, myLastFamilyOf,
   type MyLastFamily, type OppFamily,
 } from './families';
 
@@ -406,6 +406,22 @@ export class ExchangeLedger {
     return n;
   }
 
+  /**
+   * Entries of `kind` whose family is a §02 strike. The ledger records *every*
+   * committed action — a step, a sprawl posture and a jab are all `attempt` —
+   * so the two pace readings below have to filter, or a fighter who circles for
+   * a second reads as throwing 60 strikes a minute.
+   */
+  private countStrikes(kind: LedgerEventKind): number {
+    let n = 0;
+    for (const e of this.entries) {
+      if (e.kind !== kind) continue;
+      if (e.family === null || !STRIKE_FAMILIES.has(e.family)) continue;
+      n++;
+    }
+    return n;
+  }
+
   attempts(family?: ActionFamily): number {
     return this.countKind('attempt', family);
   }
@@ -450,16 +466,23 @@ export class ExchangeLedger {
     return best;
   }
 
-  /** Strikes thrown per minute over the window — the `c.pace` numerator. */
+  /**
+   * Strikes thrown per minute over the window — the `c.pace` numerator.
+   *
+   * Strikes, not actions: `intent.paceTarget` is a strike rate (§2.5), so
+   * dividing a count of every committed action by it produced a ratio of 5-10
+   * on a fighter who had thrown nothing, and `c.pace` then zeroed every strike
+   * in the candidate set.
+   */
   pacePerMin(): number {
     const span = Math.min(LEDGER_WINDOW_S, Math.max(1, this.nowS));
-    return (this.attempts() * 60) / span;
+    return (this.countStrikes('attempt') * 60) / span;
   }
 
   /** Strikes *landed* per minute: P-6 says pressure without landing wins nothing. */
   landedPerMin(): number {
     const span = Math.min(LEDGER_WINDOW_S, Math.max(1, this.nowS));
-    return (this.landed() * 60) / span;
+    return (this.countStrikes('landed') * 60) / span;
   }
 
   resetRound(): void {

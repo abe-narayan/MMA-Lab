@@ -467,7 +467,14 @@ export function familyForEdge(e: GrapplingEdge): ActionFamily {
 
 /** Does this fighter meet the edge's stated requirements (§2.3)? */
 function edgeAvailable(e: GrapplingEdge, ctx: EnumerationContext): boolean {
-  if (ctx.slot !== null && e.actor !== ctx.slot) return false;
+  // A free-standing fighter holds no slot, but the §2.3 tables still split the
+  // rows by role: `a` initiates, `b` responds. Treating "no engagement" as "no
+  // constraint" handed the initiator both halves of the table, so a fighter who
+  // was not being shot on could pick `def.sprawl` or `def.read_level_change`
+  // out of thin air and join an engagement as its defender. Whoever moves first
+  // from a free node is the actor, so the slot is `a`.
+  const slot = ctx.slot ?? 'a';
+  if (e.actor !== slot) return false;
   const r = e.requirements;
   if (r.cage === 'required' && !ctx.atCage) return false;
   if (r.cage === 'forbidden' && ctx.atCage) return false;
@@ -489,6 +496,22 @@ export function grapplingCandidates(ctx: EnumerationContext): Candidate[] {
   if (!ctx.ruleset.takedowns.allowed && ctx.posture === 'standing') return [];
   const out: Candidate[] = [];
   for (const e of edgesFrom(node)) {
+    // §2.3 L's `ref.*` rows are the referee's, not a fighter's: the bell and the
+    // stand-up are chapter 06's to call. They share the edge catalogue only
+    // because they move the pair between nodes, and `edgesFrom` cannot know the
+    // difference — so the candidate set is where they have to be dropped, or a
+    // fighter "chooses" to restart the round from the middle of it.
+    if (e.kind === 'referee') continue;
+    // A `setup` row is not something a fighter *does*; it is the head of
+    // something. `tech.level_change` goes from `pos.standing_mid` to
+    // `pos.standing_mid` and its whole payload is the SETUP state it hands the
+    // next shot (§2.3 A), so as a standalone candidate it is a free no-op that
+    // the softmax re-picks every tick — dozens of "successful" position changes
+    // that change no position, crowding out the shot they were supposed to set
+    // up. §2.2.5 already has the right home for them: `macro.feint_level_change`
+    // and `macro.cut_feint_entry` run the level change as a step and commit to
+    // the entry behind it.
+    if (e.kind === 'setup') continue;
     if (!edgeAvailable(e, ctx)) continue;
     const family = familyForEdge(e);
     // §2.7.3: outnumbered, nothing goes to the ground.

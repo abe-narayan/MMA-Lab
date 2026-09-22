@@ -34,7 +34,7 @@ import {
   guardLogit, hasDefence, hasTechnique, passiveBlockP, reachProfile, resolveStrike, skillGapK,
   strikeClasses, technique, TECHNIQUES, totalMs as techniqueTotalMs,
   type ForceContext, type GuardSpec, type ImpactPosture, type RangeBand, type ResolvedDefence,
-  type StrikeResolveInput, type TargetRegion, type TechniqueSpec,
+  type CommitMode, type StrikeResolveInput, type TargetRegion, type TechniqueSpec,
 } from '../striking';
 import {
   GRAPPLE_EDGE_DRAWS, hasGrapplingEdge, grapplingEdge, isGroundedNode, kindForNode,
@@ -327,6 +327,48 @@ export interface BindOptions {
 const HEAVY_IMPACT_N = 1500;
 
 /** Technique lookup for the outcome feedback below. */
+/**
+ * How well the attacker got their weight behind this strike (02 §2.6.4).
+ *
+ * Every strike used to be scored as `planted` — fully set, hips turned, weight
+ * transferred — which is the ceiling of the force model, not its average. Real
+ * strikes are thrown while backing up, off the wrong foot, or as a range-finding
+ * paw, and each of those costs 30-50% of delivered force. Treating them all as
+ * planted inflated the whole force distribution and, through it, the knockdown
+ * rate.
+ *
+ * The mode is read from state that already exists at contact time, so this adds
+ * no RNG draw and cannot desynchronise a replay:
+ *   retreating  the attacker's velocity points away from the target
+ *   armPunch    balance is gone, so there is no base to turn from
+ *   touch       a light, low-commitment weapon thrown at the edge of its range
+ *   instep      a kick landing at the tip of its range, instep rather than shin
+ */
+function commitModeOf(
+  w: World, actor: FighterWorldState, target: FighterWorldState, spec: TechniqueSpec
+): CommitMode {
+  const dx = target.x - actor.x;
+  const dz = target.z - actor.z;
+  const d = Math.hypot(dx, dz);
+  if (d > 1e-6) {
+    // Closing speed toward the target; negative means backing away from it.
+    const closing = (actor.vx * dx + actor.vz * dz) / d;
+    if (closing < -0.25) return 'retreating';
+  }
+  if (actor.balance < 0.45) return 'armPunch';
+
+  const kick = spec.weapon !== 'fist' && spec.weapon !== 'elbow';
+  const reach = kick
+    ? actor.runtime.effectiveKickReachM
+    : actor.runtime.effectiveReachM;
+  // "At the end of its range": the last 12% of the weapon's reach, where a kick
+  // lands on the instep and a punch is arm-only.
+  const atTip = d > reach * 0.88;
+  if (kick && atTip) return 'instep';
+  if (!kick && atTip && spec.commitment.balance <= 3) return 'touch';
+  return 'planted';
+}
+
 const TECHNIQUE_BY_ID = new Map<string, TechniqueSpec>(TECHNIQUES.map((t) => [t.id, t]));
 
 export function createModules(world: World, opts: BindOptions = {}): BoundModules {
@@ -349,6 +391,21 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       : null;
     p.noteOutcome?.(fighterId, kind, family);
   };
+  /**
+   * `grap.setupBonus` is the §2.3 A payload of a level change and of a strike
+   * thrown into a shot ("inside `grap.setupWindowMs` of a strike or a feint",
+   * resolve.ts). Nothing was setting it: `GrappleWorld.setup` went out as a
+   * literal `false`, so a level change was a 250 ms no-op that bought its
+   * owner nothing and the AI re-chose it forever. Fighter id -> ms until which
+   * the window is open.
+   */
+  const setupUntilMs = new Map<number, number>();
+  const openSetupWindow = (w: World, f: FighterWorldState, fromMs: number): void => {
+    setupUntilMs.set(f.id, fromMs + w.params.get('grap.setupWindowMs'));
+  };
+  const setupOpen = (w: World, f: FighterWorldState): boolean =>
+    (setupUntilMs.get(f.id) ?? -Infinity) >= w.nowMs;
+
   const clock = matchClock(world.config, world.ruleset);
   const dtMs = world.params.get('core.dtMs');
   /** Guards the once-per-tick work that `upkeep` is the only hook for. */
@@ -603,9 +660,11 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     f.totalAttempted++;
     if (isSignificant(spec, posture)) f.sigAttempted++;
 
-    schedule(w, f, target, 'strike', id, contactMs, total, {
+    const contact = schedule(w, f, target, 'strike', id, contactMs, total, {
       kind: 'strike', technique: id, region, posture, node: f.position,
     }, jitter, Math.round(spec.startupMs * mult), Math.round(spec.activeMs * mult));
+    // I-2/I-3: the shot that follows a strike is the one that works.
+    openSetupWindow(w, f, contact.commitMs + contactMs);
   }
 
   function commitGrapple(
@@ -768,7 +827,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       strength: actor.runtime.effective.strength,
       weaponSpeedAttr: spec.weapon === 'fist' ? actor.runtime.effective.handSpeed : actor.runtime.effective.kickSpeed,
       fatigue: actor.energy.f,
-      commit: 'planted',
+      commit: commitModeOf(w, actor, target, spec),
     };
     const attackerSkill = actor.runtime.strikingMean;
     const defenderSkill = target.runtime.strikingMean;
@@ -944,7 +1003,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       actorSlot: w.engagements.slotOf(actor.id) ?? 'a',
       posture: engagement?.posture ?? 'chest',
       kuzushi,
-      setup: false,
+      setup: setupOpen(w, actor),
       telegraphed: false,
       rangeM: w.distance(actor, target),
       round: w.round,
@@ -985,6 +1044,9 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     w: World, contact: ScheduledContact, edge: GrapplingEdge, outcome: EdgeOutcome,
     actor: FighterWorldState, target: FighterWorldState, engagementId: number | null,
   ): void {
+    // §2.3 A: "Grants SETUP to the next shot for grap.setupWindowMs". A setup
+    // edge changes no node, so this state is the entire outcome of one.
+    if (edge.kind === 'setup' && outcome.success) openSetupWindow(w, actor, w.nowMs);
     const from = actor.position;
     const to: PositionId = outcome.toNode;
     actor.actionResult = outcome.success ? 'success' : 'stuffed';

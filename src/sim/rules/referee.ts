@@ -853,9 +853,20 @@ export class Referee {
       this.queueStoppage('tko_strikes', oppId, f.id,
         'not intelligently defending (ground)', 'tko', input);
     }
-    if (o.grounded && !o.intelligentDefence && o.tSinceDefenceS >= c.tkoNoDefenceS) {
-      // A static double-forearm cover is not defence: the fighter has to change
-      // something. This is the rule the 2026 ABC text makes explicit.
+    // A static double-forearm cover is not defence: the fighter has to change
+    // something. This is the rule the 2026 ABC text makes explicit.
+    //
+    // It is a *strike* stoppage, so it needs strikes. `tSinceDefenceS` alone
+    // says only "this fighter has not answered", which is also true of a
+    // fighter who is grounded by a body shot and taking the count, or one the
+    // §04 battle is holding still — and that stopped bouts in which nobody had
+    // thrown anything. The cover has to be a cover of something: either clean
+    // head strikes are going unanswered, or the fighter is blocking and doing
+    // nothing else (`coveringStaticS`, which §05 accrues on a glove block and
+    // clears on any answer).
+    const underFire = o.unansweredHead >= 1 || o.coveringStaticS > 0;
+    if (o.grounded && !o.intelligentDefence && underFire
+      && o.tSinceDefenceS >= c.tkoNoDefenceS) {
       this.queueStoppage('tko_strikes', oppId, f.id,
         'covering without positional change', 'tko', input);
     }

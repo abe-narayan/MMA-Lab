@@ -25,7 +25,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { RNG } from '../src/sim/rng';
-import { ARCHETYPES, DEFAULT_SETTINGS } from '../src/sim';
+import { ARCHETYPES, DEFAULT_SETTINGS, simulate, boutSeed } from '../src/sim';
 import { buildWorld } from '../src/sim/core/build';
 import type { SimConfig } from '../src/sim/core/config';
 import type { World, FighterWorldState } from '../src/sim/core/world';
@@ -54,6 +54,7 @@ import {
 import {
   enumerateActions, strikingFlagsFor, basePrior, type EnumerationContext,
 } from '../src/sim/ai/actions';
+import { NAMED_MACROS } from '../src/sim/ai/macros';
 import {
   OpponentModel, ExchangeLedger, buildContext, contextIndex, CONTEXT_COUNT,
   feintBiteProbabilityFor, TAU_MEM_S_BY_IQ,
@@ -90,6 +91,30 @@ function config(seed: string, over: Partial<SimConfig> = {}): SimConfig {
     ruleset: 'mma.unified.3r',
     arena: 'octagon_30',
     settings: { ...DEFAULT_SETTINGS, rounds: 1, roundSeconds: 60, restSeconds: 10 },
+    ...over,
+  };
+}
+
+/** An `EnumerationContext` for one fighter at a named §03 node. */
+function enumCtx(
+  world: World, f: FighterWorldState, over: Partial<EnumerationContext> = {},
+): EnumerationContext {
+  return {
+    self: f.runtime,
+    ruleset: world.ruleset,
+    posture: 'standing',
+    node: 'pos.standing_mid',
+    slot: null,
+    distanceM: 0.8,
+    cageDistM: 2,
+    atCage: false,
+    damage: { head: 0, body: 0, leadLeg: 0, rearLeg: 0, arms: 0 },
+    balance: 1,
+    hasTarget: true,
+    outnumbered: false,
+    positionValue: 0.5,
+    mustNots: [],
+    shield: 0,
     ...over,
   };
 }
@@ -404,6 +429,46 @@ describe('legal and in-range actions only', () => {
         expect(['straight', 'hook', 'uppercut', 'overhand']).toContain(spec.family);
       }
     }
+  });
+
+  it('never offers a referee edge as a fighter action', () => {
+    // `ref.round_end` leaves every node in the catalogue, so before it was
+    // filtered a standing fighter could "choose" to restart the round.
+    const world = primedWorld(config('no-ref-edges'));
+    const f = world.fighters[0];
+    for (const node of ['pos.standing_mid', 'pos.standing_close', 'pos.clinch_over_under',
+      'pos.ground_side', 'pos.ground_back_hooks'] as const) {
+      const ctx = enumCtx(world, f, { node, posture: node.startsWith('pos.standing') ? 'standing' : 'ground' });
+      for (const c of enumerateActions(ctx)) {
+        expect(c.id === null || !c.id.startsWith('ref.'), `${c.id} from ${node}`).toBe(true);
+      }
+    }
+  });
+
+  it('never offers a bare setup edge, only the macros that use one', () => {
+    // `tech.level_change` goes from `pos.standing_mid` to `pos.standing_mid`:
+    // as a standalone candidate it is a no-op the softmax re-picks forever.
+    const world = primedWorld(config('no-bare-setup'));
+    const f = world.fighters[0];
+    for (const node of ['pos.standing_mid', 'pos.standing_close'] as const) {
+      const ids = enumerateActions(enumCtx(world, f, { node })).map((c) => c.id);
+      expect(ids).not.toContain('tech.level_change');
+      expect(ids).not.toContain('tech.level_change_feint');
+    }
+    expect(NAMED_MACROS.some((m) => m.steps.some((st) => st.id === 'tech.level_change'))).toBe(true);
+  });
+
+  it('a free-standing fighter is the actor, not the responder', () => {
+    // With no engagement there is no slot, which used to mean "no constraint":
+    // the initiator was handed the defender's half of the §2.3 table and could
+    // sprawl on a shot nobody had taken.
+    const world = primedWorld(config('slot-a-only'));
+    const f = world.fighters[0];
+    const ids = enumerateActions(enumCtx(world, f, { node: 'pos.standing_close' })).map((c) => c.id);
+    expect(ids).not.toContain('def.sprawl');
+    expect(ids).not.toContain('def.read_level_change');
+    // The initiator's own entries are still there.
+    expect(ids).toContain('tech.double_leg');
   });
 
   it('the candidate set is never empty', () => {
@@ -800,6 +865,25 @@ describe('§2.4.3 the exchange ledger', () => {
     expect(ledger.hitRate('jab')).toBeCloseTo(0.5, 6);
   });
 
+  it('paces on strikes, not on every committed action', () => {
+    // The ledger records a step, a sprawl posture and a jab all as `attempt`.
+    // `intent.paceTarget` is a strike rate, so counting the lot made a fighter
+    // who had circled for a second read as throwing 60 a minute, and `c.pace`
+    // then scored every strike in his candidate set at exactly zero.
+    const ledger = new ExchangeLedger();
+    ledger.advance(60);
+    for (let i = 0; i < 60; i++) ledger.note('attempt', 'circle');
+    for (let i = 0; i < 10; i++) ledger.note('attempt', 'advance');
+    expect(ledger.pacePerMin()).toBe(0);
+    for (let i = 0; i < 6; i++) ledger.note('attempt', 'jab');
+    // 6 strikes over the 30 s window.
+    expect(ledger.pacePerMin()).toBeCloseTo(12, 6);
+    // §2.5.5 P-6: the axis itself counts *landed*.
+    for (let i = 0; i < 3; i++) ledger.note('landed', 'jab');
+    ledger.note('landed', 'shoot');
+    expect(ledger.landedPerMin()).toBeCloseTo(6, 6);
+  });
+
   it('counts consecutive stuffs and resets them on a landed takedown', () => {
     const ledger = new ExchangeLedger();
     ledger.advance(1);
@@ -1058,6 +1142,12 @@ describe('§2.6.4 hurt behaviour', () => {
     const policy = new MmaPolicy();
     policy.prepare(world);
     const self = world.fighters[0];
+    // The hurt rows this fixture can select boost shot and clinch families, and
+    // §03 only offers those edges from `pos.standing_mid` / `pos.standing_close`.
+    // Left at their corners the pair is four metres apart, which is `out` — no
+    // node, no entries, and nothing for the behaviour to boost.
+    world.fighters[1].x = self.x;
+    world.fighters[1].z = self.z + 0.8;
 
     const sample = (fromTick: number): Record<string, number> => {
       const counts: Record<string, number> = {};
@@ -1141,6 +1231,44 @@ function rockingImpact(): StrikeImpact {
 // ---------------------------------------------------------------------------
 // 8. Interchangeability with IdlePolicy
 // ---------------------------------------------------------------------------
+
+describe('the AI drives every phase of a live bout', () => {
+  const bouts = () => Array.from({ length: 6 }, (_, i) =>
+    simulate({ ...config(boutSeed('ai-e2e', '1v1', i)), settings: { ...DEFAULT_SETTINGS } }));
+
+  it('throws strikes', () => {
+    // The striking module is 54 techniques with its own suite; none of it means
+    // anything if the decision layer never selects one. It did not: `c.pace`
+    // divided a count of every committed action by a strike-rate target, and
+    // the curve returned exactly 0 for every strike family.
+    for (const run of bouts()) {
+      const strikes = run.events.filter((e) => e.kind === 'strike');
+      expect(strikes.length, run.result.detail).toBeGreaterThan(0);
+      expect(strikes.some((e) => (e as { detail: { result: string } }).detail.result === 'landed'))
+        .toBe(true);
+    }
+  });
+
+  it('never logs a referee edge or a bare level change as a fighter action', () => {
+    for (const run of bouts()) {
+      for (const e of run.events) {
+        const edge = (e as { detail?: { edge?: string } }).detail?.edge;
+        if (edge === undefined) continue;
+        expect(edge.startsWith('ref.'), `${edge} at tick ${e.tick}`).toBe(false);
+      }
+    }
+  });
+
+  it('ends for a reason the event log supports', () => {
+    for (const run of bouts()) {
+      // Every strike stoppage has strikes behind it.
+      if (run.result.method !== 'tko' && run.result.method !== 'ko') continue;
+      const landed = run.events.filter((e) => e.kind === 'strike'
+        && (e as { detail: { result: string } }).detail.result === 'landed');
+      expect(landed.length, run.result.detail).toBeGreaterThan(0);
+    }
+  });
+});
 
 describe('policy interchangeability', () => {
   it('MmaPolicy and IdlePolicy satisfy the same interface and draw budget', () => {

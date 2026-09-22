@@ -31,7 +31,10 @@ import type { World, FighterWorldState } from '../core/world';
 import type { ObservedFighter, ObservedState } from '../core/perception';
 import { distanceToWall } from '../rules/arenas/types';
 import type { PositionId } from '../core/ids';
-import { reachProfile, rangeFit, bandFor, isOpenStance, leadFootBattle } from '../striking/range';
+import {
+  reachProfile, rangeFit, bandFor, bandLimits, isOpenStance, leadFootBattle,
+  BAND_BOUNDS,
+} from '../striking/range';
 import { technique, hasTechnique } from '../striking/catalogue';
 import { ACTION_FAMILIES, type ActionFamily, type ModeId } from './contracts';
 import {
@@ -194,6 +197,14 @@ export interface AiState {
   /** `mustNots` the fighter has actually violated, for `evt.mustnot.violated`. */
   mustNotViolations: { mustNot: string; tick: number }[];
   planLines: string[];
+  /**
+   * Tick of the last strike or level change this fighter committed. `c.setup`
+   * and §03's `grap.setupBonus` both ask "was there a setup just now?", and
+   * `FighterWorldState.lastActionTick` cannot answer it: the loop stamps that
+   * on every decision, including a step and a wait, so the answer was always
+   * yes and the axis never fired.
+   */
+  lastSetupTick: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +333,7 @@ export class MmaPolicy implements DecisionPolicy {
       targetChoice: { targetId: null, policy: 'tgt.nearest', weight: 1, role: 'role.solo' },
       mustNotViolations: [],
       planLines: planLinesFor(plan),
+      lastSetupTick: -Infinity,
     };
   }
 
@@ -452,6 +464,7 @@ export class MmaPolicy implements DecisionPolicy {
     }
     st.lastFamily = chosen.family;
     st.consecutiveFeints = chosen.family === 'feint' ? st.consecutiveFeints + 1 : 0;
+    if (isSetupAction(chosen)) st.lastSetupTick = world.tick;
     st.ledger.note('attempt', chosen.family);
 
     return this.commit(st, self, chosen, u);
@@ -820,15 +833,19 @@ export class MmaPolicy implements DecisionPolicy {
       oppCageDistM: distanceToWall(world.arena, opp.x, opp.z),
       roundTimeLeftFrac: clamp01(1 - elapsedS / Math.max(1, roundLengthS)),
       behind: st.intent.perceivedScore.roundsUp < 0,
-      setupRecent: world.tick - self.lastActionTick <= 10 ? 1 : 0,
+      setupRecent: setupActive(st, world) ? 1 : 0,
       expectedThreat: st.model.active ? st.model.expectedThreat(st.lastContext) : 0.3,
       oppInRecovery: cues.oppInRecovery ? 1 : 0,
       balance: clamp01(self.balance),
       riskAppetite: st.intent.riskAppetite,
-      paceRatio: st.ledger.pacePerMin() / paceTarget,
+      // §2.5.5 P-6 is explicit that `c.pace` counts *landed*, not thrown:
+      // "pure pressure without landed strikes does not win rounds". The target
+      // is `tendencies.paceSLpM`, which is a landed rate, so a thrown rate on
+      // top of it also compared two different units.
+      paceRatio: st.ledger.landedPerMin() / paceTarget,
       dwellExceeded: dwellExceeded(st, self, world),
       lookahead: 0,
-      intentRangeM: rangeTargetMetres(st.intent.rangeTarget),
+      intentRangeM: rangeTargetMetres(st.intent.rangeTarget, self.runtime),
       distanceM,
       effectiveIqTier: st.intent.effectiveIqTier,
     };
@@ -1226,6 +1243,22 @@ function isTopRole(position: PositionId): boolean {
   return !position.includes('bottom') && !position.includes('guard');
 }
 
+/**
+ * What grants the §03 setup window: a strike (chapter 02's own wording is
+ * "inside `grap.setupWindowMs` of a strike or a feint") and the level change,
+ * whose §2.3 A row says in as many words that it "grants SETUP to the next
+ * shot".
+ */
+function isSetupAction(c: Candidate): boolean {
+  return c.kind === 'strike' || c.family === 'levelChange';
+}
+
+/** Is this fighter still inside `grap.setupWindowMs` of their last setup? */
+function setupActive(st: AiState, world: World): boolean {
+  const windowTicks = world.params.get('grap.setupWindowMs') / world.params.get('core.dtMs');
+  return world.tick - st.lastSetupTick <= windowTicks;
+}
+
 /** The standing §03 node a distance puts a free fighter in. */
 function standingNodeFor(
   rt: { effectiveReachM: number; effectiveKickReachM: number },
@@ -1237,8 +1270,30 @@ function standingNodeFor(
   return 'pos.standing_long';
 }
 
-function rangeTargetMetres(t: 'long' | 'mid' | 'short'): number {
-  return t === 'long' ? 1.9 : t === 'mid' ? 1.3 : 0.8;
+/**
+ * `intent.rangeTarget` is a *band* label, not a length: §2.5 writes "rangeTarget
+ * long" and leaves the metres to §02, because a band edge is a function of the
+ * fighter's own reach (§2.1.1) and two fighters do not agree on where "long" is.
+ *
+ * The fixed 1.9 / 1.3 / 0.8 m this used to return were outside §02's ladder
+ * altogether: for a pooled-average reach the long band ends at 1.21 m and
+ * everything past 1.48 m is `out`, so a plan that said "fight at long range"
+ * parked the fighter 0.4 m beyond his own kick range. `c.range_target` then
+ * rewarded the movement that kept him there, no technique was ever in its home
+ * band, no §03 standing node but `pos.standing_long` was ever current — and
+ * `pos.standing_long` has no outgoing edges, so no takedown or clinch entry was
+ * reachable either.
+ *
+ * The band midpoint is the honest reading of the label.
+ */
+function rangeTargetMetres(
+  t: 'long' | 'mid' | 'short',
+  rt: { effectiveReachM: number; effectiveKickReachM: number },
+): number {
+  const l = bandLimits(reachProfile(rt.effectiveReachM, rt.effectiveKickReachM));
+  if (t === 'long') return (l.midMax + l.longMax) / 2;
+  if (t === 'mid') return (l.closeMax + l.midMax) / 2;
+  return (BAND_BOUNDS.clinchMax + l.closeMax) / 2;
 }
 
 function dwellExceeded(st: AiState, self: FighterWorldState, world: World): boolean {
