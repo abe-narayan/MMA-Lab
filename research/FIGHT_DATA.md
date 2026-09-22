@@ -8,7 +8,14 @@ Related discipline files in this folder (technique-level, not duplicated here): 
 
 ## 1. Summary
 
-<!-- SUMMARY_PLACEHOLDER -->
+1. **Striking baseline (modern UFC, per fighter):** 3.9 significant strikes landed and 8.4 attempted per minute; 46% significant accuracy (54% defence); 5.4 total strikes landed/min; sig:total landed ≈ 0.72. Accuracy is driven by target and position, not skill alone: distance head 31%, body 63%, leg 80%; clinch 58/86/91%; ground 67/94/87%. 77% of significant attempts go to the head but only 63% of landed strikes do. Winners land ~4.3/min at 50%, losers ~2.9/min at 41%. Fight time: ≈61% distance, 15% clinch, 24% ground.
+2. **Knockdowns:** 0.30 per fighter per 15 min (0.44 per fight); 36% of fights contain one; 3.9% of landed distance power head strikes cause a knockdown, decaying 5.3% → 2.4% → 1.5% across rounds. 65% of fights with a knockdown end KO/TKO; the fighter who scores a knockdown wins 86%. Power scales with weight: KO/TKO per 100 sig strikes landed goes from 0.28 (FLW) to 0.64 (LHW/HW); women ≈ ⅓ of men.
+3. **Strikes to finish:** KO/TKO winners land a median 29 sig strikes (20 to the head); losers absorb a median 6 head sig strikes before the stoppage; 18.5 strikes in the final 30 s; referees stop 3.5 s / 2.6 strikes after the KO blow; median KO/TKO time 4.9 min. Average head-strike absorption is 2.4 sig head strikes per fighter per minute.
+4. **Grappling baseline:** 4.0 takedown attempts and 1.45 landed per fighter per 15 min at 38% accuracy (62% defence); 28.5% of fights have no takedown landed (HW 44%, FLW 21%); 0.45 submission attempts per fighter per 15 min, 25% finish per locked-in attempt (RNC ≈40%, guillotine ≈10%); RNC 39%, guillotine 18%, armbar 12% of finishing subs. Control time ≈ 2.2 min per fighter per fight (39% of fight minutes for both combined). The fighter with more control wins 68% of decisions, but with more strikes 78%; when they conflict the striker wins ~60%.
+5. **Outcomes:** modern UFC KO/TKO 32% · SUB 18% · DEC 49% (finish rate has sat in a 44–53% band since 2010, down from 74% in 1994–2004); by class from HW (66% finishes, 48% KO/TKO) to BW/FLW (45%, 25%); women's divisions 33–39% finishes, 14–22% KO/TKO. 53% of finishes come in R1 (26% of all fights); conditional finish hazard ≈ 0.25 / 0.21 / 0.16 per round; mean fight 10.6 min. Decisions: 77% unanimous, 20% split, 2.5% majority; draws 0.7%, NC+DQ 1.3%, doctor stoppages ≈1%. Regional/amateur MMA finishes 60–69% of bouts, mostly TKO and submission.
+6. **Mismatch effects:** age is the best-supported factor (≥3–4 yr younger → 58–60%; win rate falls ~0.7 pp per year of age; KO susceptibility roughly doubles from <25 to 37+); reach only matters beyond ~2 in and mainly standing (≥2.5 in standing-heavy → 60%; >7 in → 63%; nullified on the ground); height adds nothing once reach is controlled; southpaws 50–57%; a few pounds heavier at weigh-in → 54.5%; favourites win 65–69% and odds are well calibrated; late replacements 37%, year-long layoffs 35–41%.
+7. **Other rulesets:** pro boxing 51–58 punches thrown / 15–16 landed per round (28–29% connect; jab 17–20%, power 35–36%); GLORY (T)KO rate 32–35%; ADCC / IBJJF black-belt submission rates 34–42%, dominated by RNC and back attacks; Olympic judo ≈65% of matches won by ippon, ≈35% reach golden score.
+8. **Street / crowd:** the "90% of fights go to the ground" figure is a misquote of a 1988 LAPD arrest study (62% of officer *arrests that became altercations* ended on the ground, by design); filmed street fights show 42–73% with someone on the ground, ~23% KOs (64% inside 10 s), ~half ending indecisively, and durations mostly under a minute. Group violence involves small subgroups (mean 3.6; only 3–6 people fight), "bursts" once half a group commits, and bystander intervention in 9 of 10 public conflicts. Fatal one-punch injuries come from the head hitting the ground.
 
 ---
 
@@ -560,7 +567,32 @@ Boxing / kickboxing / grappling-sport / judo calibration rows (for those ruleset
 
 ## 5. Skill-tier priors
 
-<!-- SKILLTIER_PLACEHOLDER -->
+Anchors: UFC (elite) rows above; regional pro and amateur MMA from the Australian 1,473-bout series (https://pmc.ncbi.nlm.nih.gov/articles/PMC11569551/) and 2024 rival-promotion finish rates; amateur boxing accuracy (winners 33% / losers 23%, https://journals.plos.org/plosone/article?id=10.1371%2Fjournal.pone.0188675); novice vs elite punch force (novice ≈ 55% of elite, https://www.researchgate.net/figure/Direct-Measures-of-Punch-Force-in-Newtons-and-Number-of-Hits-by-Boxer-for-Six_tbl2_4744109 ; junior hooks ≈ 20–25% of elite impact force, https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7739747/); Fightnomics fighter-level accuracy SD (7.8 pp around 25% for distance power head) and early-UFC era stats (1990s: 2.8 sig attempts/min; 1993 subs 63% of fights; finish rate 74% in 1994–2004). Everything in the table below that is not an anchor is **[E]**.
+
+| Metric | Untrained / street | Beginner (first 1–3 fights, amateur) | Regional pro | Elite (UFC) | Basis |
+|---|---|---|---|---|---|
+| Sig-strike accuracy (distance head) | 15–20% [E] | 22–26% [E] | 27–30% [E] | 31–33% [S] | amateur-boxing losers 23%; Fightnomics 16–32% = ±1 SD band of UFC fighters; early-UFC accuracy was *higher* (less defence), so untrained-vs-untrained can land more than trained-vs-trained — model accuracy as attacker skill minus defender skill |
+| Overall sig accuracy | 35–45% [E] (defence is worse too) | 40–45% [E] | 44–46% [E] | 46% [S] | [GH]; Fightnomics 42% 2005–13 |
+| Striking defence | 45–55% [E] | 50% [E] | 52% [E] | 54% [S] | [CQ] |
+| Sig attempts per min | bursts: 15–25/min for ≤20 s then collapse [E] | 6–7/min [E] | 7.5–8/min [E] | 8.4/min [S] | early UFC 2.8 (1990s, grappling-heavy), 7.1 (2008+); PI1 4.25 (2002) → 8.5 (2017) |
+| Punch force (rear hand, lab) | 1,600–2,400 N [S novice] | 2,400–3,000 N [E] | 3,000–4,000 N [E] | 4,800 N [S] | Pierce/novice–elite study |
+| Knockdown per landed power head strike | 2–3% (less force but no defence, no chin conditioning; alcohol) [E] | 4–5% [E] | 4–4.5% [E] | 3.9% [S] | Fightnomics; amateur MMA TKO+KO 36% vs UFC 32% |
+| KO/TKO share of outcomes | ≈25% of filmed street fights end in KO, 64% of those in first 10 s [S, weak] | amateur: KO 8% + TKO 28% = 36% [S] | regional pro: KO 12% + TKO 30% = 42% [S] | 32% [S] | PMC11569551; [GH] |
+| Submission share | rare; grappling ends in stalemate/separation [E] | 23% [S] | 26% [S] | 19% [S] | PMC11569551 |
+| Decision share | n/a (≈48% "indecisive") [S, weak] | 40% [S] | 31% [S] | 47–49% [S] | PMC11569551; grapplerhq |
+| Finish rate | — | ~60% | ~69% (regional promotions 53–66% in 2024) | 49–52% | PMC11569551; Bloody Elbow |
+| Mean rounds fought | <1 min total [S, weak] | 2.2 rounds (SD 1.0) [S] | 2.1 rounds [S] | 2.1 rounds (10.6 min) [S] | PMC11569551; fightalpha |
+| TD accuracy | 20–30% (sloppy tackles, but no sprawl) [E] | 30–35% [E] | 35–38% [E] | 38% [S] | [GH-G]; James losers 29% |
+| TD defence | 40–50% [E] | 55% [E] | 60% [E] | 62% [S] | |
+| Sub finish per attempt | ≈40% when one party knows any grappling vs none [E] | 30% [E] | 28% [E] | 25% [S] | Fightnomics 20% (2007–12) rising to 30% as attempts fall; RNC >40% |
+| Sub attempts per 15 min per fighter | — | 0.7–1.0 [E] | 0.6–0.8 [E] | 0.45 [S] | early-UFC era 0.75 (2008–13) vs 0.40 (2020–26) |
+| Knockdown → finish conversion | 85–90% (no referee, ground strikes, head-on-ground) [E] | 70% [E] | 68% [E] | 65% [S] | [GH]; one-punch death mechanism |
+| Fatigue (output R3 / R1) | collapse after 30–60 s of max effort [E; lactate ≥11 mmol/L after one 2-min elite round] | 0.70 [E] | 0.80 [E] | ≈0.85–0.9 (KD rate 0.28×, TD/sub attempts −38/−49% when trailing) [S/E] | Ouergui; Fightnomics |
+| Variance between individuals | very high (weight/size dominates) | high | moderate | fighter accuracy SD 7.8 pp; SLpM SD ≈ mean (median 3.5 vs mean 4.2) | Fightnomics; [GH] |
+| Reach/size effects | size dominates skill (Fight Matrix +4.5 pp per ≤6 lb even among pros) | larger | UFC values | UFC values | §4 |
+| Split-decision share of decisions | — | ≈25% [E] | ≈22% [E] | 20% [S] | grapplerhq |
+
+Rules of thumb for tier scaling [E]: (1) accuracy against a defender = base + (attacker skill − defender skill) × k, with elite-vs-elite = 31% distance head; equal-skill lower tiers should land slightly *more* (worse defence) — the amateur-boxing 33%/23% winner/loser split shows the skill *gap*, not the level; (2) finish rates rise as level falls, driven by TKO (ref/corner stoppages on overwhelmed fighters) and submissions, not clean KOs — amateur KO 8% vs pro 12%; (3) output per minute falls with level, but variance rises; (4) at the untrained end the fight is over in seconds and is decided by size, the first clean punch, and who hits the ground.
 
 ---
 
@@ -629,4 +661,24 @@ Verdict: the only primary datum is 62% of *LAPD arrests that became altercations
 
 ## 7. Assumptions and gaps
 
-<!-- GAPS_PLACEHOLDER -->
+**Assumptions**
+1. "Modern UFC" = 2015–2026; targets pool men's divisions unless split. Per-fighter per-minute rates from UFC PI are per fighter, not per bout (verified against the scrape).
+2. Values tagged [S-computed] were computed by our research agents from the public UFCStats scrape (Greco1899/scrape_ufc_stats, through UFC 331, 19 Sep 2026) using 5-minute-round bouts only; they agree with the published PI/CageQuant figures within tolerance. They are reproducible but not peer-reviewed; the CSVs were streamed, not stored in the repo.
+3. Significant-strike accuracy differs by definition: overall ≈46% (all positions) vs distance-only ≈42% vs distance-head ≈31%; the sim must compare like with like.
+4. Control time (UFCStats) = clinch + ground control for both fighters, not ground time. Fight-time-by-position comes from UFC PI Vol 2 Fig 1.2 (2017–19) and Fightnomics (2013).
+5. Tolerances are judgement bands reflecting inter-source spread and era drift, not statistical CIs.
+6. Street/crowd priors (§6.4) are anchored on weak, self-selected video samples and police/forensic data; treat every number in that section as a prior to be overridden by better data.
+
+**Gaps (not found in any public source)**
+- Punch / kick / knee / elbow share of significant strikes (UFCStats does not code strike type). Only finish-mechanism splits exist.
+- Within-round finish-time histogram (only qualitative: earlier in round = higher KO risk).
+- How often the round-1 winner wins the fight; comeback rate after losing R1–R2; how often a knocked-down fighter wins; 10–8 and 30–27 frequencies.
+- SLpM by round (R1 vs R2 vs R3) for UFC — only Miarka time-motion (paywalled tables) and the Fightnomics KD-by-round series exist; kickboxing gives −8% in high-intensity actions R1→R3.
+- UFC PI Vol 2 grappling tables (control %, TD per class) — the PDF was reachable for §1 (positions/durations/striking) but the grappling agent could not obtain it; grappling-by-class numbers are computed instead.
+- Per-weight-class-up win-probability shift (only small-gap +4.5 pp and KO-risk gradients exist; §4 gives an estimate).
+- Boxing: CompuBox averages by *all* divisions (three divisions sourced; the rest inferred), overall pro-boxing KO rate by year, knockdown frequency per bout, decision-type split.
+- ONE Championship / Lumpinee finish rates (only a promoter claim); Muay Thai technique distribution counts (PDF not extractable).
+- Judo throw shares as percentages (ranks only for London 2012; see JUDO.md for Sacripanti per-attempt tables); wrestling pin rates.
+- Multi-attacker: no empirical dataset on trained-vs-multiple-untrained outcomes; "40% of officer assaults involve 2+ assailants" is uncited; the "500 encounters" statistics are unverifiable marketing.
+- ADCC 2024: two submission rates (34% vs 42%) appear in the same source; both listed.
+- Fetch failures (numbers taken from search excerpts, flagged [snippet]): fightomic, betmma.tips, Medium, Bruin Sports Analytics (404), Bloody Elbow (paywall), several ResearchGate/SAGE/ScienceDirect abstracts (403), the College of Policing PDF (TLS), the Miarka JSCR tables (paywall).
