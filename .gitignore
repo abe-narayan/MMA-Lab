@@ -30,3 +30,4 @@ Thumbs.db
 # logs
 *.log
 npm-debug.log*
+docs/DESIGN_FULL.md
