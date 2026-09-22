@@ -611,9 +611,12 @@ Variants: **from guard**, **from mount (S-mount / "spinning armbar")**,
 * **Defences:** S0 never post far from your own hip; keep elbows in;
   S1 pull the elbow back to the ribs before the leg clears the head,
   posture, drive the head to the attacker's chest; S2 **grip fighting** —
-  clasp hands (gable/"S-grip"), grab own thigh/shorts, "hitchhiker" (turn
-  the thumb *toward* the attacker's leg and rotate out, ending on top), the
-  "stack" (drive weight over the attacker's hips), roll toward the head
+  clasp hands (gable/"S-grip"/RNC grip; Kesting catalogues ~20 grip breaks
+  [K3]), grab own thigh/shorts, "hitchhiker" (turn the thumb *toward* the
+  attacker's legs, keep the elbow bent, roll the whole body past their hips
+  — works vs guard/mount/side armbars, fails once the arm is straight or if
+  they switch to a triangle [EV2]), the "stack" (drive weight over the
+  attacker's hips), roll toward the head
   (spin-out), or **slam** (allowed; effective if the attacker keeps the
   belly-down or hangs on standing). S3 last-ditch: rotate the thumb,
   bend the arm with the free hand, roll through — almost never works once
@@ -675,8 +678,15 @@ clinch / whizzer counter)**.
   "hip in" so they cannot roll.
 * **Finish:** rotate the wrist toward the opponent's spine/head. **Lock→tap
   1–4 s** once rotation begins with the elbow controlled. Injury if no tap:
-  shoulder (rotator cuff/labrum), humeral spiral fracture (Mir–Nogueira,
-  UFC 140, 2011).
+  posterior capsule / posterior-inferior GH ligament, rotator-cuff external
+  rotators, labrum [P13]; humeral spiral fracture (Mir–Nogueira, UFC 140,
+  2011: Nogueira refused to tap, humerus broken, technical submission 3:38
+  R1 [WR2]). Kimura is the **second most injurious submission** in the Hinz
+  2021 survey (31 of 246 submission-inflicted injuries, 12.6 %) [P15].
+  Kesting's five kimura counters [K4]: spin to the back vs closed-guard
+  kimura; butterfly lift vs half-guard-top kimura; T-kimura reversal by
+  circling the hips under the head; staple the bottom leg and scoot; spin
+  armbar/back take vs bottom-side-control kimura.
 * **Defences:** S0 don't post the hand away from the hip; S1 straighten the
   arm or grab your own belt/shorts/thigh (Danaher: "the arm is only in
   danger if it is bent and away from the body"); S2 roll *with* the
@@ -798,8 +808,19 @@ clinch / whizzer counter)**.
 * **Finish:** rotate the heel across the body (inside: toward the attacker's
   chest; outside: away), keep the knee stationary. **Lock→tap 1–3 s**; the
   heel hook gives *little pain before structural damage* — the tear can
-  precede pain, so novices are injured *without* tapping (LCL/PCL/ACL,
-  tibiofibular ligaments, meniscus — Wikipedia *Leglock* [W2]).
+  precede pain, so novices are injured *without* tapping. Structures
+  (Hasegawa 2026 [P13]): outside heel hook (internal tibial rotation) → ACL
+  near extension, PCL at 90–120° flexion, MCL/posteromedial complex, medial
+  meniscus; inside heel hook (external rotation) → posterolateral corner
+  (LCL, popliteus, popliteofibular), MCL secondary; the inside variant is
+  "theoretically more dangerous" because its smaller motion arc gives less
+  reaction time. Case report: MMA fighter with complete ACL + MCL rupture
+  from a heel hook (Baker 2010 [P16]). Competition data: heel-hook-legal
+  IBJJF divisions have **12× the knee-injury rate** (26.5 vs 2.2 per 1,000
+  matches) [P10]; heel hook = 11 % of submission-inflicted injuries, toe hold
+  and ankle lock cause 61 % of ligamentous ankle injuries (Hinz 2021 [P15]);
+  41 % of ACL-tear victims never returned to competition and 10 % of injured
+  athletes changed behaviour by "tapping earlier".
 * **Defences:** S0 don't step over the guard; keep the knee off the
   centreline; S1 "hide the heel" — turn the knee *toward* the attacker's
   hooking leg, keep the toes pointed, "boot" (curl the foot behind the
@@ -827,12 +848,20 @@ clinch / whizzer counter)**.
   the largest skill-gap effect of any submission), FLX of defender large,
   STR of attacker moderate, SLIP large (sweaty heels slip — a common
   no-gi/MMA failure), FAT of attacker (entanglements are cheap to hold).
-* **Frequency:** ESTIMATE 20–30 UFC finishes all-time, ≈ 1–2 % of subs;
-  no measurable rise since 2019 despite the ADCC leg-lock revolution
-  (ADCC 2022 ≈ 31 % of finishes were heel hooks [F1]). Reason (Slack/Hall
-  analyses, coaching consensus): entanglement exposes the leg-locker to
-  strikes and takes the fight off its feet, and MMA gloves/sweat weaken the
-  heel grip. Palhares is the outlier user.
+* **Frequency:** **24 UFC finishes all-time (1.4 % of subs)** [FA1]; ≈ 51
+  leg-lock finishes of all kinds ≈ 3.0–3.3 % [FA1][G1]. Verified per-year:
+  2018:1 (Hall d. Penn), 2020:1 (Hooper), 2024:1, 2025:3 (Valter Walker's
+  four straight heel hooks, Aug 2024–Oct 2025, tying Palhares for most in
+  UFC history) [WV1][BJ3] — so the 2024–25 uptick is one specialist, not a
+  trend. ADCC context: leg locks were 28–30 % of ADCC finishes 2016–2022 and
+  fell to 22 % in 2024 (heel hooks 4 of 53 subs, 7.5 %) [BH1][BH2]. Why rare
+  in MMA (Danaher, Sonnen debate [BJ4][BJ5]): strangles "end fights
+  unconditionally" while a tough opponent can keep fighting through a torn
+  knee; entanglement takes the fight to the ground and exposes the
+  leg-locker; gloves/sweat weaken the heel grip. Coaching mechanics: Giles —
+  "bend in the knee is essential (a straight leg pulls out)"; 50/50 gable
+  grip on the heel, toes pinched to biceps/ribs, forearm blade as lever
+  [L1][L2]; Craig Jones — secure total control before finishing [CJ1].
 
 | Stage | Inside (411) | Outside (ashi/50-50) |
 |---|---|---|

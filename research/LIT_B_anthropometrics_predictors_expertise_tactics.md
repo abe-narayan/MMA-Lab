@@ -354,6 +354,13 @@ Compiled 2026-09-22.
 - Quality: review; cited for framing only.
 - **Sim implication:** Perception-action loop in the sim: cue detection -> read -> decision -> execution, with expertise affecting the first three stages more than the last.
 
+### 4.13 Martinez de Quel, O., & Bennett, S.J. (2019). Perceptual-cognitive expertise in combat sports: a narrative review and a model of perception-action. *RICYDE. Revista Internacional de Ciencias del Deporte*, 15(58), 323-338. https://doi.org/10.5232/ricyde2019.05802
+
+- Sample: narrative review of combat-sport perception-action studies (boxing, karate, taekwondo, fencing, judo).
+- Findings: experts' advantage is specific to sport-relevant dynamic stimuli, involves earlier use of kinematic cues from the opponent's trunk/shoulders, and is coupled to action (in-situ responses show larger expertise effects than button-press tasks); proposes a perception-action model for combat sports with deception/feints as a key manipulation of the opponent's read.
+- Quality: review; open access; cited for framing only.
+- **Sim implication:** Supports modelling feints as actions that exploit the *opponent's* read process (trigger a false read with probability that declines with opponent expertise) and modelling in-situ (live) skill differences as larger than lab tests would suggest.
+
 ---
 
 ## 5. Theme 4: Tactical analysis of bouts
