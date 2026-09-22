@@ -28,6 +28,7 @@ import { edgesFrom, type GrapplingEdge } from '../grappling/graph';
 import { SUBMISSION_CATALOGUE, type SubmissionSpec } from '../submissions/catalogue';
 import { isLegalUnderRuleset } from '../submissions/legality';
 import type { ActionFamily } from './contracts';
+import { tierBehaviourFor, techniqueBlockedBy, type TierBehaviour } from './behaviour';
 import { familyForTechnique } from './families';
 import type { ScorableAction } from './utility';
 
@@ -202,6 +203,24 @@ function isMustNot(family: ActionFamily, mustNots: readonly string[], spec?: Tec
   return false;
 }
 
+/**
+ * 01 §3's repertoire gate. What a tier does not own is not a weak option, it is
+ * not an option: `beh.mt.elbow_availability` says "T0-T1 have w(elbow) = 0",
+ * `beh.bjj.sweep_repertoire` says "T0 none (bucks)", `beh.wr.sprawl_late` says
+ * an untrained fighter has no sprawl posture to hold. A weight clamped at 0.25
+ * would still let a white belt sprawl on one shot in twenty, which is the whole
+ * distinction the catalogue exists to draw.
+ *
+ * The profile is cached on the runtime, so this is a map lookup per candidate.
+ */
+function repertoireAllows(
+  b: TierBehaviour, family: ActionFamily, spec?: TechniqueSpec,
+): boolean {
+  if (b.forbidden.has(family)) return false;
+  if (spec && techniqueBlockedBy(b, spec) !== null) return false;
+  return true;
+}
+
 function regionDamage(ctx: EnumerationContext, family: ActionFamily, spec?: TechniqueSpec): number {
   if (spec) {
     if (spec.limb === 'leadLeg') return ctx.damage.leadLeg;
@@ -253,6 +272,7 @@ export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
   const tier = ctx.self.strikingTier;
   const inClinch = ctx.posture === 'clinch';
   const band = bandFor(ctx.distanceM, profile);
+  const behaviour = tierBehaviourFor(ctx.self);
   const out: Candidate[] = [];
 
   for (const spec of TECHNIQUES) {
@@ -270,10 +290,15 @@ export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
     if (!fit.available) continue;
 
     const family = familyForTechnique(spec.family, spec.limb, spec.targets[0]);
+    const asFamily: ActionFamily = inClinch && homeInClinch ? 'clinchStrike' : family;
+    // 01 §3 repertoire: `spec.minTier` is the striking aggregate, but the
+    // catalogue keys kicks on the Muay Thai tier and elbows on their own row.
+    if (!repertoireAllows(behaviour, family, spec)) continue;
+    if (asFamily !== family && !repertoireAllows(behaviour, asFamily)) continue;
     out.push(mk(ctx, {
       kind: 'strike',
       id: spec.id,
-      family: inClinch && homeInClinch ? 'clinchStrike' : family,
+      family: asFamily,
       defence: 'def.neutral',
       moveX: 0,
       moveZ: 0,
@@ -402,10 +427,14 @@ const DEFENSIVE_OPTIONS: readonly { id: DefenceId; family: ActionFamily }[] = [
 ];
 
 export function defensiveCandidates(ctx: EnumerationContext): Candidate[] {
+  const behaviour = tierBehaviourFor(ctx.self);
   const out: Candidate[] = [];
   for (const d of DEFENSIVE_OPTIONS) {
     if (d.family === 'check' && ctx.posture !== 'standing') continue;
     if (d.family === 'sprawl' && ctx.posture === 'ground') continue;
+    // `beh.mt.check_rate` puts the T0 check below 0.10 and `beh.wr.sprawl_late`
+    // takes the sprawl away entirely; both are repertoire rows, not weights.
+    if (!repertoireAllows(behaviour, d.family)) continue;
     out.push(mk(ctx, {
       kind: 'defend',
       id: d.id,
@@ -494,6 +523,7 @@ export function grapplingCandidates(ctx: EnumerationContext): Candidate[] {
   const node = ctx.node;
   if (node === null) return [];
   if (!ctx.ruleset.takedowns.allowed && ctx.posture === 'standing') return [];
+  const behaviour = tierBehaviourFor(ctx.self);
   const out: Candidate[] = [];
   for (const e of edgesFrom(node)) {
     // §2.3 L's `ref.*` rows are the referee's, not a fighter's: the bell and the
@@ -519,6 +549,7 @@ export function grapplingCandidates(ctx: EnumerationContext): Candidate[] {
       continue;
     }
     if (family === 'groundStrike' && !ctx.ruleset.ground.strikesAllowed) continue;
+    if (!repertoireAllows(behaviour, family)) continue;
     out.push(mk(ctx, {
       kind: 'grapple',
       id: e.id,

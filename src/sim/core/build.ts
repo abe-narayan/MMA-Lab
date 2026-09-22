@@ -256,6 +256,7 @@ function newFighterState(
     // 09 §2.2: a quicker fighter commits earlier inside the tick on average.
     decisionOffsetMs: Math.round(reactionLatencyMs) % dtMs,
     ai: null,
+    tells: { backTurnedUntilMs: -Infinity, eyesShutUntilMs: -Infinity, rules: [] },
     intentTag: 'idle',
     sigLanded: 0,
     sigAttempted: 0,

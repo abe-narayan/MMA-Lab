@@ -7,6 +7,8 @@
  *   planview.ts   what the action layer reads from a plan, and the hooks the
  *                 plan generator and the targeting manager register through
  *   utility.ts    §2.2 the IAUS score, the nineteen considerations, the softmax
+ *   behaviour.ts  01 §3's tier behaviour catalogue compiled into gates, family
+ *                 weights, the guard posture and the reactive-defence choice
  *   actions.ts    §2.2 the legal candidate set, with the catalogue priors
  *   macros.ts     §2.2.5 committed sequences and the combination caps
  *   execution.ts  §2.3 telegraph, timing, target error and the novice tells
@@ -28,6 +30,7 @@
  */
 export * from './contracts';
 export * from './families';
+export * from './behaviour';
 export * from './planview';
 export * from './utility';
 export * from './actions';

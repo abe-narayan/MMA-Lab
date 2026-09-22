@@ -30,12 +30,13 @@ import {
 import type { World, FighterWorldState } from '../core/world';
 import type { ObservedFighter, ObservedState } from '../core/perception';
 import { distanceToWall } from '../rules/arenas/types';
-import type { PositionId } from '../core/ids';
+import type { DefenceId, PositionId } from '../core/ids';
 import {
   reachProfile, rangeFit, bandFor, bandLimits, isOpenStance, leadFootBattle,
   BAND_BOUNDS,
 } from '../striking/range';
 import { technique, hasTechnique } from '../striking/catalogue';
+import { reactionLatencyMs as defenceLatencyMs } from '../striking/defence';
 import { ACTION_FAMILIES, type ActionFamily, type ModeId } from './contracts';
 import {
   currentMultiTargetProvider, currentPlanProvider, pacingFor, planWeight,
@@ -44,6 +45,10 @@ import {
 import {
   enumerateActions, type Candidate, type EnumerationContext,
 } from './actions';
+import {
+  behaviourWeights, eyesCloseP, reactiveDefence, tierBehaviourFor, turnAwayP,
+  type BehaviourWeights, type TierBehaviour,
+} from './behaviour';
 import {
   decisionTier, effectiveTau, scoreAction, softmaxSelect, tauForTier,
   type ConsiderationInputs, type WeightBundle,
@@ -197,6 +202,14 @@ export interface AiState {
   /** `mustNots` the fighter has actually violated, for `evt.mustnot.violated`. */
   mustNotViolations: { mustNot: string; tick: number }[];
   planLines: string[];
+  /** 01 §3's catalogue compiled for this fighter; stable for the whole bout. */
+  behaviour: TierBehaviour;
+  /** The trigger-gated half of the catalogue, recomputed each tick. */
+  tierWeights: BehaviourWeights | null;
+  /** Rule ids that fired on the last decision — the debug overlay reads these. */
+  firedRules: string[];
+  /** The reactive defence a successful read bought this tick (§2.4.2). */
+  pendingDefence: DefenceId | null;
   /**
    * Tick of the last strike or level change this fighter committed. `c.setup`
    * and §03's `grap.setupBonus` both ask "was there a setup just now?", and
@@ -333,6 +346,10 @@ export class MmaPolicy implements DecisionPolicy {
       targetChoice: { targetId: null, policy: 'tgt.nearest', weight: 1, role: 'role.solo' },
       mustNotViolations: [],
       planLines: planLinesFor(plan),
+      behaviour: tierBehaviourFor(rt),
+      tierWeights: null,
+      firedRules: [],
+      pendingDefence: null,
       lastSetupTick: -Infinity,
     };
   }
@@ -417,8 +434,10 @@ export class MmaPolicy implements DecisionPolicy {
     const context = buildContext(self.posture, distanceM, onTop, st.model.active ? 0.5 : 0, st.lastFamily);
     st.lastContext = context;
 
+    st.firedRules = [];
     const cues = this.perceive(st, self, opp, distanceM, u);
-    this.readAndCounter(st, self, opp, world.nowMs, u);
+    this.noviceTells(st, world, self, u);
+    this.readAndCounter(st, world, self, opp, u);
     this.resolveFeint(st, self, opp, u);
 
     // --- tactical layer (draw 4) ------------------------------------------
@@ -432,6 +451,22 @@ export class MmaPolicy implements DecisionPolicy {
     const enumeration = this.buildEnumeration(st, self, world, opp, distanceM);
     const candidates = enumerateActions(enumeration, opp.x - self.x, opp.z - self.z);
     if (candidates.length === 0) return waitDecision();
+
+    st.tierWeights = behaviourWeights(st.behaviour, {
+      // The opponent is walking this fighter down and there is fence behind.
+      underPressure: distanceM < 1.6
+        && distanceToWall(world.arena, self.x, self.z) < 1.5,
+      panic: isRocked(self) || damageFracOf(self) > 0.30,
+      readSucceeded: st.pendingDefence !== null || st.counterWindowUntilMs >= world.nowMs,
+      oppAdvancing: (opp.vx * (self.x - opp.x) + opp.vz * (self.z - opp.z)) > 0,
+      afterExchange: self.lastStruckTick >= world.tick - 10 || st.lastSetupTick >= world.tick - 10,
+      onBottom: self.posture === 'ground' && !isTopRole(self.position),
+      withinHalfMetre: distanceM < 0.5,
+      fatigue: fatigueOf(self),
+      oppCircles: Math.hypot(opp.vx, opp.vz) > 0.1,
+    });
+    for (const id of st.tierWeights.fired) st.firedRules.push(id);
+    self.tells.rules = st.firedRules;
 
     const inputs = this.considerations(st, self, world, opp, distanceM, cues);
     const phaseTier = phaseTierFor(rt, self.posture, distanceM);
@@ -517,19 +552,60 @@ export class MmaPolicy implements DecisionPolicy {
   }
 
   /**
-   * Draw 2, partitioned: the cue read fires below `p_read`, and the
-   * counter-on-read fires below `p_read x p_counter`, so `P(counter)` is
-   * exactly "with probability `p_counter` the read *also* triggers a counter"
-   * (§2.4.4 consequence 2) out of one uniform.
+   * `beh.gen.turn_away` (T0, P = 0.50 after a clean hit or three in two
+   * seconds): the fighter turns his side or his back, arms over his head. It
+   * is the single most expensive thing an untrained fighter does — the
+   * follow-ups arrive against a turned back with no guard behind them — and it
+   * is why a T0 is finished rather than merely outpointed.
+   *
+   * The roll rides in the *middle* band of draw 1, which `perceive` leaves
+   * free: its lower tail is the pattern read and its upper tail the hurt cue.
+   */
+  private noviceTells(st: AiState, world: World, self: FighterWorldState, u: Draws): void {
+    const pTurn = turnAwayP(st.behaviour);
+    if (pTurn <= 0) return;
+    const hitRecently = self.lastStruckTick >= world.tick - 20;
+    if (!hitRecently || world.nowMs < self.tells.backTurnedUntilMs) return;
+    const patternP = st.model.active
+      ? st.model.p(st.lastContext, st.model.mostLikely(st.lastContext)) : 0;
+    const hi = 1 - hurtCueP(self.runtime);
+    const span = hi - patternP;
+    if (span <= 0 || u.uPattern < patternP || u.uPattern >= hi) return;
+    const v = (u.uPattern - patternP) / span;
+    if (v >= pTurn) return;
+    self.tells.backTurnedUntilMs = world.nowMs + 1000;
+    st.firedRules.push('beh.gen.turn_away');
+  }
+
+  /**
+   * Draw 2, partitioned three ways, in this order:
+   *
+   *   `[0, pEyes)`                       `beh.gen.eyes_close` — the eyes shut
+   *                                      and "readP = 0 for the exchange"
+   *   `[pEyes, pEyes + (1-pEyes) pRead)` the cue read succeeds
+   *   the rest                           nothing was seen
+   *
+   * and, *inside* the read band, the counter-on-read of §2.4.4 below
+   * `p_counter` and the reactive-defence choice above it. Nesting rather than
+   * reusing keeps every marginal exact — P(eyes) = pEyes, P(read) =
+   * (1-pEyes) x pRead, which is what "readP = 0 when the eyes are shut" means —
+   * and the draw budget stays at eight.
+   *
+   * The read is what buys a *defence*, not only a counter: `beh.gen.read` says
+   * "read → reactive defence / counter allowed; no read → positional defence
+   * only", and until Phase 5 nothing in 07 ever set one, so chapter 02's whole
+   * defence layer was dead and skill converted into offence alone.
    */
   private readAndCounter(
     st: AiState,
+    world: World,
     self: FighterWorldState,
     opp: ObservedFighter,
-    nowMs: number,
     u: Draws,
   ): void {
     const rt = self.runtime;
+    const nowMs = world.nowMs;
+    st.pendingDefence = null;
     const incoming = opp.action !== 'idle' && opp.action !== 'move' && hasTechnique(opp.action);
     st.reads.attempts += incoming ? 1 : 0;
     const spec = incoming ? technique(opp.action) : null;
@@ -541,7 +617,7 @@ export class MmaPolicy implements DecisionPolicy {
       fatigue: fatigueOf(self),
       hurt: isRocked(self),
       anxietyPenalty: rt.anticipation.striking?.anxietyReadPenalty ?? 0,
-      visionBlocked: false,
+      visionBlocked: nowMs < self.tells.eyesShutUntilMs,
       stanceFamiliarity: familiarityOf(rt, opp.stance),
       patternMods: st.model.active && spec
         ? 2 * (st.model.p(st.lastContext, oppFamilyForSpec(spec.family)) - 1 / 12)
@@ -549,14 +625,59 @@ export class MmaPolicy implements DecisionPolicy {
       suppressed: !incoming,
     });
 
-    if (!incoming || u.uRead >= pRead) return;
+    if (!incoming || spec === null) return;
+
+    // `beh.gen.eyes_close` (T0, P 0.70) / `beh.gen.eyes_close_t1` (T1, P 0.30),
+    // on an incoming power strike only — a jab does not make anyone blink.
+    const powerIn = spec.commitment.balance > 8;
+    const pEyes = powerIn ? eyesCloseP(st.behaviour) : 0;
+    if (u.uRead < pEyes) {
+      self.tells.eyesShutUntilMs = nowMs + spec.startupMs + spec.activeMs;
+      st.firedRules.push(rt.strikingTier <= 0 ? 'beh.gen.eyes_close' : 'beh.gen.eyes_close_t1');
+      return;
+    }
+
+    const span = 1 - pEyes;
+    if (span <= 0 || u.uRead >= pEyes + span * pRead) return;
     st.reads.successes += 1;
+
+    // A fresh uniform, conditional on the read: the counter sits in its lower
+    // tail and the defence choice takes the whole of it.
+    const v = clamp01((u.uRead - pEyes) / Math.max(1e-9, span * pRead));
     const pCounter = counterOnRead(rt);
-    if (u.uRead < pRead * pCounter) {
+    if (v < pCounter) {
       st.reads.counters += 1;
       st.counterWindowUntilMs = nowMs + 100;
     }
+
+    // The defence the read buys. Latency is 02's, which is deliberately not
+    // tier-scaled (`beh.gen.simple_rt_untiered`); everything tiered lives in
+    // the window and in the repertoire.
+    const chosen = reactiveDefence(st.behaviour, {
+      spec,
+      latencyMs: defenceLatencyMs({
+        reactionTimeMs: rt.reactionTimeMs,
+        tier: rt.strikingTier,
+        fatigue: fatigueOf(self),
+        rocked: isRocked(self),
+        stanceUnfamiliar: familiarityOf(rt, opp.stance) < 0.5,
+      }),
+      u: v,
+      // `def.shoulder_roll` needs the Philly shell; `def.step_back` and
+      // `def.step_off` need room, and there is none on the fence.
+      unavailable: [
+        ...(rt.def.style.guardStyle === 'philly' ? [] : ['def.shoulder_roll' as DefenceId]),
+        ...(distanceToWall(world.arena, self.x, self.z) < 0.8
+          ? ['def.step_back' as DefenceId, 'def.step_off' as DefenceId]
+          : []),
+      ],
+    });
+    if (chosen.defence !== null) {
+      st.pendingDefence = chosen.defence;
+      for (const id of chosen.fired) st.firedRules.push(id);
+    }
   }
+
 
   /** Draw 3: the feint bite (§2.4.5). */
   private resolveFeint(
@@ -869,6 +990,10 @@ export class MmaPolicy implements DecisionPolicy {
     if (st.counterWindowUntilMs > 0 && isCounterFamily(c.family)) {
       adapt *= COUNTER_ON_READ_MULT;
     }
+    // 01 §3: the catalogue's own `w(x) xN` clauses. They ride on `w_adapt` so
+    // they sit under the same `ai.utility.clamp` as every other multiplier
+    // rather than being a parallel, unbounded channel.
+    adapt *= st.tierWeights?.weights.get(c.family) ?? 1;
     return {
       style: st.style[c.family] ?? 1,
       plan: planWeight(st.plan, c.family),
@@ -1022,7 +1147,9 @@ export class MmaPolicy implements DecisionPolicy {
       kind: c.kind,
       what: c.id,
       targetId: st.targetId,
-      defence: c.defence,
+      // `beh.gen.read`: a read buys a *reactive* defence, and it outranks the
+      // neutral posture a strike or a step would otherwise hold.
+      defence: st.pendingDefence ?? c.defence,
       moveX: c.moveX,
       moveZ: c.moveZ,
       intentTag: c.intentTag,

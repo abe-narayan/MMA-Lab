@@ -378,3 +378,33 @@ thing they hold fixed.
   converting, against a target of roughly 17–25% per attempt.
 - C-8 (chapter 02 delivers ~half its own force anchor; `seen` is ~1% unseen against
   0.30 designed; `closingSpeedMs` unwired) is likely entangled with the SLpM gap.
+
+---
+
+## Phase 6 findings
+
+**F-1 (fixed): the fighter validator only knew one of three catalogues.**
+Style preferences were checked against chapter 02's striking catalogue alone, so
+every grappling reference in an archetype (`tech.double_leg`,
+`tech.body_lock_lift_return`, `tech.clinch_entry_strikes`, …) was reported as
+dangling — 61 false positives across the 15 archetypes. The validator now checks
+the striking catalogue, chapter 03's action graph and chapter 04's submissions.
+
+**F-2 (fixed): submission families had no representation.**
+The remaining 7 were real: archetypes name a family (`sub.kimura`,
+`sub.arm_triangle`, `sub.triangle`) where the catalogue stores position-specific
+variants (`sub.kimura_guard`, `sub.kimura_half`, …). Forcing an archetype to pick
+one variant would claim its owner only ever attacks from that position, which is
+wrong. `resolveSubmissionFamily()` now expands a family into its members, and an
+exact id resolves to itself, so either vocabulary is valid. Dangling ids: 0.
+
+**F-3 (OPEN, for Phase 7): style preferences are not consumed by the AI.**
+`style.goToSubmissions`, `favouriteTechniques`, `favouriteCombos` and
+`takedownPreferences` are authored, validated and stored, but nothing in
+`src/sim/ai/` reads them — a `grep` for `goToSubmissions` across the sim finds
+only the legacy importer. So a fighter built around the guillotine currently
+hunts it no more often than anyone else, and the creator's style tab has no
+effect on the bout. The plan generator (07 §2.5) is the right consumer: its
+weapon-selection step should seed from these lists before falling back to
+discipline means. Until then the creator over-promises, and that is worth saying
+plainly rather than leaving a user to discover it.

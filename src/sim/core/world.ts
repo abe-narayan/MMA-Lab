@@ -83,6 +83,20 @@ export interface FighterWorldState {
   decisionOffsetMs: number;
   /** Opaque chapter-07 state (plan, intent, opponent model, adjustments). */
   ai: unknown;
+  /**
+   * The 01 §3 tier tells currently in force. 07 writes them at decision time,
+   * 02 and 05 read them at contact time: they are how a catalogue row like
+   * `beh.gen.turn_away` or `beh.gen.eyes_close` reaches the resolution path,
+   * which otherwise only ever saw the scalar composites.
+   */
+  tells: {
+    /** `beh.gen.turn_away` (T0): ms until which the side or back is turned. */
+    backTurnedUntilMs: number;
+    /** `beh.gen.eyes_close` (T0/T1): ms until which the eyes are shut. */
+    eyesShutUntilMs: number;
+    /** Catalogue rule ids that fired for this fighter on the last decision. */
+    rules: readonly string[];
+  };
   /** Short intent id for the HUD and commentary. */
   intentTag: string;
 

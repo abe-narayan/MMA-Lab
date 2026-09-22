@@ -23,7 +23,7 @@
 import type { FighterWorldState, World } from './world';
 import type { Decision, DecisionPolicy } from './policy';
 
-import { MmaPolicy, familyForTechnique } from '../ai';
+import { MmaPolicy, familyForTechnique, guardChoice, tierBehaviourFor } from '../ai';
 import type { LoopModules } from './loop';
 import type { ContactKind, ScheduledContact } from './scheduler';
 import type { PositionId, SubmissionId, TechniqueId } from './ids';
@@ -33,7 +33,8 @@ import {
   BAND_ORDER, DRAWS_PER_STRIKE, arrivalLogit, bandFor, baseDefenceSuccess, defence, guard,
   guardLogit, hasDefence, hasTechnique, passiveBlockP, reachProfile, resolveStrike, skillGapK,
   strikeClasses, technique, TECHNIQUES, totalMs as techniqueTotalMs,
-  type ForceContext, type GuardSpec, type ImpactPosture, type RangeBand, type ResolvedDefence,
+  type ForceContext, type GuardId, type GuardSpec, type ImpactPosture, type RangeBand,
+  type ResolvedDefence,
   type CommitMode, type StrikeResolveInput, type TargetRegion, type TechniqueSpec,
 } from '../striking';
 import {
@@ -170,15 +171,36 @@ function reachOf(f: FighterWorldState) {
 }
 
 /** 01's `style.guardStyle` mapped onto 02's guard catalogue. */
-function guardOf(f: FighterWorldState): GuardSpec {
+function styleGuardOf(f: FighterWorldState): GuardId {
   switch (f.runtime.def.style.guardStyle) {
-    case 'highGuard': return guard('guard.high');
-    case 'philly': return guard('guard.philly');
-    case 'longGuard': return guard('guard.long');
-    case 'peekaboo': return guard('guard.peekaboo');
-    case 'thai': return guard('guard.long');
-    default: return guard('guard.standard');
+    case 'highGuard': return 'guard.high';
+    case 'philly': return 'guard.philly';
+    case 'longGuard': return 'guard.long';
+    case 'peekaboo': return 'guard.peekaboo';
+    case 'thai': return 'guard.long';
+    default: return 'guard.standard';
   }
+}
+
+/**
+ * The posture actually held, not the one on the style sheet.
+ *
+ * 02 §2.4.1's matrix is the largest single defensive term in the arrival
+ * logit, and it was keyed on `style.guardStyle` alone: a white belt covered
+ * exactly as well as a champion and nobody's hands ever came down. 01 §3 has
+ * three rows that own this — `beh.box.hands_at_chest` (T0 guard height -40 %),
+ * `beh.gen.hands_drop_tired` (the fatigue threshold is tier-keyed: f > 0.45 at
+ * T0-T1 against f > 0.75 at T3+) and the `beh.gen.hurt_*` ladder — and this is
+ * where they land.
+ */
+function guardOf(f: FighterWorldState, nowMs: number): GuardSpec {
+  const choice = guardChoice(tierBehaviourFor(f.runtime), {
+    fatigue: f.energy.f,
+    rocked: f.damage.has(S.rocked),
+    turnedAway: nowMs < f.tells.backTurnedUntilMs,
+    styleGuard: styleGuardOf(f),
+  });
+  return guard(choice.guard);
 }
 
 /**
@@ -887,7 +909,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     };
     const attackerSkill = actor.runtime.strikingMean;
     const defenderSkill = target.runtime.strikingMean;
-    const g = guardOf(target);
+    const g = guardOf(target, w.nowMs);
     // A spinning technique arrives with the attacker's back turned: 02 §2.2.4.
     const seen = !spec.flags.includes('spinning');
     const input: StrikeResolveInput = {
@@ -927,6 +949,12 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         defenderBodyHurt: target.damage.has(S.bodyHurt),
         attackerRocked: actor.damage.has(S.rocked),
         defenderMobility: target.damage.caps.movement,
+        // 01 §3 tells, written by 07 at decision time: `beh.gen.turn_away`
+        // (T0 turns his back, absorb 0 for the follow-ups) and
+        // `beh.gen.eyes_close` (T0 0.70 / T1 0.30, "readP = 0 for the
+        // exchange"). Both are defender-side and neither reached 02 before.
+        defenderBackTurned: w.nowMs < target.tells.backTurnedUntilMs,
+        defenderVisionBlocked: w.nowMs < target.tells.eyesShutUntilMs,
         guardLogit: guardLogit(g, spec),
       }),
     };

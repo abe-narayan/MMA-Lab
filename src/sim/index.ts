@@ -45,11 +45,12 @@ export { PARAMS, DEFAULT_PARAMS_HASH, resolveParams, hashParams } from './params
 export type { ParamId, ParamOverrides, ParamSpec, ParamSection, ResolvedParams } from './params';
 
 // ---- ids and catalogues (read-only tables for the UI and the presenter) ----
-export { POSITION_NODES as POSITIONS } from './grappling/graph';
+export { POSITION_NODES as POSITIONS, GRAPPLING_EDGES } from './grappling/graph';
+export type { GrapplingEdge } from './grappling/graph';
 export type { PositionNode } from './grappling/graph';
 export { TECHNIQUES, technique, hasTechnique } from './striking/catalogue';
 export type { TechniqueSpec } from './striking/catalogue';
-export { SUBMISSION_CATALOGUE as SUBMISSIONS } from './submissions/catalogue';
+export { SUBMISSION_CATALOGUE as SUBMISSIONS, resolveSubmissionFamily, isSubmissionReference } from './submissions/catalogue';
 export type { SubmissionSpec } from './submissions/catalogue';
 export { RULESETS, resolveRuleset } from './rules/rulesets';
 export type { Ruleset, RulesetId } from './rules/types';

@@ -27,7 +27,7 @@
 
 import {
   SUB_SKILLS, WEIGHT_CLASS_LIMIT_KG, TIER_SKILL_BANDS, TIER_YEARS_BANDS,
-  hasTechnique, SUBMISSIONS,
+  hasTechnique, SUBMISSIONS, GRAPPLING_EDGES, isSubmissionReference,
   type BodySpec, type BottomPriority, type Build, type CompetitionLevel,
   type CoreDisciplineId, type FighterDefinition, type GuardStyle, type Handedness,
   type HurtBehaviour, type Initiative, type LastResult, type LosingBehaviour,
@@ -600,6 +600,12 @@ function validateWeightCut(cut: unknown, iss: Issues): void {
 }
 
 const SUBMISSION_IDS = new Set(SUBMISSIONS.map((s) => s.id));
+/**
+ * A style preference may name a grappling action as readily as a strike: a
+ * wrestler's favourite technique is a double leg, not a jab. Chapter 03 owns
+ * those ids, so a reference is only dangling when NO catalogue claims it.
+ */
+const GRAPPLING_EDGE_IDS = new Set(GRAPPLING_EDGES.map((e) => e.id));
 
 function validateStyle(style: unknown, iss: Issues): void {
   if (!isObject(style)) {
@@ -692,8 +698,8 @@ function checkTechniqueId(id: unknown, path: string, iss: Issues): void {
     iss.error(path, `"${id}" is not a technique id (expected tech.*, feint.* or def.*)`);
     return;
   }
-  if (id.startsWith('tech.') && !hasTechnique(id)) {
-    iss.warn(path, `"${id}" is not in chapter 02's striking catalogue; it must be a chapter 03 action`);
+  if (id.startsWith('tech.') && !hasTechnique(id) && !GRAPPLING_EDGE_IDS.has(id)) {
+    iss.warn(path, `"${id}" is in neither chapter 02's striking catalogue nor chapter 03's action graph`);
   }
 }
 
@@ -716,8 +722,9 @@ function validateSubmissionList(list: unknown, iss: Issues): void {
       iss.error(path, 'a submission reference must be a non-empty id string');
     } else if (!id.startsWith('sub.')) {
       iss.error(path, `"${id}" is not a submission id (expected sub.*)`);
-    } else if (!SUBMISSION_IDS.has(id)) {
-      iss.warn(path, `"${id}" is not in chapter 04's submission catalogue`);
+    } else if (!isSubmissionReference(id)) {
+      // Families resolve too: `sub.kimura` covers every kimura variant.
+      iss.warn(path, `"${id}" matches no submission or submission family in chapter 04`);
     }
   });
 }

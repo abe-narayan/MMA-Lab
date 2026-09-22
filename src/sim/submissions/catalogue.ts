@@ -2071,3 +2071,28 @@ export function resolveSubmissionId(id: string, fromPos?: string): string {
 export function registerSubmissionIds(): void {
   SUBMISSION_IDS.addAll(SUBMISSION_ID_LIST);
 }
+
+/**
+ * Expand a submission *family* into the catalogue entries that belong to it.
+ *
+ * A fighter's game plan names what they hunt the way a corner would — "he wants
+ * the kimura" — not the position-specific variant the catalogue stores
+ * (`sub.kimura_guard`, `sub.kimura_half`, `sub.kimura_side`,
+ * `sub.kimura_north_south`). Style preferences are authored in the first
+ * vocabulary and resolved into the second here, so an archetype does not have to
+ * pick an arbitrary variant and thereby claim its owner only ever attacks from
+ * one position.
+ *
+ * An exact id resolves to itself, so callers can pass either form.
+ */
+export function resolveSubmissionFamily(id: string): readonly SubmissionSpec[] {
+  const exact = SUBMISSION_CATALOGUE.find((s) => s.id === id);
+  if (exact) return [exact];
+  const prefix = `${id}_`;
+  return SUBMISSION_CATALOGUE.filter((s) => s.id.startsWith(prefix));
+}
+
+/** True when `id` is either a catalogue entry or a family with members. */
+export function isSubmissionReference(id: string): boolean {
+  return resolveSubmissionFamily(id).length > 0;
+}
