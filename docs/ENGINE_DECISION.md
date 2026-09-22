@@ -60,8 +60,12 @@ Stay on TypeScript + Three.js, and make these upgrades (all doable in code):
 3. **Skin shading**: pre-integrated / separable-SSS approximation, dual-lobe specular, sweat as a
    roughness/normal layer that builds over the fight, accumulating damage as decal layers (swelling,
    redness, cuts — subject to the blood on/off setting).
-4. **Animation**: mocap clip library (Mixamo boxing/MMA/wrestling clips + CMU/other openly-licensed
-   sets — every licence recorded in `docs/ASSETS.md`), a motion-matching-lite / blend-tree layer
+4. **Animation**: mocap clip library from redistributable sources only — ACCAD Open Motion Project
+   (CC BY 3.0, has martial-arts stances/kicks/punches), CMU MoCap (boxing category, free to
+   redistribute with acknowledgement), 100STYLE (CC BY 4.0) for fatigue/style locomotion. **Not
+   Mixamo** (its licence forbids standalone redistribution of the files, so they cannot live in this
+   MIT repo), and not LAFAN1 / Bandai Namco / AMASS-SMPL derivatives (non-commercial). Every licence
+   is recorded in `docs/ASSETS.md`. On top: a motion-matching-lite / blend-tree layer
    driven by the sim's action + phase, two-bone and full-body IK for contact (gloves on target, feet
    on mat, hands on the fence, clinch/grappling constraints), and physics-flavoured hit reactions
    and knockdowns (procedural + Rapier ragdoll blend). Skill tiers get separate motion sets/filters
