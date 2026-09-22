@@ -396,8 +396,9 @@ Marcelo Garcia)**, **ten-finger / power guillotine**, **mounted guillotine**,
   bilateral carotid via own shoulder + forearm. **Time to tap once locked:
   3–10 s** (ESTIMATE). Unconsciousness if no tap (≈ 9 s).
 * **Defences:** S0 don't under-hook lazily from bottom half guard, keep the
-  elbow tight; S1 pull the threatened arm out (the "swim"), posture the
-  head up; S2 turn *toward* the attacker (belly-down), keep the trapped
+  elbow tight; stay low at the hip when grabbing a leg [K8]; S1 pull the
+  threatened arm out (the "swim"), posture the head up, or *throw yourself
+  flat to your back before it locks* to force the attacker to post [K8]; S2 turn *toward* the attacker (belly-down), keep the trapped
   shoulder away from the neck ("shoulder to the ear" is death), walk the
   legs toward the attacker; S3 roll through (the "rolling escape") to come
   up on top, or explode to the knees and drive.
@@ -431,7 +432,10 @@ Marcelo Garcia)**, **ten-finger / power guillotine**, **mounted guillotine**,
 
 * **Required positions:** front headlock/turtle where the attacker threads
   the arm *under the neck first* and out under the far armpit (mirror of the
-  D'Arce). Also from a sprawl.
+  D'Arce). Also from a sprawl. Kesting on the brabo/anaconda distinction and
+  shared finishing mechanics [K7]; Evolve: all three arm-triangle-family
+  chokes share one mechanism — attacker's arm on one carotid, opponent's own
+  shoulder on the other, bodyweight seals it [EV4].
 * **Setup:** opponent's head down, near arm exposed; grip = attacker's hand
   on own biceps ("gator" grip), the elbow of the trapped arm pushed into
   the opponent's neck.
@@ -535,7 +539,10 @@ triangle**, **rear triangle from the back**, **flying triangle (§2.31)**,
   Arona out of a triangle (PRIDE, 2004); Matt Hughes slammed Carlos Newton
   out of a triangle at UFC 34 (2001) [W7].
 * **Defences:** S0 posture, both hands in or both out, hands on the hips not
-  the mat; S1 posture up and pull the head out before the lock; S2 "answer
+  the mat (Evolve's five escapes: early elbow-bar across the hip + posture;
+  late post under the armpit, lock hands on the hip, stand and step over;
+  posture with hands on the belly looking at the ceiling; arm under + jump
+  to side control; pull the leg back to closed guard [EV5]); S1 posture up and pull the head out before the lock; S2 "answer
   the phone" (trapped hand grabs own ear/behind own head), keep the head
   facing the trapped arm, drive the shoulder, stack; S3 stack + walk around
   to the trapped-arm side, pass the free arm through, **slam** (legal in
@@ -745,8 +752,10 @@ clinch / whizzer counter)**.
 * **Chains:** Americana ↔ kimura (arm flips), → arm-triangle (arm across),
   → mounted GnP, → armbar from mount (if the defender straightens to escape).
 * **Modifiers:** STR large, FLX of defender large.
-* **Frequency:** ESTIMATE 12–18 UFC finishes all-time (~1 %), heavily
-  early-era; high finish rate on beginners, very low on trained fighters.
+* **Frequency:** not itemised by [FA1]; ESTIMATE 10–15 UFC all-time (~0.7 %),
+  heavily early-era (first: Dan Severn d. Beneteau, UFC 5); high finish rate
+  on beginners, very low on trained fighters. Evolve: if they straighten the
+  arm, switch to the straight armlock [EV3].
   Stage P: S1 0.45, S2 0.40, S3 0.75 → 0.14; vs Elite-tier defenders ≈ 0.03.
 
 ---
@@ -779,8 +788,11 @@ clinch / whizzer counter)**.
   take** (if the opponent rolls and stops on the side), → **gogoplata**
   (rubber guard). Inbound: triangle/armbar failure, opponent's knee-slice.
 * **Modifiers:** FLX very large (hip mobility), LEN.
-* **Frequency:** ESTIMATE 2–4 UFC finishes all-time (≈ 0.2 %); attempt→
-  finish ≈ 3–5 % but sweep success ≈ 40 %.
+* **Frequency:** **2 UFC finishes** [FA1][FT1] (first: Ben Saunders d.
+  Heatherly, 2014); "tricky to set up, slips when sweaty" [BJ1]. Attempt→
+  finish ≈ 3–5 % but sweep success ≈ 40 %. Kesting: the low-angle cartwheel
+  escape lands on top in side control [K5]; every triangle setup is also an
+  omoplata setup [K6].
 * Stage P: S1 0.45, S2 0.35, S3 0.30 → 0.05 as a *submission*; as a *sweep*
   0.45 × 0.85 ≈ 0.40.
 
@@ -896,8 +908,8 @@ clinch / whizzer counter)**.
 * **Chains:** kneebar ↔ heel hook, → toe hold, → straight ankle; failed
   rolling kneebar from top half guard → bottom (positional risk!).
 * **Modifiers:** STR moderate, FLX of defender large (hamstring), SG.
-* **Frequency:** ESTIMATE 20–25 UFC finishes (~1.3 %), e.g., Mir vs Lesnar
-  (2008). Stage P: S1 0.40, S2 0.45, S3 0.80 → 0.14.
+* **Frequency:** **20 UFC finishes (1.2 %)** [FA1] (23 per [FT1]), e.g., Mir vs
+  Lesnar (UFC 81, 2008). Stage P: S1 0.40, S2 0.45, S3 0.80 → 0.14.
 
 ---
 
@@ -923,8 +935,9 @@ clinch / whizzer counter)**.
   opponent turns), → **toe hold**, → single-leg X sweep. Inbound: failed
   heel hook.
 * **Modifiers:** STR moderate, pain tolerance of defender large, FLX.
-* **Frequency:** ESTIMATE 12–18 UFC (~1 %). Stage P: S1 0.50, S2 0.45,
-  S3 0.45 → 0.10.
+* **Frequency:** not itemised by [FA1]; ESTIMATE 8–14 UFC (~0.6 %); "one of
+  the rarest MMA finishes — well defended, low injury threat" [BJ1]. First:
+  Don Frye (UU '96) [WR1]. Stage P: S1 0.50, S2 0.45, S3 0.45 → 0.10.
 
 ---
 
@@ -943,8 +956,9 @@ clinch / whizzer counter)**.
 * **Escapes:** as ankle lock.
 * **Chains:** ↔ heel hook, ↔ ankle lock, ↔ kneebar.
 * **Modifiers:** GRIP large, STR, FLX of defender.
-* **Frequency:** ESTIMATE 5–8 UFC finishes (Mir vs Abbott 2003). Stage P:
-  S1 0.45, S2 0.45, S3 0.70 → 0.14.
+* **Frequency:** **1 UFC finish** (Mir vs Tank Abbott, UFC 41, 2003) [FA1].
+  Stage P: S1 0.45, S2 0.45, S3 0.70 → 0.14 (mechanically sound but almost
+  never *attempted* in MMA).
 
 ---
 
@@ -969,8 +983,10 @@ clinch / whizzer counter)**.
 * **Chains:** ↔ north-south kimura, → arm-triangle, → mount.
 * **Modifiers:** SLIP very large (the worst offender in sweat), STR
   moderate, body size (bigger attacker better).
-* **Frequency:** ESTIMATE 6–10 UFC (≈ 0.5 %). Stage P: S1 0.45, S2 0.45,
-  S3 0.55 → 0.11.
+* **Frequency:** **5 UFC** (0.3 %) [FA1]: Monson d. Hinkle UFC 57 (2006,
+  first); Dvalishvili d. O'Malley UFC 316 [FS3]. Jeff Monson has 17 MMA wins
+  with it; ≈ 7 % of Marcelo Garcia's 55 wins [W8]. Time to LOC ≈ 9.4 s [P4].
+  Stage P: S1 0.45, S2 0.45, S3 0.55 → 0.11.
 
 ---
 
@@ -996,9 +1012,10 @@ clinch / whizzer counter)**.
 * **Chains:** from mount → arm-triangle; from bottom → guillotine when the
   opponent pulls out.
 * **Modifiers:** STR large, SLIP large, GRIP (MMA gloves *help*).
-* **Frequency:** ESTIMATE 3–5 UFC (~0.2 %), 2 by Oleinik (Pesta 2017 first
-  UFC Ezekiel; Albini 2017). Stage P (top): S1 0.40, S2 0.40, S3 0.45 →
-  0.07; (bottom): 0.30 × 0.35 × 0.40 → 0.04.
+* **Frequency:** **5 UFC** (0.3 %) [FA1] by 3 fighters [WO1]; Oleinik d. Pešta
+  (UFC FN 103, Jan 2017, from the bottom of mount, first in UFC) and d.
+  Albini (UFC 224, 2018); Oleinik has 14 career Ezekiel wins. Stage P (top):
+  S1 0.40, S2 0.40, S3 0.45 → 0.07; (bottom): 0.30 × 0.35 × 0.40 → 0.04.
 
 ---
 
@@ -1017,10 +1034,12 @@ clinch / whizzer counter)**.
 * **Escapes:** release → bottom side control (the escape *is* releasing).
 * **Chains:** inbound only from a guillotine. Counter-to-counter: none.
 * **Modifiers:** SG (knowing when to let go), STR of top fighter.
-* **Frequency:** ESTIMATE 6–9 UFC; Jason Von Flue (2006), OSP ×3 (Krylov
-  2016, Okami 2017, Oleksiejczuk 2019). Stage P once the pass is completed
-  with the grip retained: S2 0.60, S3 0.65 → 0.39 (high, because the
-  defender has already made the mistake).
+* **Frequency:** **≈ 8 UFC** (6 to Sep 2019 [SK1] + Menifield d. Cherant UFC
+  260 (2021) + Cory McKenna 2022, first woman): Jason Von Flue d. Karalexis
+  (UFN 3, Jan 2006); Ovince Saint Preux ×4 (record; de Lima and Okami 2017,
+  Oleksiejczuk 2019) [W1][GA1]. Stage P once the pass is completed with the
+  grip retained: S2 0.60, S3 0.65 → 0.39 (high, because the defender has
+  already made the mistake).
 
 ---
 
@@ -1043,8 +1062,9 @@ clinch / whizzer counter)**.
   bottom (30 %), round end (15 %).
 * **Chains:** front headlock → Peruvian necktie ↔ Japanese necktie ↔
   D'Arce ↔ anaconda ↔ guillotine.
-* **Frequency:** ESTIMATE 3–5 UFC (Dollaway 2008). Stage P: S1 0.40, S2 0.45,
-  S3 0.60 → 0.11.
+* **Frequency:** **2 UFC** [FA1] (+1 "Pace choke" variant, TUF 12 Finale 2010):
+  C.B. Dollaway d. Jesse Taylor (Jul 2008, first) and d. Doerksen (UFC 119);
+  Cirkunov d. Crute (2019) [WR1]. Stage P: S1 0.40, S2 0.45, S3 0.60 → 0.11.
 
 ---
 
@@ -1062,7 +1082,8 @@ clinch / whizzer counter)**.
   **Lock→tap 4–10 s**.
 * **Defences:** as D'Arce plus "sit through" toward the attacker's legs.
 * **Chains:** ↔ D'Arce ↔ anaconda ↔ Peruvian.
-* **Frequency:** ESTIMATE 1–3 UFC. Stage P: S1 0.40, S2 0.40, S3 0.60 → 0.10.
+* **Frequency:** ≥ 1 UFC (Matheus Nicolau d. Mesquita, 2015, first) [WR1];
+  not separately tallied. Stage P: S1 0.40, S2 0.40, S3 0.60 → 0.10.
 
 ---
 
@@ -1082,8 +1103,11 @@ clinch / whizzer counter)**.
 * **Escapes:** head out → back take on the attacker (40 %), neutral (60 %).
 * **Chains:** inbound from a scramble/turtle; outbound → **scarf-hold
   (kesa gatame)** positions.
-* **Frequency:** ESTIMATE 2–4 UFC. Stage P: S1 0.35, S2 0.40, S3 0.45 →
-  0.06. Heavily skill-gap dependent (works mostly on beginners).
+* **Frequency:** **≥ 6 UFC** [SK2][WR1]: Rhodes d. Ettish (UFC 2); Newton d.
+  Miletich (UFC 31); Faber and Pennington (UFC 181, 2014); Medeiros "reverse
+  bulldog" (UFC 177); **Ben Askren d. Robbie Lawler (UFC 235, 2019, disputed
+  stoppage)**. Stage P: S1 0.35, S2 0.40, S3 0.45 → 0.06. Heavily skill-gap
+  dependent (works mostly on beginners or in chaotic scrambles).
 
 ---
 
@@ -1106,8 +1130,10 @@ clinch / whizzer counter)**.
   top (40 %).
 * **Chains:** back control (one hook) ↔ twister ↔ **truck** → calf slicer
   (the leg is already in the truck) → RNC when both hooks come in.
-* **Frequency:** 2 UFC (Jung 2011, Mitchell 2019) — hard [Wikipedia fight
-  records]. Stage P: S1 0.30, S2 0.40, S3 0.75 → 0.09.
+* **Frequency:** **4 UFC** [FA1][SK3]: Chan Sung Jung d. Garcia (Mar 2011, R2
+  4:59, first); Bryce Mitchell d. Sayles (Dec 2019); Da'Mon Blackshear d.
+  Johnson (2023); Murtazali Magomedov d. Baghdasaryan (2026, "Scottish
+  twister"). Stage P: S1 0.30, S2 0.40, S3 0.75 → 0.09.
 
 ---
 
@@ -1129,7 +1155,10 @@ clinch / whizzer counter)**.
   by turning in.
 * **Chains:** RNC → neck crank → RNC (hand fighting loop); can opener →
   guard pass; crucifix → crank ↔ shoulder lock ↔ RNC.
-* **Frequency:** ESTIMATE 15–20 UFC (~1 %). Stage P: S1 0.50, S2 0.50,
+* **Frequency:** **22 UFC** logged as "neck crank" [FT1] (~1.3 %); first Tank
+  Abbott d. Jennum (UU '95). Legal in pro MMA, banned in IBJJF/amateur MMA
+  [W9]. Cervical forces in modelled MMA neck manoeuvres are of the same
+  order as whiplash injuries (Kochhar 2005 [P17]). Stage P: S1 0.50, S2 0.50,
   S3 0.35 (vs Advanced) / 0.80 (vs Novice) → 0.09 / 0.20.
 
 ---
@@ -1148,9 +1177,10 @@ clinch / whizzer counter)**.
   pull the head back, push the shin off.
 * **Escapes:** posture → back in guard.
 * **Chains:** omoplata ↔ gogoplata ↔ triangle; mount → mounted gogoplata.
-* **Frequency:** 0 UFC (Diaz–Gomi PRIDE 2007 [overturned]; Aoki–Hansen
-  Shooto 2006; Brad Imes UFC? — ESTIMATE ≤ 1 in UFC). Stage P: S1 0.25,
-  S2 0.35, S3 0.50 → 0.04; FLX gate: attacker FLX ≥ 80/100.
+* **Frequency:** **0 official UFC** [FA1]; Diaz d. Gomi (PRIDE 33, 2007, later
+  NC); Aoki d. Hansen (PRIDE Shockwave, Dec 2006) and a *mounted* gogoplata
+  on Nagata; Brad Imes hit two in a row on regional cards [W10]. Stage P: S1
+  0.25, S2 0.35, S3 0.50 → 0.04; FLX gate: attacker FLX ≥ 80/100.
 
 ---
 
@@ -1168,8 +1198,9 @@ clinch / whizzer counter)**.
 * **Defences:** straighten the leg early; turn toward the attacker.
 * **Escapes:** leg freed → back control retained by the attacker (70 %).
 * **Chains:** truck ↔ twister ↔ calf slicer; 411 → calf slicer.
-* **Frequency:** ESTIMATE 1–2 UFC (Oliveira–Elkins 2013 first). Stage P:
-  S1 0.35, S2 0.45, S3 0.65 → 0.10.
+* **Frequency:** **3 UFC** to Jun 2026 [FA1], 4 with Valter Walker d. Petersen
+  (Jul 2026): Oliveira d. Eric Wisely (Jan 2012, first); Brett Johns d. Soto
+  (2017) [WV1]. Stage P: S1 0.35, S2 0.45, S3 0.65 → 0.10.
 
 ---
 
@@ -1230,8 +1261,11 @@ clinch / whizzer counter)**.
   air — slams are the norm) or drop to the knees to stack.
 * **Escapes:** attacker lands in guard (60 %), slammed → bottom + damage
   (25 %), lock finishes (15 %).
-* **Frequency:** ESTIMATE ≤ 5 UFC. Stage P: S1 0.30, S2 0.35, S3 0.55 →
-  0.06; slam risk on failure 0.40 with damage.
+* **Frequency:** flying triangle **3 UFC** [FA1]; flying armbars logged as
+  "armbar": Demetrious Johnson d. Ray Borg (UFC 216, suplex-to-armbar);
+  outside UFC: Rumina Sato d. Taylor (Shooto, 6 s), Namajunas d. Catron
+  (12 s), Waterson d. Califano (15 s) [BJ6]. Stage P: S1 0.30, S2 0.35, S3
+  0.55 → 0.06; slam risk on failure 0.40 with damage.
 
 ---
 
@@ -1245,8 +1279,9 @@ higher than the guard versions.
 ### 2.29 Suloev stretch (for completeness)
 
 From back control: the attacker grabs the opponent's ankle and pulls it up
-toward the shoulder, hyper-extending the hamstring/hip. Rare (Zabit vs
-Davis 2018, UFC). Stage P: S1 0.25, S2 0.40, S3 0.60 → 0.06; chains from
+toward the shoulder, hyper-extending the hamstring/hip. Three in UFC [FA1]: Kenny Robertson d.
+Jardine (UFC 157, 2013, first); Sterling d. Stamann and Zabit d. Davis (both
+UFC 228, 2018). Stage P: S1 0.25, S2 0.40, S3 0.60 → 0.06; chains from
 back control and into back control.
 
 ### 2.30 Banana split / electric chair / other rare positions
@@ -1369,9 +1404,19 @@ Grappling skill 0–100 ("SUB" attack / "SUBDEF" defence attributes).
 
 Real-world anchors for the tiers:
 
-* UFC 1993–1997 (Untrained/Novice grapplers vs BJJ black belts) — ESTIMATE
-  35–45 % of fights ended by submission, vs 17 % modern [G1][P1]. That is
-  roughly a **2.2–2.6× multiplier** for extreme skill gaps.
+* UFC 1993–1996 (Untrained/Novice grapplers vs BJJ black belts) — ESTIMATE
+  40–50 % of fights ended by submission (1993–2002 ≈ 30 % [RR1]; 1994–2004
+  finish rate 74 % [G1]), vs ~18 % modern [G1][P1][MS1]. That is roughly a
+  **2.2–2.6× multiplier** for extreme skill gaps.
+* Judo world championships (Sasaki 2022 [P9]) show the *age/experience*
+  gradient inside a single elite sport: chokes end 6.0 % of cadet bouts vs
+  3.0 % of senior bouts, and of those choke finishes **18.9 % of cadets go
+  unconscious vs 4.3 % of seniors** — experienced athletes tap earlier and
+  defend earlier. Use this 4× LOC-ratio as the Novice→Elite `stubbornness`
+  scaling (Novice 0.19, Advanced 0.11, Elite 0.05 unless a "refuses to
+  tap" trait is set).
+* Hinz 2021 [P15]: 10 % of injured BJJ athletes report changing behaviour
+  by tapping earlier — injury history lowers `stubbornness`.
 * Modern champions who were never submitted across long careers (GSP, Jon
   Jones, Khabib, Volkanovski, Usman) vs those submitted repeatedly early in
   their careers illustrate the Elite tier's "S0 denial".
@@ -1415,9 +1460,14 @@ stated; clamp final P to [0.01, 0.97].
    *defender's* effective SUBDEF before rule 5 (or equivalently divide P).
 7. **Time-to-tap.** Once S3 succeeds, draw `t_tap` uniformly from the
    technique's lock→tap range (§2). Blood chokes: if the defender's
-   `stubbornness` roll succeeds (default p 0.11 [P2]) the fighter does not
-   tap and goes unconscious at `t_out ~ Normal(9 s, 2 s)` clamped [5, 13]
-   [P2][W1]; referee stops on unconsciousness (+1–2 s). Joint locks: if
+   `stubbornness` roll succeeds (default p 0.11 [P2]; tier-scaled per §4:
+   Novice 0.19, Elite 0.05) the fighter does not tap and goes unconscious
+   at `t_out ~ Normal(9.0 s, 1.5 s)` clamped [6, 13] [P4]; per-technique
+   means: arm-triangle 7.2, RNC 8.9, standard guillotine 8.9, N-S 9.4,
+   triangle 9.5, arm-in guillotine 10.2 s [P4][W3–W6]; referee stops on
+   unconsciousness (+1–2 s). If the hold persists ≥ 4 s past LOC, flag
+   `post_LOC_symptoms` (convulsion/staggering, p 0.6) [P9] — cosmetic in the
+   sim, but useful for commentary and for a `recovery_time` field. Joint locks: if
    the defender does not tap (Untrained `no_tap`, or `stubbornness` ×
    0.5), an **injury event** fires at `t_tap + 1 s` with severity: heel
    hook/kneebar/twister = high, armbar/kimura = high, americana/toe hold/
@@ -1515,10 +1565,12 @@ stated; clamp final P to [0.01, 0.97].
     * 17 % ± 2 of bouts end by submission for an Advanced-vs-Advanced
       roster; 35–45 % for Elite-vs-Novice cards.
     * 11 % of choke finishes end in unconsciousness rather than a tap.
-    * ~27 % of all finishes (KO+sub) occur in round 1 for subs as for KOs
-      [G1 gives 27.3 % of all fights ending in R1]; subs should not be
-      front-loaded more than KOs — ESTIMATE ~45 % R1 / 30 % R2 / 25 % R3+
-      of submission finishes.
+    * Round split of submission finishes: **R1 51 % / R2 32 % / R3 16 % /
+      R4–5 1.5 %** [FA2] (3-round fights dominate the sample; for 5-round
+      bouts ESTIMATE R1 40 / R2 25 / R3 15 / R4 12 / R5 8).
+    * RNC share of subs should rise with the era/meta setting: 16 % (2003-04
+      meta) → 47 % (2023-24 meta) [MD1]; back control should be the
+      finishing context for ~45 % of submissions in the modern meta.
 26. **Logging.** Record `technique`, `variant`, `stage_reached`, `time_in_stage`,
     `chain_path`, `outcome` (tap / unconscious / injury / escape /
     round_end / abandoned), and `end_position` so the tuning script can
@@ -1530,35 +1582,143 @@ stated; clamp final P to [0.01, 0.97].
 
 ### 6.1 Sources
 
+Companion appendices in this directory (raw sub-agent compilations that
+this document distils): `SUBMISSION_FINISH_DATA.md` (tallies by technique,
+year, division, round; rare-submission instances; conflicts between
+sources), `SUBMISSION_PHYSIOLOGY_DATA.md` (choke physiology, joint-lock
+pathology, tap/stoppage rules, refused-tap cases) and
+`SUBMISSION_COACHING_SOURCES.md` (per-technique coaching URLs with one-line
+claims and fact corrections).
+
+**Statistics / tallies**
+
 | Key | Source | URL |
 |---|---|---|
-| [G1] | GrapplerHQ, "UFC Statistics: Finish Rates & Fight Trends, 1994–2026 (8,591 bouts)", UFCStats-derived | https://www.grapplerhq.com/mma/ufc-statistics/ |
-| [P1] | Fares MY et al., "Exploring submission finishes in the UFC: a comprehensive analysis", *J Sports Med Phys Fitness* 2025; DOI 10.23736/S0022-4707.25.16585-7; PMID 40100224 | https://pubmed.ncbi.nlm.nih.gov/40100224/ |
-| [P2] | Stellpflug SJ et al., "Analysis of the fight-ending chokes in the history of the UFC", 2020; PMID 33347362; summarised by Combat Sports Law | https://combatsportslaw.com/2020/12/26/physician-reviews-and-analyzes-all-choke-submissions-in-ufc-history/ |
-| [P3] | Scoggin JF et al., "Assessment of injuries during Brazilian jiu-jitsu competition", *Orthop J Sports Med* 2014;2(2) — elbow via armbar the most common competition injury | https://journals.sagepub.com/doi/10.1177/2325967114522184 |
-| [W1] | Wikipedia, "Chokehold" — mean ≈ 9 s to unconsciousness; air vs blood chokes | https://en.wikipedia.org/wiki/Chokehold |
-| [W2] | Wikipedia, "Leglock" — heel hook mechanics/injury, kneebar, ankle lock, toe hold, calf slicer, Suloev stretch | https://en.wikipedia.org/wiki/Leglock |
+| [G1] | GrapplerHQ (UFC-DataLab), "UFC Statistics: Finish Rates & Fight Trends, 1994–2026 (8,591 bouts)" | https://www.grapplerhq.com/mma/ufc-statistics/ |
+| [FA1] | FightAlpha, "Most common UFC submissions" (UFCStats-derived, 8,745 fights, 1,695 subs, to 20 Jun 2026; itemised long tail) | https://fightalpha.com/articles/most-common-ufc-submissions |
+| [FA2] | FightAlpha, "Fastest and latest UFC submissions" (round split of 1,692 subs) | https://fightalpha.com/articles/fastest-latest-ufc-submissions |
+| [FT1] | fight.tv, "The best UFC submissions according to UFC data" (UFCStats, to Mar 2025; neck crank 22, kneebar 23, heel hook 20) | https://www.fight.tv/post/the-best-ufc-submissions-according-to-ufc-data-a-deep-dive |
+| [MS1] | MMA.SOCIAL, "UFC finish rate statistics" (per-year 2010–2026 and per-division KO/sub/dec) | https://mma.social/stats/finish-rates |
+| [WR1] | Wikipedia, "List of UFC records" (sub-attempt records, most sub wins, first-ever submissions table, fastest/latest) | https://en.wikipedia.org/wiki/List_of_UFC_records |
+| [MD1] | MDPI *Applied Sciences* 2026, 16, 2034 — 906 bouts across 2003-04 / 2013-14 / 2023-24: RNC share of subs 15.8 % → 46.8 %; back control 45.5 % of finishing contexts | https://www.mdpi.com/2076-3417/16/4/2034 |
 | [M1] | MMAHive, "UFC Submission Statistics: Year Averages & Top Records" | https://www.mmahive.com/ufc-submission-statistics/ |
-| [A1] | AgentMMA, "What counts as a UFC submission attempt? (FightMetric definition; Oliveira 51 att/17 wins; Miller 52/14)" | https://agentmma.com/mma-lab/ufc-submission-attempts-explained |
+| [A1] | AgentMMA, "What counts as a UFC submission attempt?" (FightMetric definition; Oliveira 51/17; Miller 52/14) | https://agentmma.com/mma-lab/ufc-submission-attempts-explained |
 | [C1] | CageQuant, "How to read UFC fighter stats" — median Sub Avg 0.6; Oliveira 2.6 | https://www.cagequant.com/learn/ufc-fighter-stats-explained |
-| [F1] | FightEncyclopedia, "Top 10 most effective submissions by success rate" (UFC Stats 2024 shares; ADCC 2022 heel hook ≈ 31 %; guillotine ≈ 9.5 % per attempt) | https://fightencyclopedia.com/blog/blog-top-10-most-effective-submissions-by-success-rate |
-| [N1] | Nate Latshaw (UFCStats scrape, 2024): top-5 subs ≈ 82 %, 24+ other types ≈ 18 % | https://x.com/NateLatshaw/status/1809211879908356552 |
-| [FM1] | Fight Matrix, "How fights actually end: finish rates by weight class" (2026) | https://www.fightmatrix.com/2026/07/31/how-fights-actually-end-finish-rates-by-weight-class/ |
-| [FO1] | Fightomic, "UFC finish rates by weight class" (FLW sub 22.0 %, BW 19.5 %, HW 14.4 %) | https://fightomic.com/ufc-finish-rates-by-weight-class/ |
-| [E1] | ESPN (2018), "How MMA fights end: submission victories way down" | https://africa.espn.com/mma/story/_/id/22277062/how-mma-fights-end-submission-victories-way-down |
+| [F1] | FightEncyclopedia, "Top 10 most effective submissions by success rate" (guillotine ≈ 9.5 % per attempt in grappling) | https://fightencyclopedia.com/blog/blog-top-10-most-effective-submissions-by-success-rate |
+| [N1] | Nate Latshaw (UFCStats scrape, Jul 2024): top-5 subs ≈ 82 % | https://x.com/NateLatshaw/status/1809211879908356552 |
+| [FM1] | Fight Matrix, "How fights actually end: finish rates by weight class" (Jul 2026) | https://www.fightmatrix.com/2026/07/31/how-fights-actually-end-finish-rates-by-weight-class/ |
+| [FO1] | Fightomic, "UFC finish rates by weight class" | https://fightomic.com/ufc-finish-rates-by-weight-class/ |
+| [FC1] | FightsInCage, "Round of finish by year" (4,643 finishes to Sep 2026) | https://www.fightsincage.com/insights/round-of-finish-by-year |
+| [E1] | ESPN (2018), "How MMA fights end: submission victories way down" | https://www.espn.com/mma/story/_/id/22277062/how-mma-fights-end-submission-victories-way-down |
+| [RR1] | Ringside Report, "Most popular submissions in MMA" (1993–2002 ≈ 30 % subs) | https://ringsidereport.net/most-popular-submissions-in-MMA/ |
 | [S1] | Sportslyx UFC statistics (female 21.1 % vs male 17.3 % sub rate) | https://www.sportslyx.com/stats/ufc |
-| [EV1] | Evolve MMA, "The most common submissions in MMA" | https://evolve-mma.com/blog/the-most-common-submissions-in-mma/ |
-| [D1] | Danaher / BJJ Fanatics back-attack and front-headlock systems (coaching consensus; instructional catalogue) | https://bjjfanatics.com/ |
-| [D2] | Danaher, "Enter the System: Leg Locks" (knee-line control precedes the heel) | https://bjjfanatics.com/ |
-| [K1] | Grapplearts (Stephan Kesting) — RNC escape to the choking-arm side, guillotine defence | https://www.grapplearts.com/ |
-| [L1] | Lachlan Giles / Submeta — heel hook defence: hide the heel, clear the knee line | https://submeta.io/ |
-| [CJ1] | Craig Jones — leg entanglement systems (coaching consensus) | https://bjjfanatics.com/ |
-| [JS1] | Jack Slack — MMA grappling analyses (guillotine-from-sprawl, why leg locks are rare in MMA) | https://jackslack.substack.com/ |
-| [RH1] | Ryan Hall — Imanari roll / 50-50 heel hooks in MMA (interviews, TUF 22) | https://en.wikipedia.org/wiki/Ryan_Hall_(fighter) |
+| [SK1] | Sportskeeda — von Flue tally (6 to Sep 2019) | https://www.sportskeeda.com/mma/the-best-and-worst-from-ufc-fight-night-160-hermansson-vs-cannonier/3 |
+| [SK2] | Sportskeeda, "5 rarest finishes in UFC history" (bulldog choke instances) | https://sportskeeda.com/mma/5-rarest-finishes-ufc-history |
+| [SK3] | Sportskeeda, "How many times has the twister ended a UFC fight" | https://www.sportskeeda.com/mma/news-how-many-times-twister-submission-ended-ufc-fight |
+| [SK4] | GroundedMMA / Sportskeeda (Reddit u/sjstell UFC choke tally to end-2022; 40 RNC and 13 arm-triangle victims went unconscious) | https://groundedmma.com/most-common-submissions-in-mma-ufc/ |
+| [WV1] | Wikipedia, "Valter Walker" (four straight heel hooks 2024–25; calf slicer Jul 2026) | https://en.wikipedia.org/wiki/Valter_Walker |
+| [WO1] | Wikipedia, "Aleksei Oleinik" (Ezekiel from bottom of mount, first in UFC) | https://en.wikipedia.org/wiki/Aleksei_Oleinik |
+| [BH1] | BJJ Heroes, "ADCC 2024 aftermath: data compilation" (53 subs / 125 matches; leg locks 22 %; heel hooks 7.5 %) | https://www.bjjheroes.com/editorial/adcc-2024-after-math-data-compilation-and-analysis |
+| [BH2] | BJJ Heroes, "ADCC 2022 aftermath" (leg locks 23 % of subs vs <8 % in 2009) | https://www.bjjheroes.com/editorial/adcc-2022-after-math-data-compliation-and-analysis |
+| [BJ3] | BJJEE, "Every heel hook finish in UFC history 1993–2020" | https://www.bjjee.com/articles/every-heel-hook-finish-in-ufc-history-from-1993-to-2020/ |
 
-(D1, D2, K1, L1, CJ1, JS1 are catalogue/home URLs; the session's search
-budget was exhausted before individual article URLs could be re-verified.
-Claims attributed to them are standard, widely published coaching positions.)
+**Peer-reviewed physiology / injury**
+
+| Key | Source | URL |
+|---|---|---|
+| [P1] | Fares MY et al., "Exploring submission finishes in the UFC", *J Sports Med Phys Fitness* 2025;65(8):1022-9; PMID 40100224 | https://pubmed.ncbi.nlm.nih.gov/40100224/ |
+| [P2] | Stellpflug SJ et al., "Analysis of the fight-ending chokes in the history of the UFC", *Phys Sportsmed* 2022; PMID 33347362 (904 chokes; 11 % LOC) | https://combatsportslaw.com/2020/12/26/physician-reviews-and-analyzes-all-choke-submissions-in-ufc-history/ |
+| [P3] | Scoggin JF et al., "Assessment of injuries during BJJ competition", *Orthop J Sports Med* 2014 (5,022 exposures; armbar = 10/14 elbow injuries; 1 choke injury) | https://pmc.ncbi.nlm.nih.gov/articles/PMC4555620/ |
+| [P4] | Stellpflug SJ et al., "Time to unconsciousness from sportive chokes in fully resisting highly trained combatants", *Int J Perform Anal Sport* 2020;20(4):720-8 (9.0 s mean, CI 8.3–9.9; per-type 6.2–10.5 s) | https://doi.org/10.1080/24748668.2020.1780873 |
+| [P5] | Fares MY et al., "Upper-limb joint submissions in the UFC", *J Sports Med Phys Fitness* 2026; PMID 42484431 (97 upper-limb subs; armbar 67 %; women 3.03×; 7/80 serious injuries; time-to-sub rising) | https://pubmed.ncbi.nlm.nih.gov/42484431/ |
+| [P6] | Mitchell JR et al., "Physiological response to vascular neck restraint", *J Appl Physiol* 2012;112:396-402; PMID 22096121 (LOC 9.5 ± 0.4 s; MCA velocity −80 %; recovery ~2 s) | https://pubmed.ncbi.nlm.nih.gov/22096121/ |
+| [P7] | Rossen R, Kabat H, Anderson JP, "Acute arrest of cerebral circulation in man", *Arch Neurol Psychiatry* 1943;50:510-28 (cuff occlusion, LOC ≈ 6.5 s) | https://litfl.com/wp-content/uploads/2019/09/Rossen-1943-Acute-Arrest-of-Cerebral-Circulation-in-Man.pdf |
+| [P8] | Koiwai EK, "Deaths allegedly caused by the use of choke holds (shime-waza)", *J Forensic Sci* 1987;32:419-32; PMID 3572335 (LOC 10–20 s; recovery 10–20 s; carotid needs ~1/6 the pressure of the airway) | https://judoinfo.com/chokes6/ |
+| [P9] | Sasaki et al., *J Sci Med Sport* 2022; PMID 36167661 (7,426 judo world-championship bouts; LOC in 18.9 % cadet / 4.3 % senior choke finishes; ≥ 4 s post-LOC hold predicts convulsions) | https://pubmed.ncbi.nlm.nih.gov/36167661/ |
+| [P10] | Piekarski, Kreiswirth et al., *Sports Health* 2026; PMID 41549501 (IBJJF heel-hook-legal divisions: knee injury RR 12.0) | https://pubmed.ncbi.nlm.nih.gov/41549501/ |
+| [P11] | Stellpflug SJ et al., "Cervical artery injury from sportive chokes", *J Emerg Med* 2022;63:49-57; PMID 35934648 (10 cases: 5 carotid, 3 vertebral dissections) | https://pubmed.ncbi.nlm.nih.gov/35934648/ |
+| [P12] | Singerman et al., *OTO Open* 2026; PMID 42256725 (laryngopharyngeal symptoms after chokes; hyolaryngeal fractures) | https://pmc.ncbi.nlm.nih.gov/articles/PMC13238923/ |
+| [P13] | Hasegawa et al., "Common grappling submissions: anatomic structures at risk and pathophysiology", *Hawaii J Health Soc Welf* 2026; PMID 42245247 | https://pmc.ncbi.nlm.nih.gov/articles/PMC13233104/ |
+| [P14] | Almeida et al., "MRI of elite BJJ fighters injured by armbar", *Acta Ortop Bras* 2017;25:209-11 (UCL 100 %, flexor tendon 100 %) | https://pmc.ncbi.nlm.nih.gov/articles/PMC5608741/ |
+| [P15] | Hinz et al., *Orthop J Sports Med* 2021 (1,140 BJJ athletes; 246 submission-inflicted injuries: armbar 55, kimura 31, heel hook 27, triangle 19, toe hold 14, ankle lock 8, RNC 8) | https://pmc.ncbi.nlm.nih.gov/articles/PMC8721390/ |
+| [P16] | Baker et al., *Knee Surg Sports Traumatol Arthrosc* 2010; PMID 19629437 (MMA heel hook: ACL + MCL rupture) | https://pubmed.ncbi.nlm.nih.gov/19629437/ |
+| [P17] | Kochhar et al., "Risk of cervical injuries in MMA", *Br J Sports Med* 2005; PMID 15976168 | https://pubmed.ncbi.nlm.nih.gov/15976168/ |
+| [P18] | Mańka-Malara et al., *J Clin Med* 2025 (2,488 UFC fights; 18.7 % subs; chokes 68.6 %) | https://pmc.ncbi.nlm.nih.gov/articles/PMC12610064/ |
+| [P19] | Stellpflug SJ et al., "Safety of sportive chokes" survey, 2020; PMID 32271638 (4,307 grapplers; 27.8 % choked unconscious at least once; 0.05 % ongoing symptoms) | https://pubmed.ncbi.nlm.nih.gov/32271638/ |
+| [P20] | Kreiswirth et al., *J Athl Train* 2014 (World No-Gi 2009: 24.9 joint injuries / 1,000 AE; knee 7.5, elbow 7.5) | https://pmc.ncbi.nlm.nih.gov/articles/PMC3917302/ |
+| [P21] | Lystad et al., meta-analysis of MMA injuries 2014 (228.7 / 1,000 AE; KO bouts > 2× the injuries of submission bouts) | https://pmc.ncbi.nlm.nih.gov/articles/PMC4555522/ |
+
+**Coaching / analysis / encyclopaedic**
+
+| Key | Source | URL |
+|---|---|---|
+| [D1] | BJJ Fanatics — "The perfect rear naked choke with John Danaher" | https://bjjfanatics.com/blogs/news/the-perfect-rear-naked-choke-with-john-danaher |
+| [D1b] | BJJ Fanatics — "Basics of Danaher's back system" (seatbelt elbow placement; diagonal control; low-energy hand fighting) | https://bjjfanatics.com/blogs/news/basics-of-john-danaher-s-back-system |
+| [D1c] | BJJ Fanatics — Danaher "Straight Jacket" control to RNC | https://bjjfanatics.com/blogs/news/danaher-straight-jacket-control-to-a-rear-naked-choke |
+| [D2] | BJJ Fanatics — Danaher "Leglocks: Enter the System" (8 volumes: inside position, ashi variants, breaking mechanics) | https://bjjfanatics.com/products/leglocks-enter-the-system-by-john-danaher |
+| [D3] | BJJ Fanatics — "Arm-in guillotine vs high-elbow guillotine (Marcelotine)" | https://bjjfanatics.com/blogs/news/arm-in-guillotine-vs-high-elbow-guillotine-marcelotine |
+| [L1] | BJJ Fanatics — "Keep the knee line and dominate the legs with Lachlan Giles" | https://bjjfanatics.com/blogs/news/keep-the-knee-line-and-dominate-the-legs-with-lachlan-giles |
+| [L2] | BJJ Fanatics — "Capture the heel hook from 50/50 with Lachlan Giles" | https://bjjfanatics.com/blogs/news/capture-the-heel-hook-from-50-50-with-lachlan-giles |
+| [CJ1] | BJJ Fanatics — "Learn how to heel hook like Craig Jones" | https://bjjfanatics.com/blogs/news/learn-how-to-heel-hook-like-craig-jones |
+| [K1] | Grapplearts (Kesting) — "How to defend and escape the rear naked choke" | https://www.grapplearts.com/how-to-defend-and-escape-the-rear-naked-choke/ |
+| [K2] | Grapplearts — "Strong side / weak side guillotine" | https://www.grapplearts.com/strong-weak-side-guillotine-choke/ |
+| [K2b] | Grapplearts — "The guillotine choke: ultimate guide" (variants; guillotine as a control position) | https://www.grapplearts.com/guillotine-choke/ |
+| [K2c] | Grapplearts — standing guillotine escapes | https://www.grapplearts.com/standing-guillotine-choke-escapes/ |
+| [K3] | Grapplearts — "How to finish the armbar against a resisting opponent" (~20 grip breaks) | https://www.grapplearts.com/how-to-finish-the-armbar-against-a-resisting-opponent/ |
+| [K4] | Grapplearts — "5 kimura counters" | https://www.grapplearts.com/5-kimura-counters/ |
+| [K4b] | Grapplearts — "Taking the back from half guard using the kimura grip" | https://www.grapplearts.com/taking-the-back-from-half-guard-using-the-kimura-grip/ |
+| [K5] | Grapplearts — "The best omoplata defense" (low-angle cartwheel) | https://www.grapplearts.com/the-best-omoplata-defense/ |
+| [K6] | Grapplearts — "Every triangle choke setup is also an omoplata setup" | https://www.grapplearts.com/every-triangle-choke-setup-is-also-an-omoplata-setup/ |
+| [K7] | Grapplearts — "The difference between the brabo choke and the anaconda choke" | https://www.grapplearts.com/the-difference-between-the-brabo-choke-and-the-anaconda-choke-plus-tips-for-both/ |
+| [K8] | Grapplearts — "Brabo choke defense" | https://www.grapplearts.com/brabo-choke-defense/ |
+| [K9] | Grapplearts — "Leglocks in MMA: some lessons" (Palhares, Imanari) | https://www.grapplearts.com/leglocks-in-mma-some-lessons-for-the-rest-of-us/ |
+| [K10] | Grapplearts — "How to get started with leglocks" (five positions; 50/50 = mutual access; 411 = best control) | https://www.grapplearts.com/how-to-get-started-with-leglocks/ |
+| [K11] | Grapplearts — "Frank Mir's kimura on Nogueira at UFC 140" | https://www.grapplearts.com/frank-mirs-kimura-on-antonio-rodrigo-nogueira-at-ufc-140/ |
+| [GA1] | Grapplearts — "How to do the von Flue choke" | https://www.grapplearts.com/how-to-do-the-von-flue-choke/ |
+| [EV1] | Evolve MMA — "The most common submissions in MMA" | https://evolve-mma.com/blog/the-most-common-submissions-in-mma/ |
+| [EV2] | Evolve MMA — "What is the hitchhiker escape" | https://evolve-mma.com/blog/what-is-the-hitchhiker-escape-in-bjj/ |
+| [EV3] | Evolve MMA — "BJJ 101: the Americana" | https://evolve-mma.com/blog/bjj-101-the-americana/ |
+| [EV4] | Evolve MMA — "3 arm triangle variations" (kata gatame / D'Arce / anaconda shared mechanics) | https://evolve-mma.com/blog/3-arm-triangle-variations-you-need-in-your-bjj-arsenal/ |
+| [EV5] | Evolve MMA — "5 must-know triangle escapes" | https://evolve-mma.com/blog/5-must-know-triangle-escapes-for-your-bjj-game/ |
+| [EV6] | Evolve MMA — "How to escape the rear naked choke" (two-on-one from the moment the back is taken) | https://evolve-mma.com/blog/how-to-escape-the-rear-naked-choke/ |
+| [EV7] | Evolve MMA — "BJJ 101: the guillotine choke" (defence: arm over the shoulder, shoulder pressure, hip-rotate) | https://evolve-mma.com/blog/bjj-101-the-guillotine-choke/ |
+| [EV8] | Evolve MMA — "The advanced and complete guide to the BJJ heel hook" / "BJJ leg lock escape guide" | https://evolve-mma.com/blog/the-advanced-and-complete-guide-to-the-bjj-heel-hook/ ; https://evolve-mma.com/blog/the-bjj-leg-lock-escape-guide/ |
+| [EV9] | Evolve MMA — "Japanese necktie" | https://evolve-mma.com/blog/heres-how-to-do-the-japanese-necktie-in-bjj/ |
+| [EV10] | Evolve MMA — "The best no-gi chokes every MMA fighter should master" (why chokes dominate MMA) | https://evolve-mma.com/blog/the-best-no-gi-chokes-that-every-mma-fighter-should-master/ |
+| [FS1] | FightScience — "Rear naked choke guide" (critical 15 s of grip stripping; gloves; GnP forces the turn) | https://fightscience.com/guides/rear-naked-choke-guide |
+| [FS2] | FightScience — "Triangle choke setup system" (defences; Paul Craig record; chains) | https://fightscience.com/guides/triangle-choke-setup-system |
+| [FS3] | FightScience — "North-south choke guide" (Dvalishvili vs O'Malley UFC 316) | https://fightscience.com/guides/north-south-choke-bjj-guide |
+| [FS4] | FightScience — "Kimura technique guide" (kimura trap: the grip is the constant through transitions) | https://fightscience.com/guides/kimura-technique-guide |
+| [BJ1] | BJJEE — "The rarest and most difficult submissions in MMA" (omoplata, ankle lock) | https://www.bjjee.com/articles/these-are-the-rarest-and-the-most-difficult-submissions-in-mma/ |
+| [BJ2] | BJJEE — Khabib escaping Makhachev's modified arm triangle | https://www.bjjee.com/articles/khabib-shows-how-to-escape-makhachevs-modified-arm-triangle/ |
+| [BJ4] | BJJEE — "Danaher debunks the claim that leglocks don't work in MMA" | https://www.bjjee.com/articles/john-danaher-debunks-the-claim-that-leglocks-dont-work-in-mma/ |
+| [BJ5] | BJJEE — "Danaher explains why chokes are superior to heel hooks" | https://www.bjjee.com/articles/john-danaher-explains-why-chokes-are-superior-to-heel-hooks/ |
+| [BJ6] | BJJEE — "Best flying armbar finishes in BJJ and MMA history" | https://www.bjjee.com/articles/the-best-flying-armbar-finishes-in-bjj-and-mma-history/ |
+| [BJ7] | BJJEE — "Building your whole grappling game around the kimura trap system" (David Avellan) | https://www.bjjee.com/articles/building-your-whole-grappling-game-around-the-kimura-trap-system/ |
+| [BJ8] | BJJEE — "Reasons for sport jiu-jitsu's recent failure in MMA" (67 % of UFC sub wins are chokes vs 39 % leg locks at ADCC) | https://www.bjjee.com/videos/reasons-for-sport-jiu-jitsus-recent-failure-in-mma/ |
+| [BJ9] | BJJEE — "MMA fighter gets KO'd after slam following armbar attempt" | https://www.bjjee.com/articles/watch-mma-fighter-gets-kod-after-slam-following-armbar-attempt/ |
+| [DG1] | Digitsu technique logs (comp finishes: triangle 664, guillotine 256, short choke 7) | https://digitsu.com/t/triangle-choke ; https://digitsu.com/t/guillotine-choke |
+| [MU1] | MMASucka — "Guillotine choke: the complete guide" (Mir–Kongo UFC 107, Ortega–Swanson standing guillotine) | https://mmasucka.com/guides/guillotine-choke-the-complete-guide/ |
+| [W1] | Wikipedia, "Chokehold" (≈ 9 s; von Flue aka "Saint Preux choke", OSP 4 wins) | https://en.wikipedia.org/wiki/Chokehold |
+| [W2] | Wikipedia, "Leglock" | https://en.wikipedia.org/wiki/Leglock |
+| [W3] | Wikipedia, "Rear naked choke" (figure-four vs palm-to-palm; 8.9 s) | https://en.wikipedia.org/wiki/Rear_naked_choke |
+| [W4] | Wikipedia, "Guillotine choke" (arm-in 10.2 s; Adesanya on positional cost) | https://en.wikipedia.org/wiki/Guillotine_choke |
+| [W5] | Wikipedia, "Arm triangle choke" (7.2 s) | https://en.wikipedia.org/wiki/Arm_triangle_choke |
+| [W6] | Wikipedia, "Triangle choke" (9.5 s; slams permitted in MMA) | https://en.wikipedia.org/wiki/Triangle_choke |
+| [W7] | Wikipedia, "Rampage Jackson" / "Matt Hughes" (triangle slams) | https://en.wikipedia.org/wiki/Rampage_Jackson ; https://en.wikipedia.org/wiki/Matt_Hughes_(fighter) |
+| [W8] | Wikipedia, "North–south choke" (9.4 s; Monson; Marcelo Garcia) | https://en.wikipedia.org/wiki/North%E2%80%93south_choke |
+| [W9] | Wikipedia, "Neck crank" (twister/can opener; legality) | https://en.wikipedia.org/wiki/Neck_crank |
+| [W10] | Wikipedia, "Gogoplata" / "Shinya Aoki" | https://en.wikipedia.org/wiki/Gogoplata ; https://en.wikipedia.org/wiki/Shinya_Aoki |
+| [W11] | Wikipedia, "Strangling" (carotid ≈ 3.4 N/cm² vs trachea ≈ 22 N/cm²) | https://en.wikipedia.org/wiki/Strangling |
+| [WR2] | Wikipedia — Tim Sylvia / Frank Mir / Antônio Rodrigo Nogueira / Ronda Rousey / Vitor Belfort pages (refused-tap injuries) | https://en.wikipedia.org/wiki/Tim_Sylvia ; https://en.wikipedia.org/wiki/Ronda_Rousey ; https://en.wikipedia.org/wiki/Vitor_Belfort |
+| [RH1] | Wikipedia, "Ryan Hall (fighter)" (heel hook of BJ Penn, UFC 232) | https://en.wikipedia.org/wiki/Ryan_Hall_(fighter) |
+| [ST1] | Strangulation Training Institute timeline (LOC 5–10 s, anoxic seizure ~14 s, respiration ceases 62–157 s) | https://www.niwrc.org/sites/default/files/2024-01/TBI%20Special%20Collection/Physiological%20Consequences%20of%20Strangulation%20Seconds%20to%20Minute%20Timeline%20v1.23.23.pdf |
+
+Not reachable this session: BJJ Heroes technique pages (403), Bloody Elbow
+(paywall), MMA Fighting, Jack Slack's substack posts, Lawrence Kenshin
+(video-only). Claims attributed to Jack Slack / Ryan Hall on *why* leg locks
+are rare in MMA are therefore represented by the Danaher/Sonnen debate
+[BJ4][BJ5] and [K9].
 
 ### 6.2 Technique shares — comparison of sources
 
@@ -1572,8 +1732,10 @@ Claims attributed to them are standard, widely published coaching positions.)
 | D'Arce | 2.8 % | <3 % | — | 3.7 % (w/ anaconda, von Flue) | ~3 % |
 | Kimura | 2.6 % | n/a | — | — | ~8 % (outlier) |
 | Anaconda | 2.3 % | <3 % | — | (pooled) | — |
-| Heel hook | (in "other") | n/a | — | — | ~4 % (likely too high) |
-| Ankle lock | (in "other") | n/a | — | — | ~2 % |
+| Heel hook | 24 = 1.4 % [FA1] | n/a | — | — | ~4 % (too high) |
+| Kneebar | 20 = 1.2 % [FA1] | n/a | — | — | — |
+| Neck crank | 22 = 1.3 % [FT1] | n/a | — | — | — |
+| Ankle lock | (in "other") | n/a | — | — | ~2 % (too high) |
 
 Use [G1] as canonical; the choke-only [P2] shares convert to all-sub shares
 by ×0.762.
@@ -1582,16 +1744,29 @@ by ×0.762.
 
 | Item | Value | Source |
 |---|---|---|
-| Time to LOC, bilateral carotid compression | ≈ 9 s mean; ≈ 5–13 s range (judo/VNR literature summarised) | [P2][W1] |
-| Recovery after release | seconds to ~20 s, usually full within a minute (coaching/judo *kappo* literature) | [W1] |
-| UFC chokes ending in unconsciousness | 11 % (99 of 904) | [P2] |
-| Chokes as share of UFC fight outcomes | 15.5 % | [P2] |
+| Time to LOC, fully established sportive choke (81 filmed, elite resisting) | **9.0 s mean (95 % CI 8.3–9.9)**; neck-only 8.9 s, arm-in 9.0 s (n.s.); per-type 6.2–10.5 s: arm-triangle 7.2, RNC 8.9, guillotine 8.9, N-S 9.4, triangle 9.5, arm-in guillotine 10.2 | [P4][W3–W6][W8] |
+| Time to LOC, vascular neck restraint (24 police officers, TCD) | 9.5 ± 0.4 s; MCA velocity −80 %; consciousness back ~2 s after release | [P6] |
+| Time to LOC, pneumatic cuff 600 mmHg (126 subjects) | ≈ 6.1–6.9 s; walking within 1–2 min | [P7] |
+| Judo shime-waza | LOC 10–20 s (≈ 10 s, range 8–14); spontaneous recovery 10–20 s; O₂ sat normal within 13.7 s; carotid needs ~1/6 the pressure of the airway (≈ 3.4 vs 22 N/cm²) | [P8][W11] |
+| Post-LOC hold and sequelae (39 LOC cases, judo worlds) | 61.5 % had convulsions/staggering; hold ≥ 4 s past LOC → OR 6.7 for symptoms; asymptomatic release 2.4 ± 2.0 s vs 5.0 ± 3.5 s | [P9] |
+| Choke finishes ending in LOC | UFC 11 % (99 of 904); judo senior 4.3 %, junior 14.6 %, cadet 18.9 % | [P2][P9] |
+| Chokes as share of UFC outcomes / subs | 15.5 % of outcomes; 76.2 % of subs (chokes-only set); 68.6 % in [P18]; 65.5 % in [P1] | [P2][P18][P1] |
 | Handedness of finishing chokes | 50.1 % R / 49.9 % L | [P2] |
-| Air choke vs blood choke | air chokes slower, more painful, more injurious (trachea) | [W1] |
-| BJJ competition injuries | elbow (armbar) the most common orthopaedic injury; overall ≈ 9.2 injuries / 1,000 exposures | [P3] |
-| Heel hook | "high rate of injury, especially to ligaments in the knee"; minimal pain warning | [W2] |
-| Kimura no-tap | humeral fracture (Mir–Nogueira, UFC 140, 2011) | public record |
-| Armbar no-tap | forearm fracture (Mir–Sylvia, UFC 48, 2004) | public record |
+| Air choke vs blood choke | air chokes slower, painful, laryngeal/hyoid fracture risk; 88 % of practitioners report post-choke throat symptoms, 15 % permanent voice change | [W1][P12] |
+| Cervical-artery injury from chokes | 10-case series (5 carotid, 3 vertebral dissections, 2 strokes); symptoms often delayed ~1 week | [P11] |
+| Long-term choke safety | 4,307 grapplers: 27.8 % choked unconscious ≥ once; 0.05 % ongoing symptoms; no carotid IMT or biomarker differences in heavily choked grapplers | [P19] |
+| BJJ competition injuries | 9.2 / 1,000 exposures; elbow 39 % of orthopaedic injuries, armbar caused 10 of 14; **only 1 choke injury in 5,022 exposures** ("rapid tapping") | [P3] |
+| Submission-inflicted injuries (survey, 1,140 athletes) | 246 of 1,052 injuries (23.4 %): armbar 55, kimura 31, heel hook 27, triangle 19, toe hold 14, ankle lock 8, RNC 8; ACL tears: 41 % never returned to competition | [P15] |
+| Armbar no-tap pathology | UCL rupture 100 %, common flexor tendon rupture 100 %, bone contusion 60 %, no fracture (n = 5 elite) | [P14] |
+| Heel hook | inside variant → posterolateral corner; outside → ACL/PCL/MCL/medial meniscus; heel-hook-legal divisions RR 12.0 for knee injury; MMA case ACL + MCL | [P13][P10][P16] |
+| Kneebar | posterior capsule provides > 50 % of hyperextension resistance; PCL/ACL, popliteal artery if dislocated | [P13] |
+| Toe hold / ankle lock | ATFL, CFL, peroneal tendons; "major cause of ligamentous ankle injury" (61 % from subs) | [P13][P15] |
+| Neck crank / can opener | cervical sprain/strain; modelled forces comparable to whiplash | [P17] |
+| Upper-limb joint subs in UFC (97 of 523 PPV subs) | armbar 67 %; ~9 % serious injury; 10.3-month return; women 3.03× more likely to lose by one | [P5] |
+| MMA injury context | 228.7 injuries / 1,000 AE; KO bouts > 2× the injuries of submission bouts; losers ~3× winners | [P21] |
+| Kimura no-tap | humeral fracture (Mir–Nogueira, UFC 140, 2011) | [WR2][K11] |
+| Armbar no-tap | radius/ulna fracture (Mir–Sylvia, UFC 48, 2004); elbow dislocations (Rousey–Tate 2012, Rousey–Budd 2011); Jones–Belfort UFC 152 elbow damage but no tap | [WR2] |
+| Standing guillotine LOC | Jones d. Machida UFC 140: technical submission, Machida out and dropped | [WR2] |
 
 ### 6.4 Attempt/conversion derivation (ESTIMATE)
 
@@ -1605,12 +1780,20 @@ by ×0.762.
   and armbars are attempted far more often than RNCs per finish — coaching
   consensus; FightEncyclopedia's ≈ 9.5 % guillotine figure [F1]).
 
+### 6.6 Datasets for future tuning
+
+* Kaggle "UFC Dataset (1994–2026)" (8,000+ fights, finish-method detail column): https://www.kaggle.com/datasets/jossilva3110/ufc-dataset-1994-2026
+* Kaggle "Ultimate UFC Dataset" (8,688 fights to May 2026): https://www.kaggle.com/datasets/leandroiber/ufc-stats-complete-dataset
+* UFC-DataLab (MIT-licensed upstream of [G1]/[FM1]); UFCStats fight-detail pages carry the technique label (e.g., http://ufcstats.com/fight-details/b2625001e0b89369 = Zabit's Suloev stretch), so heel-hook-per-year and per-technique attempt counts can be computed by scraping.
+
 ### 6.5 Round of submission finishes
 
-No clean per-round split for submissions was retrievable; [G1] gives
-27.3 % of *all* fights ending in round 1 (all methods). ESTIMATE for
-submissions: 45 % R1 / 30 % R2 / 25 % R3+ (RNCs skew later with fatigue;
-guillotines skew earlier with fresh grips).
+FightAlpha [FA2] (1,692 UFC subs to Jun 2026): R1 862 (50.9 %), R2 540
+(31.9 %), R3 264 (15.6 %), R4 17 (1.0 %), R5 9 (0.5 %); 76 inside the first
+minute. All-method comparison (FightsInCage, 4,643 finishes) [FC1]: R1
+52.9 %, R2 30.4 %, R3 14.9 %, R4–5 1.8 % — submissions are *not* more
+front-loaded than KOs. R1 share of finishes has fallen ~4 points per decade
+(55.2 % in 2001–12 → 49.7 % in 2013–25).
 
 ---
 
@@ -1621,18 +1804,26 @@ guillotines skew earlier with fresh grips).
    that their products reproduce plausible attempt→finish conversions and,
    summed over the estimated attempt mix, the [G1] technique shares.
    They should be tuned in simulation (rule 25 targets).
-2. **"Other" technique counts** (heel hook, kneebar, ankle lock, Ezekiel,
-   von Flue, twister, etc.) are estimates within the [G1] "all other = 155"
-   bucket, except twister (2) and calf slicer/Suloev (1–2) which are
-   well-known single events.
-3. **Search budget.** The session's web-search quota ran out mid-task, so
-   several coaching sources are cited at catalogue level and some hoped-for
-   numbers (per-round submission split, exact heel-hook count since 2019,
-   a per-technique attempt log) could not be fetched. The physiology
-   numbers rely on the Stellpflug review and Wikipedia's summary of the
-   judo/vascular-neck-restraint literature rather than the primary papers
-   (Rossen 1943; Koiwai 1987; Mitchell 2012) — the ≈ 9 s figure is
-   consistent across those.
+2. **Long-tail technique counts** are now hard tallies from [FA1]/[FT1]
+   except straight ankle lock, americana and von Flue/bulldog (which
+   UFCStats labels inconsistently — e.g., "shoulder choke" may be von Flue).
+   Conflicts between sources (kneebar 20 vs 23; heel hook 24 vs 20;
+   Ezekiel 5 finishes vs 3 fighters) reflect cut-off dates and labelling.
+3. **Search budget.** The session's web-search quota ran out mid-task; the
+   remaining lookups went through direct fetches (Europe PMC, Wikipedia,
+   Grapplearts, Evolve, BJJ Fanatics, BJJEE). Jack Slack, Lawrence Kenshin,
+   Bloody Elbow and BJJ Heroes technique pages were unreachable, so the
+   "why leg locks are rare in MMA" argument is sourced to the Danaher/
+   Sonnen debate rather than to Slack/Hall directly.
+3b. **No per-technique attempt→finish data exists publicly.** UFCStats
+   records attempts per fight but not per technique; the per-technique
+   conversion targets in rule 25 are estimates that should be validated by
+   scraping ufcstats.com fight-detail pages (the method-detail label is on
+   each page) against the "Sub. Att" columns — see the Kaggle datasets
+   listed in §6.6.
+3c. **No direct measurement of lock-to-tap latency** exists; all
+   time-to-tap ranges are estimates bounded above by the 9 s LOC window
+   for chokes and by the "pain precedes failure" principle for joint locks.
 4. **Skill-gap multiplier** is anchored on the early-UFC vs modern
    submission-rate gap rather than on a controlled measure; the linear
    0.02/point coefficient is a modelling choice.
