@@ -50,6 +50,20 @@ export interface InflightEdge {
   phase: number;
   /** Two-stage leg attacks resolve capture and finish as separate contacts. */
   stage: 'single' | 'capture' | 'finish';
+  /** Who owns the slot. Both ends of an engagement contest it (§2.1.1). */
+  actorId: number;
+  /**
+   * Intra-tick commit offset in [0, dtMs), i.e. `(decisionOffsetMs + jitter) %
+   * dtMs` — the same number the scheduler turns into `commitMs`.
+   *
+   * It exists so that the *one contested edge per engagement* rule is decided
+   * by who moved first inside the tick rather than by who the loop asked first.
+   * P3 iterates in ascending id, so without this the lower id claimed the slot
+   * every tick it wanted it and the higher id could never initiate from inside
+   * an engagement: in a mirror match that was worth 2x the takedowns, 2x the
+   * control time and 3.6x the reversals (see PHASE4_FINDINGS Phase 5).
+   */
+  commitOffsetMs: number;
 }
 
 /** The §6 clocks the referee and the judges read. All in milliseconds. */
@@ -372,7 +386,8 @@ export class EngagementSet {
 
   /** Commit an edge to an engagement; at most one resolves at a time (§2.1.1). */
   commit(engagementId: number, edge: GrapplingEdge, tick: number, durMs: number,
-    stage: InflightEdge['stage'] = 'single'): void {
+    stage: InflightEdge['stage'] = 'single',
+    actorId = -1, commitOffsetMs = 0): void {
     const e = this.byId.get(engagementId);
     if (!e) throw new Error(`Unknown engagement: ${engagementId}`);
     if (e.inflight) {
@@ -381,7 +396,32 @@ export class EngagementSet {
         'at most one contested edge resolves per engagement (03 §2.1.1)',
       );
     }
-    e.inflight = { edge: edge.id, tStart: tick, dur: durMs, phase: 0, stage };
+    e.inflight = { edge: edge.id, tStart: tick, dur: durMs, phase: 0, stage, actorId, commitOffsetMs };
+  }
+
+  /**
+   * Who wins the single contested-edge slot when both fighters want it on the
+   * same tick: the earlier intra-tick commit offset, ties to the incumbent.
+   *
+   * Returns `'free'` when nothing holds the slot, `'blocked'` when the
+   * incumbent keeps it, and `'displace'` when the challenger's hands moved
+   * first and the incumbent's commitment must be cancelled.
+   */
+  contestInflight(
+    engagementId: number, tick: number, commitOffsetMs: number,
+  ): { verdict: 'free' | 'blocked' | 'displace'; incumbentId: number; edge: EdgeId | null } {
+    const e = this.byId.get(engagementId);
+    if (!e || !e.inflight) return { verdict: 'free', incumbentId: -1, edge: null };
+    const held = e.inflight;
+    // An edge committed on an earlier tick is already in motion: it is not a
+    // simultaneous claim and cannot be displaced.
+    if (held.tStart !== tick) {
+      return { verdict: 'blocked', incumbentId: held.actorId, edge: held.edge };
+    }
+    if (commitOffsetMs >= held.commitOffsetMs) {
+      return { verdict: 'blocked', incumbentId: held.actorId, edge: held.edge };
+    }
+    return { verdict: 'displace', incumbentId: held.actorId, edge: held.edge };
   }
 
   /** Clear the in-flight edge once it has resolved. */

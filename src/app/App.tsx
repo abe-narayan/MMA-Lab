@@ -60,8 +60,8 @@ function readStoredTheme(): ThemeChoice {
 /**
  * Map the store module onto the interface the screens consume.
  *
- * TODO(store): this adapter is the seam. Everything it calls exists today; the
- * only judgement calls encoded here are (a) an explicit selection exports
+ * This adapter is the seam between the screens and the store. The judgement
+ * calls encoded here are (a) an explicit selection exports
  * built-ins too, because the user asked for those specific fighters, and (b) an
  * import writes each definition through `createFighter`, so imported ids go
  * through the same collision handling as anything the user makes.

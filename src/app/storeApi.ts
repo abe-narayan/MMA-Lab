@@ -11,10 +11,9 @@
  * It is also how the tests get a database without a `localStorage`: the same
  * screens run against a plain object.
  *
- * TODO(store): `bindStore` in `App.tsx` maps this onto the real module. Any
- * method the store does not yet export is bound to a stub that throws with the
- * name it is waiting for, so a missing piece is a loud failure on one action
- * rather than a blank screen.
+ * `bindStore` in `App.tsx` maps this onto the real module. Any method a store
+ * implementation does not provide is bound to a stub that throws naming itself,
+ * so a missing piece is a loud failure on one action rather than a blank screen.
  */
 
 import type { FighterDefinition } from '../sim';
@@ -57,8 +56,8 @@ export interface FighterStoreApi {
 export class StoreNotReadyError extends Error {
   constructor(method: string) {
     super(
-      `The fighter store does not export "${method}" yet. ` +
-        'TODO(store): bind it in src/app/App.tsx once src/app/store exports it.',
+      `The fighter store does not export "${method}". ` +
+        'Bind it in src/app/App.tsx.',
     );
     this.name = 'StoreNotReadyError';
   }

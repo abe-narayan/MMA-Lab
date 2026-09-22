@@ -167,12 +167,20 @@ export function isDirty(baseline: FighterDefinition | null, draft: FighterDefini
   return stableStringify(baseline) !== stableStringify(draft);
 }
 
-/** JSON with sorted keys, so two equal definitions always compare equal. */
+/**
+ * JSON with sorted keys, so two equal definitions always compare equal.
+ *
+ * Keys whose value is `undefined` are dropped, matching `JSON.stringify`. A
+ * definition must survive a JSON round-trip unchanged (01), so `{thaiStyle:
+ * undefined}` and `{}` are the same fighter — and a saved record, which has
+ * been through storage, must not read as dirty against the draft it came from.
+ */
 export function stableStringify(value: unknown): string {
+  if (value === undefined) return 'null';
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
+  const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 }
 

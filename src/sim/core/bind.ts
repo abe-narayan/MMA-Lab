@@ -699,7 +699,39 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const edge = grapplingEdge(id);
     if (!edge.from.includes(f.position)) return;
     const e = w.engagements.of(f.id);
-    if (e && e.inflight) return;
+    // 03 §2.1.1 allows one contested edge per engagement at a time. P3 iterates
+    // in ascending id, so "first to ask" handed the slot to the lower id on
+    // every tick it wanted it — a systematic initiative bonus worth 2x the
+    // takedowns and 3.6x the reversals in a mirror match. The tie is broken
+    // instead by the intra-tick commit offset the loop already draws for
+    // exactly this purpose (09 §2.2), which is symmetric by construction.
+    const offset = (Math.round(f.decisionOffsetMs) + jitter) % dtMs;
+    if (e) {
+      const contest = w.engagements.contestInflight(e.id, w.tick, offset);
+      if (contest.verdict === 'blocked') return;
+      if (contest.verdict === 'displace' && contest.edge !== null) {
+        // The incumbent committed later in the same tick: his attempt is beaten
+        // to the position and never becomes a contact. It stays on the books as
+        // a stuffed attempt — he spent the energy and 06 must see the failure —
+        // rather than vanishing, which would flatter takedown accuracy.
+        w.scheduler.queue.cancelFor(contest.incumbentId, 'engagement.contested');
+        const loser = w.fighters[contest.incumbentId];
+        const heldEdge = grapplingEdge(contest.edge);
+        if (loser) {
+          loser.action = null;
+          loser.actionResult = 'stuffed';
+          emit(w, {
+            ...base(w, edgeEventKind(heldEdge), loser.id, f.id,
+              `${loser.runtime.def.short} is beaten to the ${heldEdge.name}`),
+            kind: edgeEventKind(heldEdge),
+            detail: {
+              edge: heldEdge.id, from: loser.position, result: 'stuffed', reason: 'contested',
+            },
+          } as GrappleEvent);
+        }
+        w.engagements.clearInflight(e.id);
+      }
+    }
     // 03 §2.3 "dur" is a range; the midpoint is used, the scheduler's jitter
     // supplies the variation (no extra draw — 09 §2.7).
     const dur = Math.round((edge.durationMs[0] + edge.durationMs[1]) / 2);
@@ -710,7 +742,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     if (edge.kind === 'entry' || edge.kind === 'capture' || edge.kind === 'throw') {
       f.takedownsAttempted++;
     }
-    if (e) w.engagements.commit(e.id, edge, w.tick, dur, stage);
+    if (e) w.engagements.commit(e.id, edge, w.tick, dur, stage, f.id, offset);
 
     schedule(w, f, target, 'grapple', id, dur, dur, {
       kind: 'grapple', edge: id, engagementId: e?.id ?? null, node: f.position, stage,

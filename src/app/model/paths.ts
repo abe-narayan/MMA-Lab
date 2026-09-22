@@ -106,7 +106,17 @@ export interface ClampSpec {
  * clears the box would fight the person editing it.
  */
 export function clampNumber(raw: string | number, spec: ClampSpec, previous: number): number {
-  const n = typeof raw === 'number' ? raw : Number(raw.trim());
+  let n: number;
+  if (typeof raw === 'number') {
+    n = raw;
+  } else {
+    const text = raw.trim();
+    // `Number('')` is 0, not NaN. Without this guard, clearing a field would
+    // silently commit zero — the exact "lost work" this function exists to
+    // prevent, and the one case the `Number.isFinite` check below cannot catch.
+    if (text === '') return previous;
+    n = Number(text);
+  }
   if (!Number.isFinite(n)) return previous;
   const bounded = n < spec.min ? spec.min : n > spec.max ? spec.max : n;
   const dp = spec.dp ?? 0;
