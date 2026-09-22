@@ -1,0 +1,643 @@
+/* ==========================================================================
+   BOUT LAB - fighter database and creator (Phase 6)
+   --------------------------------------------------------------------------
+   Loaded after src/ui/styles.css and written to sit inside it, not beside it:
+   every colour here is one of that file's :root tokens, so both themes resolve
+   without a single rule in this file knowing which one is active. The few
+   tokens declared below are creator-only (the tier ramp) and follow the same
+   pattern - a complete dark set on :root, redefined for system-light behind the
+   explicit-dark guard, and again for the [data-theme="light"] stamp.
+
+   Shared components (.btn, .field, .badge, .panel, .tag, .mono, .num,
+   .visually-hidden) are reused rather than restyled. New class names are
+   prefixed by their owner: fc- for a form field, attr- for the slider,
+   disc-/subskill- for the discipline grid, bd- for the body diagram, fdb- for
+   the database, derived-/derivation- for the honesty panel.
+   ========================================================================== */
+
+:root {
+  /* Tier ramp: a single hue walking from the page's muted grey up to the
+     scoreboard amber, so T0-T5 reads as one ladder rather than six colours. */
+  --tier-0: #5a6875;
+  --tier-1: #6f7f86;
+  --tier-2: #7f8f7a;
+  --tier-3: #9aa05c;
+  --tier-4: #c9a144;
+  --tier-5: #e0a63c;
+  --tier-ink: #0c1117;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --tier-0: #98a4af;
+    --tier-1: #86949c;
+    --tier-2: #789078;
+    --tier-3: #8a8c48;
+    --tier-4: #a1762a;
+    --tier-5: #8a5f0e;
+    --tier-ink: #fffaf0;
+  }
+}
+
+:root[data-theme="light"] {
+  --tier-0: #98a4af;
+  --tier-1: #86949c;
+  --tier-2: #789078;
+  --tier-3: #8a8c48;
+  --tier-4: #a1762a;
+  --tier-5: #8a5f0e;
+  --tier-ink: #fffaf0;
+}
+
+/* ------------------------------------------------------------ form fields */
+
+.fc-section { margin: 0 0 22px; }
+
+.fc-h {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 6px;
+}
+.fc-h--sub { margin-top: 18px; color: var(--muted); }
+
+.fc-blurb {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 68ch;
+}
+
+.fc-note {
+  margin: 6px 0;
+  font-size: 12px;
+  color: var(--faint);
+  line-height: 1.5;
+}
+
+.fc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px 18px;
+}
+.fc-grid--tight { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+
+.fc-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.fc-field > label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.fc-field--wide { flex: 1 1 200px; }
+.fc-field--narrow { flex: 0 0 90px; }
+
+.fc-field--checkbox {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 14px 0;
+}
+.fc-field--checkbox > label { text-transform: none; font-size: 12.5px; }
+.fc-field--checkbox > .fc-help { grid-column: 1 / -1; }
+
+.fc-input-row { display: flex; align-items: center; gap: 8px; }
+.fc-input-row .field { flex: 1 1 auto; min-width: 0; }
+
+.fc-unit { color: var(--faint); font-weight: 400; }
+.fc-suffix { font-size: 11px; color: var(--faint); white-space: nowrap; }
+
+.fc-help {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--faint);
+}
+
+/* The invalid ring is on the wrapper, not the input: validation marks a field,
+   it does not take it away, so the control stays fully editable. */
+.fc-field.is-invalid > .fc-input-row .field,
+.fc-field.is-invalid > .field {
+  border-color: var(--alert);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--alert) 40%, transparent);
+}
+
+.fc-fieldset {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  padding: 10px 14px 14px;
+  margin: 0 0 14px;
+}
+.fc-fieldset > legend {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 0 6px;
+}
+
+.fc-textarea { min-height: 62px; padding: 8px; font-family: var(--sans); line-height: 1.5; resize: vertical; }
+
+.fc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.btn--chip { min-height: 26px; font-size: 11px; padding: 0 9px; }
+.btn--quiet { color: var(--muted); background: transparent; }
+.btn--danger:not(:disabled) { color: var(--alert); border-color: color-mix(in srgb, var(--alert) 45%, var(--line)); }
+
+/* Focus is one visible treatment everywhere, including on custom controls. */
+.creator :focus-visible,
+.fdb :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* ------------------------------------------------------- attribute slider */
+
+.attr-slider {
+  display: grid;
+  grid-template-columns: 1fr minmax(90px, 1.3fr) 64px 26px;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 6px 0;
+}
+.attr-slider + .attr-slider { border-top: 1px solid var(--line-soft); }
+
+.attr-slider-label {
+  font-size: 12.5px;
+  color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.attr-slider-track-wrap { position: relative; display: flex; align-items: center; min-height: 22px; }
+
+/* The band strip sits behind the range input and never takes pointer events,
+   so dragging still works anywhere along the track. */
+.attr-slider-bands {
+  position: absolute;
+  inset: 50% 0 auto;
+  transform: translateY(-50%);
+  display: flex;
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.55;
+}
+.attr-slider-band { display: block; }
+.attr-slider-band[data-tier="0"] { background: var(--tier-0); }
+.attr-slider-band[data-tier="1"] { background: var(--tier-1); }
+.attr-slider-band[data-tier="2"] { background: var(--tier-2); }
+.attr-slider-band[data-tier="3"] { background: var(--tier-3); }
+.attr-slider-band[data-tier="4"] { background: var(--tier-4); }
+.attr-slider-band[data-tier="5"] { background: var(--tier-5); }
+.attr-slider-band.is-active { opacity: 1; }
+
+.attr-slider-range {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.attr-slider-range:disabled { cursor: not-allowed; opacity: 0.45; }
+
+.attr-slider-number { width: 100%; text-align: right; }
+
+.attr-slider-band-name {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--faint);
+  text-align: right;
+}
+
+.attr-slider-help {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--faint);
+}
+/* Dense rows (the sub-skill grid) hide the prose until hover or focus: 88
+   sub-skills each with a sentence would bury the numbers. */
+.attr-slider--dense { grid-template-columns: 1fr minmax(70px, 1fr) 56px 24px; padding: 3px 0; }
+.attr-slider--dense .attr-slider-help { display: none; }
+.attr-slider--dense:hover .attr-slider-help,
+.attr-slider--dense:focus-within .attr-slider-help { display: block; }
+
+.attr-slider--invalid .attr-slider-number {
+  border-color: var(--alert);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--alert) 40%, transparent);
+}
+
+.attr-list-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 0 26px;
+}
+
+/* ------------------------------------------------------------ tier badges */
+
+.tier-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  background: var(--tier-0);
+  color: var(--tier-ink);
+  white-space: nowrap;
+}
+.tier-badge[data-tier="1"] { background: var(--tier-1); }
+.tier-badge[data-tier="2"] { background: var(--tier-2); }
+.tier-badge[data-tier="3"] { background: var(--tier-3); }
+.tier-badge[data-tier="4"] { background: var(--tier-4); }
+.tier-badge[data-tier="5"] { background: var(--tier-5); }
+.tier-badge em { font-style: normal; font-weight: 600; text-transform: none; letter-spacing: 0; }
+.tier-badge--muted { opacity: 0.45; }
+
+/* ------------------------------------------------------ discipline blocks */
+
+.disc {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  margin: 0 0 8px;
+  background: var(--surface);
+}
+.disc--untrained { background: transparent; border-style: dashed; }
+
+.disc-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  flex-wrap: wrap;
+}
+.disc-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.disc-caret { color: var(--faint); font-size: 10px; width: 10px; }
+.disc-name { font-weight: 600; font-size: 13px; }
+.disc-meta { font-size: 11px; color: var(--faint); margin-left: auto; }
+.disc-head .btn { min-height: 26px; font-size: 11px; }
+
+.disc-body { padding: 0 10px 10px; border-top: 1px solid var(--line-soft); }
+.disc-years {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px 18px;
+  padding: 10px 0;
+}
+
+.subskill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 0 24px;
+}
+
+/* -------------------------------------------------------------- validation */
+
+.validation {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 8px 10px;
+}
+.validation-head { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.validation-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow-y: auto; }
+.validation-item + .validation-item { border-top: 1px solid var(--line-soft); }
+
+.validation-jump {
+  appearance: none;
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 5px 4px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.validation-jump:hover { background: var(--surface-2); }
+.validation-item--error .validation-jump { border-left-color: var(--alert); }
+.validation-item--warning .validation-jump { border-left-color: var(--warn); }
+
+.validation-path {
+  display: block;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+.validation-message { display: block; line-height: 1.4; }
+
+/* ----------------------------------------------------------- body diagram */
+
+.body-diagram {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  padding: 8px;
+}
+.body-diagram-svg { display: block; width: 100%; height: 190px; }
+
+.bd-floor  { stroke: var(--line); stroke-width: 1; }
+.bd-guide  { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 3 4; }
+.bd-span   { stroke: var(--accent); stroke-linecap: round; opacity: 0.85; }
+.bd-tick   { stroke: var(--accent); stroke-width: 1.5; }
+.bd-torso  { fill: var(--surface-3); stroke: var(--muted); stroke-width: 1.2; }
+.bd-head   { fill: var(--surface-3); stroke: var(--muted); stroke-width: 1.2; }
+.bd-limb   { stroke: var(--muted); stroke-linecap: round; }
+
+.body-diagram-caption {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 2px 10px;
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text);
+}
+.body-diagram-caption b {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* ---------------------------------------------------------- derived panel */
+
+.derived {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.derived--broken { border-color: var(--alert); }
+.derived-sub { font-size: 10px; color: var(--faint); margin-left: auto; }
+.derived-error {
+  margin: 0 10px 10px;
+  padding: 8px;
+  font-size: 11px;
+  background: var(--surface-2);
+  border-radius: var(--r-sm);
+  white-space: pre-wrap;
+  color: var(--alert);
+}
+
+.derived-section { padding: 8px 10px; border-top: 1px solid var(--line-soft); }
+.derived-section:first-of-type { border-top: 0; }
+.derived-h {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 6px;
+}
+
+.derived-toggle {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+.derived-tiers { list-style: none; margin: 0; padding: 0; }
+.derived-tier + .derived-tier { border-top: 1px solid var(--line-soft); }
+.derived-tier.is-untrained { opacity: 0.6; }
+.derived-tier-btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 2px;
+  cursor: pointer;
+}
+.derived-tier-btn:hover { background: var(--surface-2); }
+.derived-tier-name { flex: 0 1 auto; }
+.derived-tier-meta {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--faint);
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+}
+.derived-tier-meta em { font-style: normal; }
+.is-up { color: var(--ok); }
+.is-down { color: var(--alert); }
+
+.derived-subskills { width: 100%; border-collapse: collapse; font-size: 11px; margin: 4px 0 8px; }
+.derived-subskills th, .derived-subskills td { padding: 2px 6px; text-align: right; }
+.derived-subskills th[scope="row"] { text-align: left; font-weight: 400; color: var(--muted); }
+.derived-subskills thead th { color: var(--faint); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; }
+.derived-subskills tbody tr + tr { border-top: 1px solid var(--line-soft); }
+
+.derived-rows { margin: 0; }
+.derived-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 10px;
+  padding: 3px 0;
+}
+.derived-row + .derived-row { border-top: 1px solid var(--line-soft); }
+.derived-row dt { font-size: 12px; color: var(--muted); }
+.derived-row dd { margin: 0; font-size: 12px; color: var(--text); text-align: right; }
+.derived-note { grid-column: 1 / -1; margin: 1px 0 0; font-size: 10px; color: var(--faint); line-height: 1.35; }
+
+.derivation-lines {
+  margin: 0;
+  padding: 0 0 0 30px;
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.derivation-lines li { padding: 1px 0; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------ weighted lists */
+
+.weighted-list { list-style: none; margin: 0 0 8px; padding: 0; }
+.weighted-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+.weighted-row + .weighted-row { border-top: 1px solid var(--line-soft); }
+.weighted-name { font-size: 12.5px; }
+.weighted-id { font-size: 10px; color: var(--faint); }
+.weighted-weight { width: 72px; margin-left: auto; text-align: right; }
+.weighted-add { display: flex; gap: 8px; align-items: center; }
+.weighted-add .field { max-width: 280px; }
+
+.combo-list { list-style: none; margin: 0 0 8px; padding: 0; }
+.combo-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; flex-wrap: wrap; }
+.combo-row + .combo-row { border-top: 1px solid var(--line-soft); }
+.combo-row code { font-size: 10.5px; color: var(--muted); }
+.combo-weight { width: 72px; margin-left: auto; text-align: right; }
+
+/* ------------------------------------------------------------- the creator */
+
+.creator { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+
+.creator-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+.creator-identity { display: flex; gap: 14px; flex: 1 1 380px; flex-wrap: wrap; }
+.creator-name { font-size: 14px; font-family: var(--sans); }
+.creator-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.creator-message {
+  margin: 0;
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.creator-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 400px);
+  gap: 16px;
+  align-items: start;
+}
+.creator-form { min-width: 0; }
+.creator-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: sticky;
+  top: 8px;
+  max-height: calc(100vh - 140px);
+  overflow-y: auto;
+}
+
+.creator-tabs { margin: 0 0 14px; }
+.creator-blank { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+
+@media (max-width: 1080px) {
+  .creator-body { grid-template-columns: minmax(0, 1fr); }
+  .creator-side { position: static; max-height: none; }
+}
+
+/* ------------------------------------------------------------- the database */
+
+.fdb { display: flex; flex-direction: column; gap: 12px; }
+.fdb-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.fdb-title { display: flex; align-items: baseline; gap: 10px; }
+.fdb-title .fc-h { margin: 0; font-size: 13px; }
+.fdb-count { font-size: 11px; color: var(--faint); }
+.fdb-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+
+.fdb-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 14px;
+  align-items: end;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.fdb-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.fdb-table th, .fdb-table td { padding: 6px 10px; text-align: left; vertical-align: middle; }
+.fdb-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  z-index: 1;
+}
+.fdb-table tbody tr + tr { border-top: 1px solid var(--line-soft); }
+.fdb-table tbody tr:hover { background: var(--surface-2); }
+.fdb-table td.num, .fdb-table th.num { text-align: right; font-family: var(--mono); }
+
+.fdb-sort {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0;
+  cursor: pointer;
+}
+.fdb-sort:hover { color: var(--text); }
+
+.fdb-name { font-weight: 400; }
+.fdb-name-main { display: block; font-weight: 600; }
+.fdb-name-sub { display: block; font-size: 10px; color: var(--faint); }
+.fdb-name-sub .tag { margin: 0 5px; }
+.fdb-alt { color: var(--faint); font-size: 10px; }
+.fdb-when { font-size: 10.5px; color: var(--faint); }
+
+.fdb-row-actions { display: flex; gap: 5px; justify-content: flex-end; flex-wrap: wrap; }
+.fdb-row-actions .btn { min-height: 25px; font-size: 11px; padding: 0 8px; }
+
+@media (max-width: 860px) {
+  .fdb-table thead { position: static; }
+  .fdb-actions { margin-left: 0; }
+}
+
+/* Honour a reduced-motion preference: the only motion here is the scroll the
+   validation list triggers, and `scrollIntoView` obeys this media query only
+   when the page declares it. */
+@media (prefers-reduced-motion: reduce) {
+  .creator *, .fdb * { scroll-behavior: auto !important; }
+}

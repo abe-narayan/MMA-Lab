@@ -64,6 +64,32 @@ export { deriveRuntime } from './fighter/derive';
 export { ARCHETYPES, ARCHETYPE_IDS } from './fighter/archetypes';
 export { fromLegacyProfile } from './fighter/legacy';
 
+// The authored schema itself. The fighter creator (Phase 6) edits a
+// `FighterDefinition` field by field, so it needs the same catalogues the sim
+// derives from — the sub-skill names per discipline, the tier vocabulary and
+// the weight limits — rather than a private copy that could drift out of step.
+export type {
+  AppearanceSpec, BodySpec, Build, BuildBlend, CareerRecord, ComboSpec, CompetitionLevel,
+  CoreDisciplineId, DisciplineCompetition, DisciplineId, DisciplineSkills, FacialHairId,
+  FighterDisciplines, FightRecord, GloveType, GuardStyle, Handedness, HairLength,
+  HurtBehaviour, Initiative, LastResult, LosingBehaviour, MentalAttributes,
+  PhysicalAttributes, PrimaryMode, RangeBand, Sex, ShortsStyle, SkillTier, Stance,
+  StyleSpec, TakedownSetup, TakedownStyle, TattooSlot, ThaiStyle, TiredBehaviour,
+  BottomPriority, TopPriority, WeightCut, WeightedSubmission, WeightedTechnique,
+} from './fighter/types';
+export {
+  DISCIPLINE_IDS, GRAPPLING_DISCIPLINES, STRIKING_DISCIPLINES, SUB_SKILLS, TIER_NAMES,
+  WEIGHT_CLASS_LIMIT_KG, buildBlendOf, recordTotal, weightClassFor,
+} from './fighter/types';
+export { TIER_SKILL_BANDS, TIER_YEARS_BANDS, IQ_BANDS } from './fighter/tiers';
+export type { DisciplineRuntime, EffectiveAttributes, DeriveContext } from './fighter/derive';
+
+// ---- determinism -----------------------------------------------------------
+// The app generates fighters too (the creator's "randomise", Phase 9's batch
+// matchups). Those must be reproducible from a seed for the same reason bouts
+// are, so the app draws from the sim's generator rather than `Math.random()`.
+export { RNG, xmur3 } from './rng';
+
 // ---- strategy (the game-plan panel) ---------------------------------------
 export { IdlePolicy } from './core/policy';
 export type { DecisionPolicy, Decision, DecisionContext, FighterIntent } from './core/policy';
