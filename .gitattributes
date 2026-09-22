@@ -1,0 +1,9 @@
+* text=auto eol=lf
+
+*.png binary
+*.gz  binary
+*.zip binary
+
+# Written by scripts/generate.ts - excluded from language stats and collapsed
+# in diffs, but committed because the bundle needs it.
+src/data/replays.ts linguist-generated=true

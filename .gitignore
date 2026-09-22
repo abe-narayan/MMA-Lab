@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# generated bout corpus
+# Every file under public/replays/ is reproducible with `npm run generate`
+# from the master seed alone - that reproducibility is the point of the
+# project, so the corpus is not committed. src/data/replays.ts IS committed:
+# it is a build input for the single-file bundle, and CI regenerates it and
+# fails if it differs.
+public/replays/
+exports/
+
+# tooling
+coverage/
+.vite/
+.eslintcache
+
+# editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# logs
+*.log
+npm-debug.log*
