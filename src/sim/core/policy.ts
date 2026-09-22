@@ -27,6 +27,8 @@ import type { RNG } from '../rng';
 export const DRAWS_PER_DECIDE = 8;
 /** One extra draw for target switching when more than two fighters are live. */
 export const DRAWS_PER_DECIDE_MULTI = 9;
+/** Draws the loop itself takes per live fighter in P5 (the steering jitter). */
+export const DRAWS_PER_MOVE = 1;
 
 export type DecisionKind =
   | 'strike' | 'grapple' | 'submission' | 'defend' | 'move' | 'wait';
@@ -96,7 +98,9 @@ export class IdlePolicy implements DecisionPolicy {
   }
 
   decide(ctx: DecisionContext): Decision {
-    for (let i = 0; i < DRAWS_PER_DECIDE; i++) ctx.rng.next();
+    // `DRAWS_PER_DECIDE - 1`, because the loop takes `u_commit` (the §2.2
+    // jitter) itself as the last of the mandated draws.
+    for (let i = 0; i < DRAWS_PER_DECIDE - 1; i++) ctx.rng.next();
     return {
       kind: 'wait', what: null, targetId: null, defence: 'def.neutral',
       moveX: 0, moveZ: 0, intentTag: 'idle',

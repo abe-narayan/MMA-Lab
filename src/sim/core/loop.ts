@@ -154,8 +154,22 @@ export class BoutLoop {
     }
 
     // ---- P5 move ---------------------------------------------------------
+    // One steering draw per live fighter, always taken (09 §2.7 P5). It jitters
+    // the steering direction so two identical fighters do not trace identical
+    // arcs around the cage; taking it unconditionally keeps the stream position
+    // independent of whether anyone was actually moving.
+    const jitterSd = w.params.get('core.steeringJitterSd');
     for (const f of w.fighters) {
       if (f.out) continue;
+      const jitter = (w.rng.next() - 0.5) * 2 * jitterSd;
+      if (f.posture === 'standing' && (f.vx !== 0 || f.vz !== 0)) {
+        const c = Math.cos(jitter);
+        const s = Math.sin(jitter);
+        const vx = f.vx * c - f.vz * s;
+        const vz = f.vx * s + f.vz * c;
+        f.vx = vx;
+        f.vz = vz;
+      }
       this.integrate(f);
     }
     this.separate();
@@ -164,8 +178,10 @@ export class BoutLoop {
     this.modules.referee(w);
 
     // ---- P7 judges -------------------------------------------------------
+    // `roundTick * dtMs` is milliseconds; `roundSeconds` is seconds. Comparing
+    // the two directly ended every round after three ticks.
     const roundOver =
-      !this.cfg.untimed && w.roundTick * this.cfg.dtMs >= this.cfg.roundSeconds;
+      !this.cfg.untimed && (w.roundTick * this.cfg.dtMs) / 1000 >= this.cfg.roundSeconds;
     this.modules.judges(w, roundOver && !w.finished);
     if (roundOver && !w.finished) this.endRound();
 
