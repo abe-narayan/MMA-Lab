@@ -342,7 +342,7 @@ export class DamageState {
       this.unansweredHead += imp.placement === 'flush' || imp.placement === 'solid' ? 1 : 0;
       this.applyCut(imp, site, side, d[4], d[5]);
       this.applyHeadRegionEvent(site, front.raw, d[6]);
-      this.applyHeadThresholds(nowS, concussive, rockedNow);
+      this.applyHeadThresholds(nowS, concussive, rockedNow, imp);
     } else if (imp.region === 'body') {
       const site = (isBodySite(imp.subLocation) ? imp.subLocation : 'abdomen') as BodySite;
       const acuteAdd = front.raw * bodyAcuteMult(t, site)
@@ -484,18 +484,28 @@ export class DamageState {
    * TKO path. §6.2 lists "roll or threshold" as an open question; this is the
    * reading that satisfies the calibration targets, and the gate is the knob.
    */
-  private applyHeadThresholds(nowS: number, resolvedByRoll: boolean, wasHurt: boolean): void {
+  private applyHeadThresholds(
+    nowS: number, resolvedByRoll: boolean, wasHurt: boolean, imp: StrikeImpact,
+  ): void {
     const t = this.t;
     const a = this.regions.head.acute;
     if (!wasHurt) return;
-    if (a >= t.n('dmg.head.thr.ko') && !this.has(S.ko)) {
+    if (!resolvedByRoll && a >= t.n('dmg.head.thr.ko') && !this.has(S.ko)) {
       // The accumulation path to a true KO ("KO'd on the ground under a
       // barrage"). §6.2 keeps both paths and logs which one fired.
+      // `!resolvedByRoll` because §2.3.1 says the single-impact outcome of the
+      // §2.4 roll *overrides* the threshold mapping for that impact: without
+      // it a `rocked` or `knockdown_flash` roll on a fighter already near 90
+      // was silently upgraded to a KO by the same strike.
       this.unconsciousUntilS = nowS + t.n('ko.unconsciousMin');
       this.groundedUntilS = this.unconsciousUntilS;
       this.enter(S.ko, null, this.unconsciousUntilS, 1);
       recordKnockout(t, this.career);
-      this.event('knockdown', { kind: 'ko', severity: 1 }, 'knocked out by accumulation');
+      this.event(
+        'knockdown',
+        { kind: 'ko', cause: imp.tech, region: imp.region, severity: 1 },
+        'knocked out by accumulation',
+      );
       this.kdLog.push(nowS);
       this.knockedDownCue = { cause: 'legal_strike', kind: 'ko' };
       return;
@@ -504,7 +514,11 @@ export class DamageState {
       this.groundedUntilS = Math.max(this.groundedUntilS, nowS + t.n('kd.hurt.riseMin'));
       this.riseAllowedAtS = nowS + t.n('kd.hurt.riseMin');
       this.enter(S.knockdownHurt, null, nowS + t.n('kd.hurt.freezeMin'), 1);
-      this.event('knockdown', { kind: 'hurt', severity: 1 }, 'dropped by accumulated damage');
+      this.event(
+        'knockdown',
+        { kind: 'hurt', cause: imp.tech, region: imp.region, severity: 1 },
+        'dropped by accumulated damage',
+      );
       this.kdLog.push(nowS);
       this.knockedDownCue = { cause: 'legal_strike', kind: 'hurt' };
     }

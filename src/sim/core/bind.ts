@@ -450,16 +450,40 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     return speed > 1.0 ? 'movementHighPace' : speed > 0.05 ? 'movementLowPace' : 'idleStanding';
   }
 
-  function pushDamageEvents(w: World, events: readonly DamageEvent[], subMs = 0): void {
+  /**
+   * 05 addresses every `DamageEvent` to the fighter it happened *to*
+   * (`actor === target === this.profile.id`) — `DamageState` has no idea who
+   * is hitting it. A knockdown, though, belongs to the fighter who caused it:
+   * `stats.ts` reads `e.actor` for `knockdowns`, and 06's judging reads that
+   * tally, so leaving the id as 05 wrote it scored every accumulation, body
+   * and leg knockdown for the fighter who was dropped. `by` is the causer when
+   * the caller knows it (the striker at P4), otherwise the last fighter to
+   * land on this one.
+   */
+  function pushDamageEvents(
+    w: World, events: readonly DamageEvent[], subMs = 0, by = -1,
+  ): void {
     for (const e of events) {
-      emit(w, { ...e, tick: w.tick, subMs, round: w.round });
-      if (e.kind === 'knockdown') {
-        const f = w.fighters[e.actor];
-        if (f) {
-          f.posture = 'down';
-          f.downTicks = Math.max(f.downTicks, 10);
-          w.scheduler.queue.cancelFor(f.id, 'knockdown');
-        }
+      const downed = e.actor;
+      const f = w.fighters[downed];
+      const cause = e.kind === 'knockdown'
+        ? (by >= 0 ? by : (f?.lastStruckBy ?? -1))
+        : -1;
+      emit(w, {
+        ...e,
+        tick: w.tick,
+        subMs,
+        round: w.round,
+        ...(e.kind === 'knockdown' && cause >= 0 && cause !== downed
+          ? { actor: cause, target: downed }
+          : {}),
+      });
+      if (e.kind === 'knockdown' && f) {
+        f.posture = 'down';
+        f.downTicks = Math.max(f.downTicks, 10);
+        f.knockdowns++;
+        w.scheduler.queue.cancelFor(f.id, 'knockdown');
+        w.engagements.leave(f.id, w.tick);
       }
     }
   }
@@ -846,6 +870,18 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       gloveType: actor.damage.profile.gloveType,
       posture,
       attackerState: { rocked: actor.damage.has(S.rocked), fatigue: actor.energy.f },
+      // 05 §2.2.2 reads `targetState` for `kGround` (x0.7 on the mat), for
+      // `kRelaxed` (x1.2 when the defender is mid-action or blowing) and for
+      // the braced absorb. Leaving it unset handed 05 the all-false default on
+      // every impact, so ground-and-pound was scored as if the defender were
+      // standing and `kRelaxed` never fired.
+      targetState: {
+        midAction: target.action !== null,
+        mouthOpen: refereeRuntime(w).obs[target.id]?.mouthOpen ?? false,
+        guardHand: g.id === 'guard.low_hands' ? 'away' : 'up',
+        braced: false,
+        grounded: onFloor,
+      },
       guard: g,
       defence: resolvedDefenceOf(target, spec, attackerSkill, defenderSkill),
       passiveBlockP: passiveBlockP(g, spec, defenderSkill),
@@ -893,29 +929,16 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         body: after.body - before.body,
         legs: after.legs - before.legs,
       };
-      pushDamageEvents(w, result.events, contact.subMs);
+      target.lastStruckBy = actor.id;
+      pushDamageEvents(w, result.events, contact.subMs, actor.id);
       if (result.attackerInjury) {
         pushDamageEvents(w, actor.damage.applySelfInjury(result.attackerInjury), contact.subMs);
       }
-      if (result.outcome === 'ko' || result.outcome === 'knockdown_hurt'
-        || result.outcome === 'knockdown_flash') {
-        target.posture = 'down';
-        target.downTicks = Math.max(target.downTicks, 10);
-        target.knockdowns++;
-        w.scheduler.queue.cancelFor(target.id, 'knockdown');
-        w.engagements.leave(target.id, w.tick);
-        emit(w, {
-          ...base(w, 'knockdown', actor.id, target.id,
-            `${target.runtime.def.short} is down!`, contact.subMs),
-          kind: 'knockdown',
-          detail: {
-            kind: result.outcome === 'ko' ? 'ko'
-              : result.outcome === 'knockdown_flash' ? 'flash' : 'hurt',
-            cause: spec.id,
-            severity: result.alphaEq,
-          },
-        });
-      }
+      // 05 has already emitted the `knockdown` event for a roll outcome
+      // (`emitKnockdown`) and `pushDamageEvents` has already applied the
+      // posture, the queue cancel and the engagement exit. Emitting a second
+      // one here double-counted every §2.4 roll knockdown in `stats.ts` and in
+      // 06's judging.
       target.lastStruckTick = w.tick;
       target.unansweredStrikes++;
       actor.unansweredStrikes = 0;

@@ -99,6 +99,14 @@ export interface FighterWorldState {
   /** Consecutive unanswered strikes taken, for the referee. */
   unansweredStrikes: number;
   lastStruckTick: number;
+  /**
+   * Who landed the last impact on this fighter, or -1. 05's `DamageState`
+   * addresses its own events to the fighter they happen *to* (it has no idea
+   * who is hitting it), so the binder needs this to re-address a knockdown or
+   * a delayed liver collapse to the fighter who caused it before it reaches
+   * the stats and the judges.
+   */
+  lastStruckBy: number;
   lastActionTick: number;
 }
 

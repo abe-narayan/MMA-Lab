@@ -59,7 +59,7 @@ export const DAMAGE_PARAMS: ParamSpec[] = [
   P('dmg.absorb.cap', 0.95, 'ratio', '[E]', PROB),
 
   P('dmg.forceRef', 3400, 'N', '[S: DAMAGE §3.1 — Walilko 2005 straight to jaw 3,427 N]', { free: false, min: 1000, max: 6000 }),
-  P('dmg.rawScale', 100, '0-100', '[E]', { min: 10, max: 300, note: 'Raw damage units produced by a fully-delivered forceRef impact.' }),
+  P('dmg.rawScale', 50, '0-100', '[E]', { min: 10, max: 300, note: 'Raw damage units produced by a fully-delivered forceRef impact. Set from the chapter own acceptance row C13 (loser absorbs 11 +/- 3 head significant strikes before a TKO): at 100 the engine measures 4.0, at 50 it measures 11.9. See docs/design/PHASE4_FINDINGS.md C-7.' }),
   P('dmg.kWeaponDmg.fist', 1.0, 'ratio', '[E]', RATIO),
   P('dmg.kWeaponDmg.hammerfist', 0.8, 'ratio', '[E]', RATIO),
   P('dmg.kWeaponDmg.elbow', 1.1, 'ratio', '[E]', RATIO),

@@ -17,7 +17,9 @@
 import type { SimConfig } from '../core/config';
 import type { PositionId } from '../core/ids';
 import type { SimEvent } from './events';
-import { positionNode, hasPositionNode, roleFor } from '../grappling';
+import {
+  grapplingEdge, hasGrapplingEdge, positionNode, hasPositionNode, roleFor,
+} from '../grappling';
 
 /** Seconds a takedown must be held before UFCStats records it (09 §4.1). */
 export const TD_HOLD_SECONDS = 3;
@@ -138,6 +140,41 @@ function phaseOf(node: PositionId | null): StrikePosition {
 }
 
 /**
+ * "On the mat" for the §4.1 takedown rule, which is narrower than `phaseOf`.
+ *
+ * The §2.2.3 `attack` nodes (`pos.td_*`, `pos.throw_in_progress`) are *ground*
+ * for striking purposes — a captured single leg is not distance striking — but
+ * nobody is down yet: the shot is still contested. `transient` is the scramble
+ * and the post-knockdown node, neither of which is a takedown either. A
+ * takedown is scored only once the pair reaches a real ground position and
+ * holds it (09 §4.1), so the stabilisation clock keys on this, not `phaseOf`.
+ */
+function isMatNode(node: PositionId | null): boolean {
+  if (node === null || !hasPositionNode(node)) return false;
+  const family = positionNode(node).family;
+  return family !== 'standingFree' && family !== 'clinch'
+    && family !== 'attack' && family !== 'transient';
+}
+
+/**
+ * Is this edge a takedown *attempt* in the UFCStats sense?
+ *
+ * `edgeEventKind` in the binder reports every §2.3 A `entry` edge as a
+ * `takedown` event, because that is the event taxonomy 09 §3 gives it — but
+ * the A group also holds the clinch entries (`tech.clinch_entry_cold`,
+ * `tech.clinch_entry_strikes`) and `tech.pull_guard`, and UFCStats counts
+ * none of those as takedown attempts. A shot is an entry that reaches the
+ * §2.2.3 attack layer; everything else is a capture or a throw.
+ */
+function isTakedownAttemptEdge(edgeId: string | undefined): boolean {
+  if (edgeId === undefined || !hasGrapplingEdge(edgeId)) return false;
+  const edge = grapplingEdge(edgeId);
+  if (edge.kind === 'capture' || edge.kind === 'throw') return true;
+  if (edge.kind !== 'entry') return false;
+  return edge.to.some((d) => hasPositionNode(d.node) && positionNode(d.node).family === 'attack');
+}
+
+/**
  * 09 §4.1 significance: landed at distance always counts; in clinch or on the
  * ground only power strikes do. The event carries the technique id, which is
  * all that is needed to tell a jab from a power strike.
@@ -160,11 +197,19 @@ interface PairState {
   /** Fighter in slot `a` of the node. */
   a: number;
   b: number;
-  /** Tick the pair entered a ground node through a takedown, or -1. */
+  /** Tick the pair reached the mat, or -1 while nobody is down. */
   tdTick: number;
   /** Fighter credited with the takedown that put them here, or -1. */
   tdBy: number;
   tdCounted: boolean;
+  /**
+   * Who shot. A takedown chain runs entry -> capture -> mat across several
+   * edges (`tech.double_leg` into `pos.td_double_leg_in`, then
+   * `tech.front_headlock_go_behind` into `pos.ground_turtle`), and only the
+   * first of those is a `takedown` event. This carries the shooter forward
+   * through the chain so the credit survives to the landing.
+   */
+  shooter: number;
 }
 
 /**
@@ -213,15 +258,35 @@ export function computeStats(
   };
 
   const setPair = (a: number, b: number, node: PositionId, tick: number, byTakedown: boolean): void => {
+    const prev = pairOf.get(a);
+    const same = prev !== undefined
+      && ((prev.a === a && prev.b === b) || (prev.a === b && prev.b === a));
+    const carried = same ? prev : undefined;
     clearPair(a);
     clearPair(b);
     if (phaseOf(node) === 'distance') return;
-    const p: PairState = {
-      node, a, b,
-      tdTick: byTakedown ? tick : -1,
-      tdBy: byTakedown ? a : -1,
-      tdCounted: false,
-    };
+
+    // §4.1: the stabilisation clock starts when the pair first reaches the mat
+    // and runs until they leave it. A position change *on* the mat — passing
+    // the guard, a sweep, a scramble that lands back in a ground position — is
+    // not a new takedown and does not cancel the one in progress; the old code
+    // rebuilt the pair from scratch on every event, so any improvement inside
+    // the three seconds silently erased the takedown.
+    const shooter = byTakedown ? a : (carried?.shooter ?? -1);
+    let tdTick = -1;
+    let tdBy = -1;
+    let tdCounted = false;
+    if (isMatNode(node)) {
+      if (carried && isMatNode(carried.node) && carried.tdTick >= 0) {
+        tdTick = carried.tdTick;
+        tdBy = carried.tdBy;
+        tdCounted = carried.tdCounted;
+      } else {
+        tdTick = tick;
+        tdBy = shooter >= 0 ? shooter : a;
+      }
+    }
+    const p: PairState = { node, a, b, tdTick, tdBy, tdCounted, shooter };
     pairOf.set(a, p);
     pairOf.set(b, p);
   };
@@ -256,7 +321,7 @@ export function computeStats(
         if (f) f.controlSeconds += DT_S;
       }
       // Takedown stabilisation (§4.1: landed = held >= 3 s).
-      if (!p.tdCounted && p.tdTick >= 0 && phaseOf(p.node) === 'ground'
+      if (!p.tdCounted && p.tdTick >= 0 && isMatNode(p.node)
         && (tick - p.tdTick) * DT_S >= TD_HOLD_SECONDS) {
         p.tdCounted = true;
         const f = rs.fighters[p.tdBy];
@@ -308,9 +373,13 @@ export function computeStats(
         break;
       }
       case 'takedown': {
-        if (actor) actor.takedowns.attempted++;
+        // Not every `takedown` event is a takedown attempt: the §2.3 A group
+        // also holds the clinch entries and the guard pull, and counting those
+        // in the denominator is what drove takedown accuracy to single digits.
+        const isShot = isTakedownAttemptEdge(e.detail.edge);
+        if (actor && isShot) actor.takedowns.attempted++;
         if (e.detail.result === 'success' && e.detail.to) {
-          setPair(e.actor, e.target, e.detail.to, e.tick, true);
+          setPair(e.actor, e.target, e.detail.to, e.tick, isShot);
         }
         break;
       }

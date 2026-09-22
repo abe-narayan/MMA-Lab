@@ -1,6 +1,6 @@
 # Engine Decision — rendering path for realistic fighters
 
-Status: **RECOMMENDATION — awaiting user approval before any migration.**
+Status: **APPROVED by the user on 2026-09-22 — stay on the upgraded web stack. No migration.**
 Date: 2026-09-22. Companion to `AUDIT.md`.
 
 ## The question

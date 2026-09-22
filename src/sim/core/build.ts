@@ -268,6 +268,7 @@ function newFighterState(
     controlTicks: 0,
     unansweredStrikes: 0,
     lastStruckTick: -1,
+    lastStruckBy: -1,
     lastActionTick: -1,
   };
 }

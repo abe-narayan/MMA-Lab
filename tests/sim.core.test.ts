@@ -481,3 +481,130 @@ describe('the snapshot contract', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// §4.1 takedown accounting — the Phase 4 regression pair
+// ---------------------------------------------------------------------------
+
+/**
+ * `computeStats` is a pure function of an event log, so these drive it with a
+ * hand-written log rather than a bout. Each one is a defect that shipped:
+ * takedown accuracy measured 3 % against a 38 % target because the denominator
+ * held every §2.3 A entry (clinch entries and the guard pull included) and the
+ * numerator was erased by any position change inside the three-second
+ * stabilisation window.
+ */
+describe('§4.1 takedown accounting', () => {
+  const CFG = config('td-stats');
+
+  const ev = (
+    kind: SimEvent['kind'], tick: number, actor: number, target: number,
+    detail: Record<string, unknown>,
+  ): SimEvent => ({
+    tick, subMs: 0, round: 1, kind, actor, target, text: '', detail,
+  } as unknown as SimEvent);
+
+  /** double leg -> captured -> go-behind to turtle, then held. */
+  function chain(finishEdge: string, finishKind: SimEvent['kind']): SimEvent[] {
+    return [
+      ev('takedown', 10, 0, 1, {
+        edge: 'tech.double_leg', from: 'pos.standing_close',
+        to: 'pos.td_double_leg_in', result: 'success',
+      }),
+      ev(finishKind, 18, 0, 1, {
+        edge: finishEdge, from: 'pos.td_double_leg_in',
+        to: 'pos.ground_turtle', result: 'success',
+      }),
+    ];
+  }
+
+  it('credits the takedown when the chain finishes on a non-takedown edge', () => {
+    // `tech.front_headlock_go_behind` is a `control` edge, so the binder reports
+    // it as `positionChange`. The shot that started the chain still landed.
+    const stats = computeStats(chain('tech.front_headlock_go_behind', 'positionChange'), CFG, 200);
+    expect(stats.total.fighters[0].takedowns.landed).toBe(1);
+    expect(stats.total.fighters[0].takedowns.attempted).toBe(1);
+    expect(stats.total.fighters[1].takedowns.landed).toBe(0);
+  });
+
+  it('does not let a position change inside the three seconds cancel the takedown', () => {
+    const log = [
+      ...chain('tech.front_headlock_go_behind', 'positionChange'),
+      // Passing to side control one second in: an improvement, not a reset.
+      ev('positionChange', 28, 0, 1, {
+        edge: 'tech.turtle_to_side', from: 'pos.ground_turtle',
+        to: 'pos.ground_side', result: 'success',
+      }),
+    ];
+    const stats = computeStats(log, CFG, 200);
+    expect(stats.total.fighters[0].takedowns.landed).toBe(1);
+  });
+
+  it('does not count a takedown until the pair is actually on the mat', () => {
+    // §2.2.3 `attack` nodes are a contested shot, not a completed takedown:
+    // holding `pos.td_double_leg_in` for ten seconds is a stalled single.
+    const log = [chain('tech.front_headlock_go_behind', 'positionChange')[0]];
+    const stats = computeStats(log, CFG, 200);
+    expect(stats.total.fighters[0].takedowns.attempted).toBe(1);
+    expect(stats.total.fighters[0].takedowns.landed).toBe(0);
+  });
+
+  it('counts shots, captures and throws as takedown attempts, and nothing else', () => {
+    const log = [
+      ev('takedown', 10, 0, 1, { edge: 'tech.double_leg', result: 'stuffed' }),
+      ev('takedown', 20, 0, 1, { edge: 'tech.clinch_entry_cold', result: 'stuffed' }),
+      ev('takedown', 30, 0, 1, { edge: 'tech.clinch_entry_strikes', result: 'stuffed' }),
+      ev('takedown', 40, 0, 1, { edge: 'tech.pull_guard', result: 'stuffed' }),
+    ];
+    const stats = computeStats(log, CFG, 200);
+    // Only the double leg. A clinch entry and a guard pull are neither.
+    expect(stats.total.fighters[0].takedowns.attempted).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Knockdown bookkeeping across the 05 / 09 boundary
+// ---------------------------------------------------------------------------
+
+describe('knockdowns cross the 05 boundary exactly once, to the right fighter', () => {
+  it('never emits two knockdown events for one impact', () => {
+    // 05 emits its own `knockdown` DamageEvent for a §2.4 roll outcome; the
+    // binder used to emit a second one for the same impact, double-counting
+    // every roll knockdown in the stats and in 06's judging.
+    for (let i = 0; i < 12; i++) {
+      const run = simulate(config(`kd-dup-${i}`), sparring);
+      const byKey = new Map<string, number>();
+      for (const e of run.events) {
+        if (e.kind !== 'knockdown') continue;
+        const key = `${e.tick}:${e.target}`;
+        byKey.set(key, (byKey.get(key) ?? 0) + 1);
+      }
+      for (const [key, n] of byKey) {
+        expect(n, `two knockdown events at ${key} in kd-dup-${i}`).toBe(1);
+      }
+    }
+  });
+
+  it('credits a knockdown to the fighter who caused it, never the one who fell', () => {
+    // `DamageState` addresses its events to itself, so an accumulation, body or
+    // leg knockdown arrived with `actor === target === the downed fighter` and
+    // `stats.ts` scored it for him.
+    let seen = 0;
+    for (let i = 0; i < 20; i++) {
+      const run = simulate(config(`kd-actor-${i}`), sparring);
+      for (const e of run.events) {
+        if (e.kind !== 'knockdown') continue;
+        seen++;
+        expect(e.actor, 'a fighter cannot knock himself down').not.toBe(e.target);
+      }
+      const stats = computeStats(run.events, run.config, run.ticks);
+      for (const f of stats.fighters) {
+        const dropped = run.events.filter(
+          (e) => e.kind === 'knockdown' && e.actor === f.fighter,
+        ).length;
+        expect(f.knockdowns).toBe(dropped);
+      }
+    }
+    expect(seen, 'the seeds must actually produce knockdowns').toBeGreaterThan(0);
+  });
+});

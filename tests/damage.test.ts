@@ -29,7 +29,7 @@ import { STATE_IDS } from '../src/sim/core/ids';
 import { ParamRegistry } from '../src/sim/params/registry';
 import { DAMAGE_PARAMS } from '../src/sim/params/damage.params';
 import {
-  DamageState, DAMAGE_STATE_IDS, S, defaultProfile, defaultTuning, legLoad,
+  DamageState, DAMAGE_STATE_IDS, S, defaultProfile, defaultTuning, tuningWith, legLoad,
   type FighterDamageProfile, type HeadSite, type ImpactContext, type StrikeImpact,
 } from '../src/sim/damage';
 
@@ -72,6 +72,19 @@ function impact(over: Partial<StrikeImpact> = {}): StrikeImpact {
 }
 
 const CTX: ImpactContext = { round: 1, attackerMassKg: 77 };
+
+/**
+ * Fixtures below pick forces to land in a particular damage band ("enough to
+ * rock", "enough to push the acute pool past 90"). `raw` is linear in delivered
+ * force and scales with `dmg.rawScale`, so a fixture written as a bare newton
+ * value silently means something different whenever that constant is calibrated.
+ * `bandForce` states the intent instead: it converts a force expressed on the
+ * reference scale into the force that delivers the same damage under whatever
+ * `dmg.rawScale` is currently set to.
+ */
+const RAW_SCALE_REFERENCE = 100;
+const bandForce = (forceAtReferenceScale: number): number =>
+  (forceAtReferenceScale * RAW_SCALE_REFERENCE) / T.n('dmg.rawScale');
 
 function freshState(over: Partial<FighterDamageProfile> = {}): DamageState {
   return new DamageState(defaultProfile(over), { tuning: T });
@@ -470,7 +483,7 @@ describe('state thresholds (§2.3)', () => {
     // raw x 1.3 must clear the 35-unit liver threshold but stay under the
     // 80-unit immediate-collapse threshold: 1,500 N delivered does both.
     ds.applyImpact(impact({
-      region: 'body', subLocation: 'liver', weapon: 'fist', forceN: 1500,
+      region: 'body', subLocation: 'liver', weapon: 'fist', forceN: bandForce(1500),
     }), rng, CTX);
     expect(ds.has(S.bodyCollapse)).toBe(false);       // the delay is 0.5-3.0 s
     idle(ds, 3.5);
@@ -1036,5 +1049,70 @@ describe('parameter registry (§4)', () => {
     ] as StrikeImpact['defence'][]) {
       expect(() => ds.applyImpact(impact({ defence, absorb: NaN }), rng, CTX)).not.toThrow();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. The two paths do not overlap (§2.3.1 "the roll overrides the threshold")
+// ---------------------------------------------------------------------------
+
+/** A scripted RNG: `applyImpact` only ever calls `next()`, ten times. */
+function scripted(draws: readonly number[]): RNG {
+  let i = 0;
+  return { next: () => draws[i++ % draws.length] } as unknown as RNG;
+}
+
+describe('§2.3.1 the §2.4 roll overrides the threshold mapping for its own impact', () => {
+  /**
+   * Rock a fighter, then land a shot big enough to put the acute pool past 90.
+   *
+   * These tests are about the interaction between the two knockdown paths, not
+   * about the calibrated damage scale, so they pin `dmg.rawScale` to the
+   * reference value. Scaling the fixture's force instead would change the
+   * concussion path too (alphaEq does not scale with a damage constant), which
+   * is the opposite of what these cases hold fixed.
+   */
+  function rockedAtNinety(): DamageState {
+    const ds = new DamageState(defaultProfile({ chinEff: 50 }), {
+      tuning: tuningWith({ 'dmg.rawScale': RAW_SCALE_REFERENCE }),
+    });
+    // Two chin shots at the §2.1 power median are enough to enter `rocked`.
+    const quiet = scripted([0.999]);
+    ds.applyImpact(impact({ forceN: 2000, subLocation: 'chin' }), quiet, CTX);
+    expect(ds.has(S.rocked)).toBe(true);
+    return ds;
+  }
+
+  it('does not upgrade a `rocked` roll into a KO just because the pool crossed 90', () => {
+    const ds = rockedAtNinety();
+    // d[0] = 0 makes the impact concussive whatever pConcuss is; d[1] = 0.999
+    // puts the outcome split past kKO + hurt + flash, i.e. `rocked`.
+    const res = ds.applyImpact(
+      impact({ forceN: 4000, subLocation: 'chin' }),
+      scripted([0, 0.999, 0.5, 0.5, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999]),
+      CTX,
+    );
+    expect(res.concussive).toBe(true);
+    expect(res.outcome).toBe('rocked');
+    expect(ds.snapshotFields().damage.head).toBeGreaterThan(0.89);
+    expect(ds.has(S.ko), 'the roll said `rocked`; the threshold must not overrule it').toBe(false);
+  });
+
+  it('still reaches the KO band by accumulation when the roll did not resolve the impact', () => {
+    const ds = rockedAtNinety();
+    // d[0] = 0.999 is above any pConcuss this chapter produces: no roll.
+    const res = ds.applyImpact(
+      impact({ forceN: 4000, subLocation: 'chin' }), scripted([0.999]), CTX,
+    );
+    expect(res.concussive).toBe(false);
+    expect(ds.has(S.ko)).toBe(true);
+  });
+
+  it('never emits more than one knockdown event for one impact', () => {
+    const ds = rockedAtNinety();
+    const res = ds.applyImpact(
+      impact({ forceN: 4000, subLocation: 'chin' }), scripted([0.999]), CTX,
+    );
+    expect(res.events.filter((e) => e.kind === 'knockdown')).toHaveLength(1);
   });
 });
