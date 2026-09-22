@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit tests
+        run: npm test
+      - name: Grappling-pair invariant sweep
+        run: npm run consistency
+
+  determinism:
+    name: Corpus reproduces from the seed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The whole premise of this project is that a bout is a pure function of
+      # its seed. Regenerating the corpus must reproduce the committed bundle
+      # byte for byte; if it does not, either the engine changed without the
+      # bundle being regenerated, or the engine is not deterministic.
+      - name: Regenerate the corpus
+        run: npm run generate
+      - name: Committed bundle must be byte-identical
+        run: git diff --exit-code -- src/data/replays.ts
+      - name: Verify every stored replay reproduces its state stream
+        run: npm run verify
+
+  build:
+    name: Single-file build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # Also audits the output: the page must not reference anything external.
+      - name: Inline into a single self-contained page
+        run: node scripts/inline.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bout-lab-standalone
+          path: dist/standalone.html
+          if-no-files-found: error

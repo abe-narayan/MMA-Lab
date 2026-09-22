@@ -1,0 +1,113 @@
+name: Modelling question
+description: Challenge an assumption in src/engine/params.ts, or the reasoning behind one.
+title: "[model] "
+labels:
+  - modelling
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most useful kind of issue this project can receive.
+
+        Every probability, coefficient and threshold in Bout Lab is a hand-chosen modelling
+        assumption. None of them is fitted to real fight data; most were chosen because they
+        produced a bout that looked plausible on screen. They all live in one file,
+        `src/engine/params.ts`, precisely so that they can be argued with one at a time.
+
+        "This looks implausible on screen" is a legitimate argument here, and is honestly how
+        most of the current values were arrived at. Just say so plainly rather than presenting
+        it as data.
+
+        Please do not use this template to ask the project to predict a real matchup, to model
+        a named person, or to be validated against real fight records.
+
+  - type: input
+    id: parameter
+    attributes:
+      label: Which parameter
+      description: >-
+        The field name in src/engine/params.ts, or the derivation constant in
+        src/engine/fighter.ts. One per issue where possible.
+      placeholder: "flushChance, or the 0.70 + 0.30 * techniqueIndex power gate"
+    validations:
+      required: true
+
+  - type: input
+    id: current-value
+    attributes:
+      label: Its current value
+      placeholder: "0.05"
+    validations:
+      required: true
+
+  - type: input
+    id: proposed-value
+    attributes:
+      label: What you think it should be
+      description: A value or a range. "Lower, but I do not know by how much" is an acceptable answer - say that.
+      placeholder: "0.02, or 0.01 to 0.03"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reasoning
+    attributes:
+      label: Evidence or reasoning
+      description: >-
+        What supports the change? Published data, a documented rule set, physical reasoning,
+        domain experience, or an argument that the current value produces behaviour that does
+        not read plausibly. Cite what you can, and be explicit about which of those this is.
+      placeholder: |
+        The value I am arguing against is a per-strike placement lottery available to both
+        sides on identical terms. My argument is that ... and the basis for it is ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: basis
+    attributes:
+      label: What kind of argument is this
+      description: Be honest here; it does not weaken your case, it just tells a reader how to read it.
+      options:
+        - Published data or a cited source
+        - A documented rule set or regulation
+        - Physical or mathematical reasoning
+        - Domain experience / coaching or competing background
+        - It does not look plausible on screen
+        - Internal inconsistency with another parameter in the same file
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-effect
+    attributes:
+      label: What you expect it to change
+      description: >-
+        Which outputs should move, and roughly how far. If you have run it, paste the before
+        and after win rates per format, one line each, from `N=200 npx tsx scripts/calibrate.ts`.
+        The shipped corpus gives 1v1 100.0%, 1v2 99.9%, 1v3 96.3%, 1v4 75.2%, 1v5 24.1%.
+      render: shell
+
+  - type: textarea
+    id: knock-ons
+    attributes:
+      label: Knock-on effects you can see
+      description: >-
+        Parameters in this model are not independent, and the multi-opponent results in
+        particular are dominated by behavioural assumptions rather than physical ones. What
+        else would this move?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have named a specific parameter and a specific value I think it should take.
+          required: true
+        - label: I have stated what kind of argument this is, and have not presented a judgement call as a measurement.
+          required: true
+        - label: I understand this is a modelling toy and I am not asking it to predict a real outcome.
+          required: true

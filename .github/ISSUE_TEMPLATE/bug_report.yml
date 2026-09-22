@@ -1,0 +1,129 @@
+name: Bug report
+description: Something in the engine, the viewer or the dashboard behaves incorrectly.
+title: "[bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this.
+
+        **Every bout is reproducible from three things: the seed, the format and the bout index.**
+        With those, anyone can regenerate the identical bout and step through it tick by tick,
+        so please fill all three in even if the problem looks obvious from a screenshot.
+
+        If you want to argue that a modelling assumption is wrong rather than report a defect,
+        please use the "Modelling question" template instead. A win rate you disagree with is
+        usually an assumption, not a bug.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe, and what did you expect instead?
+      placeholder: |
+        A fighter was drawn on top with nobody underneath from about 0:42 of round 2.
+        Expected: the grappling invariant guarantees a partner.
+    validations:
+      required: true
+
+  - type: input
+    id: seed
+    attributes:
+      label: Seed
+      description: >-
+        The master seed. Shown in the provenance bar above the viewer, stored in
+        src/data/replays.ts, and overridable with $MASTER_SEED. The shipped corpus uses
+        bout-lab-v1.
+      placeholder: bout-lab-v1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: format
+    attributes:
+      label: Format
+      description: The number of opponents.
+      options:
+        - 1v1
+        - 1v2
+        - 1v3
+        - 1v4
+        - 1v5
+    validations:
+      required: true
+
+  - type: input
+    id: bout-index
+    attributes:
+      label: Bout index
+      description: The bout number within that format, as shown in the controls.
+      placeholder: "42"
+    validations:
+      required: true
+
+  - type: input
+    id: tick
+    attributes:
+      label: Tick or round time
+      description: If the problem happens at a particular moment, when?
+      placeholder: "tick 1187, or round 2 at 0:42"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it occur
+      options:
+        - Engine / simulation result
+        - Determinism or verification (digest mismatch, verified false)
+        - Grappling invariant
+        - 3D replay viewer
+        - Dashboard / analytics
+        - Model tab
+        - Build, scripts or the single-file bundle
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: >-
+        The commands or the clicks. Output from the scripts is very helpful - for example
+        `npx tsx scripts/exportBout.ts 3 42` for a full tick-by-tick dump of bout 42 of the
+        1v3 format, or `npm run consistency` for the invariant sweep.
+      render: shell
+
+  - type: textarea
+    id: checks
+    attributes:
+      label: Output of the checks
+      description: >-
+        If you can, paste the relevant output of npm test, npm run verify or
+        npm run consistency. Redact nothing; none of it contains anything personal.
+      render: shell
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Node version, OS, browser, and whether you were running the dev server, the preview build or dist/standalone.html.
+      placeholder: "Node 22.9.0, macOS 15, Firefox 131, dist/standalone.html from file://"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have given the seed, the format and the bout index, so this bout can be reproduced exactly.
+          required: true
+        - label: This is a defect in the implementation, not a disagreement with a modelling assumption.
+          required: true
+        - label: I have read the disclaimer in the README and I am not reporting that the model disagrees with a real-world outcome.
+          required: true

@@ -1,0 +1,9 @@
+# Blank issues stay available: not everything fits the two forms, and a
+# well-argued "I think this whole approach is wrong" is welcome.
+#
+# Note for whoever publishes this repo: GitHub requires contact_links entries to
+# carry absolute URLs, so they cannot be added until the repository URL is
+# known. Once it is, useful ones would be the README disclaimer section
+# (#read-this-before-you-read-anything-else), src/engine/params.ts,
+# CONTRIBUTING.md and .github/SECURITY.md.
+blank_issues_enabled: true
