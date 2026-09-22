@@ -204,7 +204,7 @@ interface PhysicalAttributes {
 | `handSpeed` | Fist velocity at impact for a straight punch | 8.0 m/s | 9.3 m/s | 10.0 m/s | 02: execution-time multiplier, telegraph, force; 01: `powerIndex` | Olympic straight 9.14 m/s `[S: DP §3.1 Walilko 2005]`; other anchors `[E]` |
 | `kickSpeed` | Foot velocity at impact for a roundhouse | 6.5 m/s | 7.3 m/s | 7.7 m/s | 02: kick execution-time multiplier, force | MT expert 7.22 ± 1.47 m/s `[S: MT §7.1]`; others `[E]` |
 | `cardio` | Aerobic capacity (`vo2` 0–1 in 05 = cardio/100) | VO2max 55 ml/kg/min | 63 | 70 | 05: PCr refill rate, lactate clearance, aerobic debt; 07: pace targets | `[S: DP §4.1]` for the role; ml/kg anchors `[E]` |
-| `chin` | Tolerance to rotational head acceleration (05 `chin` 0–1 = chinEff/100, 0.5 = median) | median | needs ≈ +870 rad/s² more per impact | ≈ +1300 rad/s² | 05: KO logistic z-shift | `z −= (chin − 0.5) × 2` in units of 1,800 rad/s² `[S: DP §3.2]`; `[D]` 0.30 × 2 × 1,800 = 1,080 → quoted values are 0.8×/1.2× that band |
+| `chin` | Tolerance to rotational head acceleration (05 reads `chinEff`, §2.4.3; 05's `chin` 0–100 = `chinEff`) | median | needs ≈ +600 rad/s² more per impact | ≈ +900 rad/s² | 05: KO logistic z-shift | `z −= 0.02 × (chinEff − 50)` in units of 05's `ALPHA_SCALE = 1,000 rad/s²` `[S: DP §3.2 form; scale D: 05 §2.4.1]`; `[D]` 30 pts × 0.02 × 1,000 = 600 [REVIEW: the 1,800 rad/s² unit and the +870/+1,300 anchors assumed DP §3.2's (α − 6,383)/1,800 logistic; 05 §2.4.1 records why it uses midpoint 8,500 / scale 1,000 instead, so the per-point shift is 20 rad/s²] |
 | `bodyToughness` | Pain tolerance for body/leg trauma (05 `painTolerance`) | ×1.00 thresholds | ×1.15 | ×1.225 | 05: body/leg state thresholds ±25 % | `[S: DP §7 r22]` |
 | `recovery` | Speed of acute recovery (rocked, body-hurt) and between-round refill | acute half-lives ×1.00 | ×0.82 | ×0.73 | 05: acute half-lives ±30 %; 01: `energy.breakRefillFrac` | `[S: DP §7 r22]` |
 | `flexibility` | Range of motion (hips/hamstrings/shoulders) | head kick at own head height with quality ×0.90 | ×1.00 | ×1.05 | 02: head-kick availability and exec quality; 03/04: rubber guard, triangle from guard, escape from certain locks (`BJJ §4 S12`) | `[S: BJJ §4 S12]` for the role; multipliers `[E]` |
@@ -220,7 +220,7 @@ footSpeedMs         = 2.0 + 0.0133 × (speed − 50)                        // 5
 handSpeedMs         = 8.0 + 0.0433 × (handSpeed − 50)                    // 80→9.30 (≈ Olympic straight 9.14), 95→9.95
 kickSpeedMs         = 6.5 + 0.0267 × (kickSpeed − 50)                    // 80→7.30, 95→7.70
 bodyToughnessThresholdMult = 1 + 0.5 × (bodyToughness/100 − 0.5)        // ±25 %  [S: DP §7 r22]
-recoveryHalfLifeMult       = 1 − 0.6 × (recovery/100 − 0.5)             // ±30 %  [S: DP §7 r22]
+recoveryHalfLifeMult       = 1 − 0.6 × (recovery/100 − 0.5)             // ±30 %  [S: DP §7 r22]  [REVIEW: 05 §2.3/§2.6.1 applies half of this range (1 − 0.003 × (recovery − 50), ±15 %) to acute half-lives and the other half to the rocked-exit speed; the ±30 % here is the total effect, not the per-channel factor]
 neckMult                   = 1.15 − 0.30 × (neck/100)                   //        [S: DP §3.2]
 flexKickQualityMult        = 0.80 + 0.25 × (flexibility/100)            // 50→0.925, 80→1.0, 100→1.05
 balanceStumbleMult         = 1.6 − 1.2 × (balance/100)                  // 50→1.0, 80→0.64, 100→0.4
@@ -775,6 +775,12 @@ anxietyReadPenalty = (0.16 − 0.11 × defSkill_dom/100) × 2 × (1 − composur
 fatigueRtMult  = 1 + 0.125 × f                                      // f = 05 fatigue index; RT +10–15 % under fatigue, read accuracy unchanged [S: LIT_B §4.7]
 ```
 
+[REVIEW: these four formulas are the single source for read / counter-on-read / feint-bite probabilities. The
+per-tier tables in 02 §2.4.3/§3/§4 (`readBase`, `counterOnRead`, `feint.bite`) and 07 §2.4.4/§2.4.5/§3
+(`p_tier`, `p_counter`, `p_bite_tier`) are reference values of these formulas at tier-midpoint sub-skills and are
+not separate parameters; the engine evaluates `readP_dom`, `counterOnReadP`, `feintBiteP` from the fighter's
+actual sub-skills, then 02 adds its situational logit modifiers (telegraph, fatigue, hurt, vision, pattern).]
+
 The **simple** reaction latency stays `reactionTimeMs` (§2.2.1) for every tier `[S: LIT_B §4.2]`. Reactive defence
 against an attack is possible only if `execMs_attack + telegraphMs − cueLeadMs ≥ reactionTimeMs × fatigueRtMult`
 (02's reaction gate, `BOX §8 r13`); otherwise only positional/anticipatory defence is available. This is what makes
@@ -867,7 +873,7 @@ decision weights `[S: LIT_B §4.1, §4.2]`.
 | `beh.gen.pacing_t4` | T4–T5 | all | R3/R1 ≈ 0.85–0.90; late surge when own score estimate says behind (T5 adjusts pace to score) | `[S: FD §5]`, `[S: BOX §6]` |
 | `beh.gen.compose_sell` | T3–T5 (striking tier) | hit by a strike of power tier < 4 | no hit-reaction animation; judges' visible-damage cue suppressed | `[S: MT §6]`, `[S: MT §8 r24]` |
 | `beh.gen.show_pain` | T0–T1 (striking tier) | any clean hit | ▶ `anim.hit_react_big`; visible-damage judge cue ×1.5 | `[S: MT §6]`; ×1.5 `[E]` |
-| `beh.gen.score_awareness` | iqTier 1–5 | round end / final 60 s | score-estimate σ: none / corner-only / 0.5 / 0.3 / 0.2 (rounds) | `[S: MIS §8]` |
+| `beh.gen.score_awareness` | iqTier 1–5 | round end / final 60 s | score-estimate σ (rounds): 1.0 (corner-driven only) / 0.7 / 0.5 / 0.3 / 0.2 = 07 `ai.score.sigma.tier` [REVIEW: was "none / corner-only / 0.5 / 0.3 / 0.2"; 07 §2.6.3 needs a number for iqTier 1–2 and both cite MIS §8]; T0 (untrained) has no estimate | `[S: MIS §8]` |
 | `beh.gen.corner_uptake` | iqTier 1–5 | round break | 0.5 / 0.6 / 0.7 / 0.8 / 0.9, +adaptability term (§2.5) | `[S: MIS §8]` |
 | `beh.gen.adapt_cadence` | iqTier 1–5 | in-round | `T_eval` never / 90 / 60 / 30 / 20 s; `P(change|signal)` 0.3 / 0.5 / 0.7 / 0.85 / 0.95 × adaptability term; dwell — / 45 / 30 / 20 / 15 s | `[S: MIS §7.3]` |
 | `beh.gen.plan_abandon` | all (discipline attr) | hit clean ≥ 2 in 10 s | `P = 0.6 × (1 − discipline/100)`: plan weights off, `favouriteTechniques` ×2 (fights on instinct) | `[E]`; failure mode `[S: MIS §7.8 (3)]` |
@@ -885,7 +891,7 @@ decision weights `[S: LIT_B §4.1, §4.2]`.
 | id | tiers | trigger | effect | tag |
 |---|---|---|---|---|
 | `beh.box.square_stance` | T0 | standing | ⊕ stance squareness 0.8, weight on heels, chin up: P(hit lands on chin/jaw sub-location) +0.15; takedown vulnerability +20 %; ▶ `anim.stance_square_heels` | `[S: BOX §6]`; values `[E]` |
-| `beh.box.cross_feet` | T0–T1 | lateral movement | P(feet cross per step) 0.40 / 0.15; while crossed: balance −40 %, punch power ×0.5, P(stumble on contact) 0.3; ▶ `anim.step_cross` | `[S: BOX §6]`; P `[E]` |
+| `beh.box.cross_feet` | T0–T1 (T2 at 0.02) | lateral movement | P(feet cross per step) 0.25 / 0.10 (T2 0.02) [REVIEW: was 0.40 / 0.15 [E]; aligned to BOX §8 r32 and 02 `p.strike.move.feetCrossP`]; while crossed: balance −40 %, punch power ×0.5, P(stumble on contact) 0.3; ▶ `anim.step_cross` | `[S: BOX §6, §8 r32]` |
 | `beh.box.chin_up_mouth_open` | T0 always; T1 at `f > 0.5` | — | 05's "relaxed/mouth open" ×1.2 on alphaEq permanently on; ▶ `anim.chin_up` | `[S: DP §3.2]`, `[S: BOX §6]` |
 | `beh.box.hands_at_chest` | T0 | guard posture | ⊕ guard height −40 %: head absorb (blocked) 0.5 → 0.2; ▶ `anim.guard_chest` | `[S: BOX §6]`; 0.2 `[E]` |
 | `beh.box.arm_punch` | T0 | any punch | `techGate ≈ 0.50`; elbows flare; wide loops: hook telegraph +0.25; ▶ `anim.punch_arm_only` | `[S: LIT_B §4.9]`, `[S: BOX §6]` |
@@ -957,7 +963,7 @@ decision weights `[S: LIT_B §4.1, §4.2]`.
 | `beh.wr.head_position` | T0–T1 / T2 / T3 / T4+ | shot | head down-outside-low: guillotine catch window ×2.5 / correct 60 % / 85 % / correct | `[S: WR §7]` |
 | `beh.wr.sprawl_late` | T0–T1 | opponent shoots | sprawl reaction ≥ 0.6 s (fires only if shot exec ≥ 600 ms); denies ≈ 20 % | `[S: WR §7]` |
 | `beh.wr.sprawl_rate` | T2 / T3 / T4+ | shot on self | denies ≈ 50 % / 65–75 % / 80–90 % (elite examples 91–93 %) | `[S: WR §7]` |
-| `beh.wr.chain_after_stall` | by tier | shot stalled in sprawl | P(re-attack / chain): T0–T1 0.15 (stalls in `SPRAWL_TOP`), T2 0.40, T3 0.65, T4–T5 0.80–0.90; each chain step retains full base % | `[S: WR §7]` |
+| `beh.wr.chain_after_stall` | by tier | shot stalled in sprawl | P(re-attack / chain) = 03 §3.1 `0.15 + 0.008 × wrestling.chains` (T0 0.15, T1 0.31, T2 0.47, T3 0.63, T4 0.79, T5 0.91 at band midpoints; WR §7 quotes 0.15 / 0.40 / 0.65 / 0.80–0.90) [REVIEW: 03's formula is the engine value; this row is descriptive]; T0–T1 stall in `pos.td_sprawl`; T4+ chain steps retain full base % | `[S: WR §7, §9 r9]` |
 | `beh.wr.timing_shots` | by tier | opponent commits a strike | reactive shots: T0–T1 never; T2 10 % of shots; T3 30 %; T4+ ≥ 50 % reactive/setup (reactive +15 pp) | `[S: WR §7]` |
 | `beh.wr.finish_selection` | by tier | shot in on legs | T0–T1 one finish (drive), repeats it; T2 two; T3 3–4, switches on whizzer; T4+ full tree, takes what the defence gives | `[S: WR §7]` |
 | `beh.wr.cage_use` | by tier | open-mat stall | T0–T1 never drives to fence (loses `SINGLE_LEG_IN` to hops/limp leg); T2 50 %; T3 75 %; T4+ 90 % | `[S: WR §7]` |
@@ -1128,6 +1134,43 @@ values are `[E]` design data** placed inside the `CONV §3` tier bands and the p
 5, `yearsTrained 0`); transfers (§2.3.3) apply automatically. Technique/submission ids (`tech.*`, `sub.*`) are
 owned by 02–04; any id that does not resolve there must be aliased, not silently dropped. Appearance blocks are
 omitted (creator/generator fills them; they do not affect simulation).
+
+[REVIEW: added — archetype id alias map.] The presets below were written before 02/03/04 fixed their ids. The
+following preset ids resolve at load time to the canonical ids (02 §2.2 / §2.3.4 / §2.4.2, 03 §2.3 / §5.1, 04 §3);
+ids not listed here already match.
+
+| preset id | canonical id (owner) | note |
+|---|---|---|
+| `tech.lead_hook` | `tech.hook_lead` (02) | |
+| `tech.body_hook_lead` / `tech.body_hook_rear` | `tech.hook_lead_body` / `tech.hook_rear_body` (02) | |
+| `tech.overhand_rear` | `tech.overhand` (02) | |
+| `tech.low_kick_rear` | `tech.kick_low_rear` (02) | |
+| `tech.calf_kick` | `tech.kick_calf` (02) | |
+| `tech.round_kick_body_rear` | `tech.kick_body_rear` (02) | |
+| `tech.switch_kick_body` | `tech.kick_body_switch` (02) | |
+| `tech.round_kick_head_rear` | `tech.kick_head_rear` (02) | |
+| `tech.round_kick_head_lead` | `tech.kick_head_switch` (02) | 02 has no non-switch lead head kick |
+| `tech.front_kick_body` | `tech.kick_front_snap` (02) | |
+| `tech.side_kick` | `tech.kick_side` (02) | |
+| `tech.spinning_back_kick` | `tech.kick_spinning_back` (02) | |
+| `tech.feint_jab` / `tech.feint_level` | `feint.jab` / `feint.level_change` (02 §2.3.4) | feints are `feint.*`, not `tech.*` |
+| `tech.blitz_step` | `tech.jab_step` (02) | karate blitz = step-in jab entry; 02 has no separate blitz technique |
+| `tech.clinch_knee` / `tech.collar_tie_knee` | `tech.clinch_knee` (03 §5.1 clinch/ground strike table) | |
+| `tech.clinch_elbow` | `tech.clinch_elbow` (03 §5.1) | |
+| `tech.gnp_cross` | `tech.gnp_punch` (03 §5.1) | |
+| `tech.clinch_entry_collar` / `tech.clinch_entry_underhook` | `tech.clinch_entry_strikes` (03 §2.3 A) | destination weights collar tie 0.5 / underhook 0.15 |
+| `tech.body_lock_td` | `tech.body_lock_lift_return` (03 §2.3 C) | the AI may also pick `tech.inside_trip` from the lock |
+| `tech.kick_catch_sweep` | `tech.kick_catch_takedown` (03 §2.3 A) | |
+| `tech.guard_pull` | `tech.pull_guard` (03 §2.3 A) | |
+| `tech.arm_drag_back` | `tech.arm_drag` (03 §2.3 C) | |
+| `tech.tackle` | `tech.double_leg` with no level change (03 §8.1 T0 row) | |
+| `tech.headlock` | `tech.clinch_entry_cold` → `pos.clinch_head_and_arm` (03) | T0 headlock = head-and-arm tie |
+| `tech.grab_push` | `tech.clinch_entry_cold` (03) with `beh.gen.t0_grab_push` weights | |
+| `def.slip_outside` | `def.slip_out` (02) | |
+| `def.pivot` | `def.step_off` (02) | |
+| `sub.arm_triangle` / `sub.triangle` / `sub.kimura` | 04 §0.3 node-resolved aliases | |
+| `sub.knee_bar` | `sub.kneebar` (04) | corrected in the presets below |
+| `sub.headlock_squeeze` | `sub.bulldog` (04) | corrected in the presets below |
 
 Common defaults unless overridden: `sex 'male'`, `handedness 'right'`, `dominantLeg` = handedness,
 `stanceExposure {orthodox: 0.8 × pro.total, southpaw: 0.2 × pro.total}`, `daysSinceLastBout 120`, `weightCut
@@ -1372,7 +1415,7 @@ visible); `readP_striking ≈ 0.83`, `counterOnReadP = 0.05 + 0.45 × (88 − 10
   style: { preferredRange: 'short', initiative: 'pressure', pressureBias: 90, primaryMode: 'pressureStriking', fallbackMode: 'clinchGrind',
            favouriteTechniques: [{ techId: 'tech.overhand_rear', weight: 2.0 }, { techId: 'tech.lead_hook', weight: 1.5 }, { techId: 'tech.grab_push', weight: 1.4 }, { techId: 'tech.headlock', weight: 1.3 }],
            combos: [{ id: 'combo.wild_three', sequence: ['tech.overhand_rear', 'tech.lead_hook', 'tech.overhand_rear'], weight: 1.5 }],
-           goToSubmissions: [{ subId: 'sub.headlock_squeeze', weight: 1.0 }],
+           goToSubmissions: [{ subId: 'sub.bulldog' /* [REVIEW: was sub.headlock_squeeze] */, weight: 1.0 }],
            takedowns: { prefs: [{ techId: 'tech.tackle', weight: 1.5 }], setup: 'naked', cageBias: 0.0 },
            hurtBehaviour: 'turnAway', losingBehaviour: 'gamble', tiredBehaviour: 'gamble', guardStyle: 'highGuard' } }
 ```
@@ -1561,7 +1604,7 @@ output ≈ 8–9 sig attempts/min (FLW class 7.8 `[S: FD #12]`).
   style: { preferredRange: 'clinch', initiative: 'pressure', pressureBias: 78, primaryMode: 'wrestleControl', fallbackMode: 'clinchGrind',
            favouriteTechniques: [{ techId: 'tech.overhand_rear', weight: 1.3 }, { techId: 'tech.single_leg', weight: 1.4 }, { techId: 'tech.body_lock_td', weight: 1.4 }, { techId: 'tech.gnp_cross', weight: 1.4 }],
            combos: [{ id: 'combo.overhand_shoot', sequence: ['tech.overhand_rear', 'tech.double_leg'], weight: 1.5 }, { id: 'combo.cage_trip', sequence: ['tech.clinch_entry_underhook', 'tech.inside_trip'], weight: 1.4 }],
-           goToSubmissions: [{ subId: 'sub.rnc', weight: 1.3 }, { subId: 'sub.kimura', weight: 1.2 }, { subId: 'sub.knee_bar', weight: 0.9 }],
+           goToSubmissions: [{ subId: 'sub.rnc', weight: 1.3 }, { subId: 'sub.kimura', weight: 1.2 }, { subId: 'sub.kneebar' /* [REVIEW: was sub.knee_bar] */, weight: 0.9 }],
            takedowns: { prefs: [{ techId: 'tech.single_leg', weight: 1.4 }, { techId: 'tech.body_lock_td', weight: 1.4 }, { techId: 'tech.inside_trip', weight: 1.2 }, { techId: 'tech.double_leg', weight: 1.0 }], setup: 'offSingleStrike', cageBias: 0.9 },
            hurtBehaviour: 'shoot', losingBehaviour: 'unchanged', tiredBehaviour: 'clinchRest', guardStyle: 'highGuard' } }
 ```
@@ -1888,7 +1931,7 @@ Format per attribute: `rise%/yr from 18 | peakStart–peakEnd | declineA %/yr | 
 | `beh.gen.crowd_mode_size.read_floor` | 0.45 | – | `[E]` |
 | `beh.box.square_stance.chin_p` | +0.15 | – | `[E]` |
 | `beh.box.square_stance.td_vuln` | +20 % | – | `[E]` |
-| `beh.box.cross_feet.p` | 0.40 / 0.15 | – | `[E]` |
+| `beh.box.cross_feet.p` | 0.25 / 0.10 / 0.02 (T0 / T1 / T2) | – | `[S: BOX §8 r32]` [REVIEW: was 0.40 / 0.15 [E]; = 02 `p.strike.move.feetCrossP`] |
 | `beh.box.cross_feet.effects` | balance −40 % · power ×0.5 · stumble 0.3 | – | `[E]` |
 | `beh.box.hands_at_chest.absorb` | 0.2 | – | `[E]` |
 | `beh.box.repertoire_t0.combo_decay` | 0.6 | – | `[E]` |

@@ -79,7 +79,7 @@ Section numbers in the body follow this table (03 = clinch and takedowns, 05 = d
 | `ctr.*` | named counters (§2.5.2) |
 | `feint.*` | feint actions (§2.3.4) |
 | `combo.*` | named legal chains (§2.3.2) |
-| `state.*` | transient striking states (§2.9) |
+| `state.*` | transient striking states (§2.9) [REVIEW: the `state.*` namespace is shared — 05 §2.10 owns the physiological condition states (`state.rocked`, `state.stunned`, `state.body_hurt`, …) that this section reads; the ids in §2.9 are this section's transient technical states and are listed there only] |
 | `p.strike.*` | tunables (§4) |
 
 ### 1.2 Sub-skills consumed (aliases used in this section → section 01 §2.3.1 fields)
@@ -500,8 +500,9 @@ executes the reaction the feint sells, which opens the follow-up.
 | `feint.eyes` | look at target | strike to looked-at region | guard shifts to that region | strike to the *other* region `+bonus` | [S: BOX §5 "look-away/eye feint"; E] |
 | `feint.shoulder_roll_bait` (T4+) | offer the roll | opponent's rear hand | opponent throws | counter window (§2.5) | [E] |
 
-Bite probability by **defender** tier (`p.strike.feint.bite[tier]`): T0 0.65, T1 0.60, T2 0.50, T3 0.40, T4 0.30,
-T5 0.22 [D from LB §4.5: novice ≈ 0.6, expert ≈ 0.25; intermediate interpolated]. Modified by: attacker
+Bite probability by **defender** = 01 `feintBiteP = 0.62 − 0.40 × defSkill_striking/100` (T0 0.60, T2 0.46, T4 0.30,
+T5 0.24) [REVIEW: 01 §2.7.6 owns it; the former tier table T0 0.65 … T5 0.22 [D: LB §4.5] is its reference value and
+`p.strike.feint.bite[tier]` is no longer a parameter; the draw is 07's per-tick `u_feint`]. Modified by: attacker
 `striking.feints` (`+1.5 × (skill − 50)/100` logit), same feint repeated within 20 s without a strike (`−0.7` logit
 per repeat, habituation) [E], defender `state.vision_blocked` (`+0.4`), defender fatigue (`+0.5·f`) [E].
 
@@ -619,13 +620,19 @@ reflex) [S: BOX §8 C13]; stance-familiarity penalty `× 1.10` (§2.7) [S: MIS S
    defence for the predicted strike: it is in place at launch (no latency), succeeds at its base if the strike is the
    predicted one (or in the same family), and **fails automatically** if the actual strike is a different family, a
    feint, or `state.broken_rhythm` [S: BOX §8 B8, §5 "delayed counter"].
-2. *Cue read* (at launch + telegraph): P = `sigmoid(logit(readBase[tier]) + 0.004 × telegraph_ms + 1.5 ×
-   (striking.read − 50)/100 − feintSuppression − 0.5·f − hurtPenalty − 0.4·visionBlocked)` [E for slope terms;
-   readBase D]. Success gives an **anticipation lead** `A = 80 + 0.6 × telegraph_ms` ms [E; S: LB §4.2 "50–100 ms
+2. *Cue read* (at launch + telegraph): P = `sigmoid(logit(readP_striking) + 0.004 × telegraph_ms
+   − feintSuppression − 0.5·f − hurtPenalty − 0.4·visionBlocked)` [E for slope terms] where `readP_striking` is
+   01 §2.7.6's composite (skill + fightIQ already inside it; `anxietyReadPenalty` and `telegraphMod` of 01 are
+   applied by 01/§3 as part of it) [REVIEW: was `logit(readBase[tier]) + 1.5 × (striking.read − 50)/100`, which
+   double-counted skill because `striking.read` is itself a probability (01 §2.7.6), not a 0–100 sub-skill; the
+   `readBase[tier]` table below is now reference-only]. The draw for this roll is 07's per-tick `u_read`
+   (09 §2.7 schedule); this section computes the probability, 07 supplies the draw. Success gives an
+   **anticipation lead** `A = 80 + 0.6 × telegraph_ms` ms [E; S: LB §4.2 "50–100 ms
    earlier cue pickup"] and the defender may choose any reactive defence with `Exec ≤ startup + contact/2 +
    telegraph − (L − A)`. If no reactive defence fits, only posture and `def.flinch` apply.
 
-`readBase[tier]`: T0 0.50, T1 0.58, T2 0.66, T3 0.74, T4 0.81, T5 0.87 [D from LB §4.1: novice 0.55–0.65,
+`readBase[tier]` (reference values of 01 `readP_dom` at tier-midpoint skills; not a parameter [REVIEW]): T0 0.50,
+T1 0.58, T2 0.66, T3 0.74, T4 0.81, T5 0.87 [D from LB §4.1: novice 0.55–0.65,
 intermediate 0.70–0.78, expert 0.80–0.88; largest step novice → intermediate]. Under pressure (opponent landed
 ≥ 3 strikes in the last 10 s, or `state.rocked`, or composure < 40): `hurtPenalty` = 0.65 logit for T0–T1, 0.40 for
 T2–T3, 0.20 for T4–T5 [S: LB §4.3 novices −15 %, experts −5 % → D].
@@ -639,8 +646,9 @@ pull, catch, block, shoulder roll all fit. This is the mechanism by which slow, 
 while remaining effective between novices [S: LB §4.2 sim implication].
 
 **Counter-on-read.** When a read succeeds the defender may choose a counter *instead of or after* the defence
-(§2.5) with P = `counterOnRead[tier]`: T0 0.05, T1 0.12, T2 0.25, T3 0.35, T4 0.50, T5 0.60 [D from LB §4.4:
-novice 0.05, intermediate 0.25, expert 0.5]. 07 may override with style (pressure vs counter).
+(§2.5) with P = 01 `counterOnReadP` = `0.05 + 0.45 × clamp((boxing.counters − 10)/80, 0, 1)` (T0 0.05, T2 0.22,
+T4 0.44, T5 0.53) [REVIEW: was a tier table T0 0.05 … T5 0.60 [D: LB §4.4]; 01 §2.7.6 is the owner and 07
+§2.4.4 uses the same formula]. 07 may override with style (pressure vs counter).
 
 **Defence selection when several fit** (07 default policy): highest `Success × counterValue` subject to the "weak
 vs" list of the likely follow-up (e.g. never `def.slip_in` a jab when a cross is loaded). T0–T1 pick `def.block_high`
@@ -741,7 +749,7 @@ initiations at elite level split ≈ ⅓ lead, ⅓ counter, ⅓ defensive/positi
 
 ### 2.6 Hit resolution
 
-#### 2.6.1 Pipeline (per strike, in order; every roll from the seeded RNG in this order)
+#### 2.6.1 Pipeline (per strike, in order; every roll from the seeded RNG in this order — the per-contact draw layout is fixed in 09 §2.7 [REVIEW]: steps 3–4 consume the defender's P3 draws `u_pattern` / `u_read` / `u_feint` (07 §2.1) and steps 5–11 draw `arrival, defenceSuccess|passiveBlock, placement, subLocation, force (normal = 2)` then 05's ten per-impact draws)
 
 ```
 1  legality: band check (§2.1.1), ruleset flags, availability by tier (§3)
@@ -857,7 +865,7 @@ m_eff   = m_eff_frac(tech) × massKg × commitMult
 | `σ_F` | 0.30 | [D] chosen with the §2.6.3 placement mix so that landed head punches reproduce Pierce: with placement weights 0.20/0.35/0.30/0.15 and multipliers 1/0.75/0.45/0.25, mean multiplier = 0.20+0.26+0.135+0.04 = 0.64; `F_med(cross) = 1400` → mean ≈ 900–1000 N, ≈ 87 % < 1500 N, ≈ 3–5 % ≥ 2000 N [S: LA §1.2 Pierce: median ≈ 950 N, 88 % < 1500, 2–6 % ≥ 2000] |
 | `tierMult` straights | T0 0.50, T1 0.60, T2 0.72, T3 0.85, T4 1.00, T5 1.05 | [D: LA §2 Smith 2000 novice 0.50 / intermediate 0.78 / elite 1.0] |
 | `tierMult` hooks/uppercuts/overhand | T0 0.22, T1 0.35, T2 0.55, T3 0.78, T4 1.00, T5 1.05 | [D: BOX §1.4 junior hooks/uppercuts 20–25 % of elite; LA §2 Dinu 2020] |
-| `tierMult` kicks/knees | T0 0.50, T1 0.75, T2 0.90, T3 1.00, T4 1.05, T5 1.10 | [S: MTK §6 hip rotation ×0.5/0.75/1.0/1.05/1.1 (their T0–T4 → our T0–T5 with T2/T3 interpolated D)] |
+| `tierMult` kicks/knees | T0 0.50, T1 0.60, T2 0.75, T3 1.00, T4 1.05, T5 1.10 [REVIEW: = 01 `hipRotationMult` (01 §2.7.8 maps MTK's 5 tiers as T0/T1 interpolated, T2 0.75, T3 1.00); was 0.50/0.75/0.90/1.00/1.05/1.10] | [S: MTK §6 hip rotation ×0.5/0.75/1.0/1.05/1.1 via 01 §2.3.4 tier mapping] |
 | `powerMult` | `1 + 0.008 × (power − 50)`, `power = 0.6·explosiveness + 0.4·strength` | [E; S: LA §2 Loturco r 0.67–0.85 lower-body power ↔ impact; elite lead-leg RFD +40 % S: BOX §7.4] |
 | `massMult` punches | `(massKg / 77)^0.5` | [E; S: BOX §8 E19 weight ±15 %; LA §0 in-ring force uncorrelated with mass r 0.22] |
 | `massMult` kicks/knees | `(massKg / 77)^0.8` | [E] |
@@ -870,33 +878,65 @@ m_eff   = m_eff_frac(tech) × massKg × commitMult
 | `closingSpeed` for the *defender moving into* a strike | passed in the payload; 05 owns the KO-side term `(1 + 0.5·closing/3)` [S: DP §3.2] — this section does **not** also multiply F for the defender's motion | — |
 | Head-kick / knee force at `F_cap` | never exceeds 6400 / 8200 N | [S: MTK §7.1 review upper bounds] |
 
-Rotational handoff: `rot` from Table B × `weapon` is passed unchanged; 05 multiplies its `alphaEq`. Note for 05: our
-`F` is the *delivered* in-fight force (Pierce scale), whereas DP §3.1 anchors `alphaEq = 6300 × F/3400` on a lab
-flush straight (Walilko). A T4 flush cross here is ≈ 1400 × 1.0 × lognormal ≈ 1400 N median, so 05 must either
-re-anchor its reference force to `p.strike.force.refFlushCross = 1400` N or accept that only the lognormal tail
-(≥ 3400 N, ≈ 0.2 % of flush crosses) reaches Walilko levels. §5 hook 36 gives the target that decides this.
+Rotational handoff [REVIEW: resolved with 05]: the `rot` column of Table B is **informational only**. 05 §2.2.2 owns
+the rotational factor per weapon (`ko.kWeapon`: straight 1.0, uppercut 1.05, hook/overhand 1.15, elbow 1.15, knee
+1.2, shin 1.2, foot 1.1, hammerfist 0.6, mat 0.35 — derived per newton from Viano/Walilko), so the payload no longer
+carries `rot` and 05 does not multiply by it (the hook `rot` 1.5 here was a per-strike ratio that already includes
+the hook's higher force; applying both would double-count). `p.strike.glove.boxing.rotFactor` is likewise dropped in
+favour of 05 `ko.kGlove`.
+
+Force-scale handoff [REVIEW: resolved with 05 — shared distribution = Pierce in-ring lognormal on **delivered**
+force]. `forceN` in the payload is `F` above (placement already applied). 05 sets `cleanMult = 1.0` for every impact
+that carries a `placement` (i.e. every 02 strike) and keeps `F_REF = 3,400 N`, `ALPHA_REF = 6,300 rad/s²`,
+`ALPHA_50 = 8,500`, `ALPHA_SCALE = 1,000` unchanged. Arithmetic showing the two sections already agree: with
+`F_med(cross) = 1400`, hooks 1500–1600, overhand 1550, uppercuts 1450–1500 (mean ≈ 1,500 N flush) and the placement
+mix 0.20/0.35/0.30/0.15 at ×1.00/0.75/0.45/0.25, the delivered distribution of landed distance power head punches
+is a 4-component lognormal mixture with component medians ≈ 1,500 / 1,125 / 675 / 375 N; its median lies inside the
+"solid" component ≈ 1,100 N and its log-spread ≈ 0.45–0.5 [D] — the same lognormal (median ≈ 1,150 N, σ_ln ≈ 0.45)
+that 05 §2.4.1's Monte-Carlo used, so 05's KD rate (≈ 2.3 % per landed distance power head strike, ≈ 1.1 per 100
+head sig) holds without changing any `F_med` or 05's `raw` scale. `p.strike.force.refFlushCross` is retired.
+Because 02's `σ_F` (0.30) is narrower than 05's pooled 0.45 within each placement class, the tail above 2,000 N
+(≈ 3–5 % here vs 2–4 % Pierce) is the joint C1–C3 calibration lever (`ko.alphaCal`), not a contract issue.
 
 #### 2.6.5 `StrikeImpact` payload (to 05)
 
 ```ts
+// [REVIEW: merged with 05 §2.1 — this is the single StrikeImpact contract; 05 §2.1 repeats it verbatim.
+//  Changes vs the first draft: `rot` removed (05 kWeapon), `gloveType` uses 05's enum, `defence` enum added
+//  (05 absorb table fallback), `subLocation` typed with 05's site names, `closingSpeedMs` renamed, target
+//  braced/grounded flags added, `posture` added, weapon enum = union of both drafts.]
 interface StrikeImpact {
-  tick: number; subTickMs: number;
-  attacker: number; target: number;
-  tech: string;                        // tech.*
-  weapon: 'fist'|'backfist'|'elbow'|'elbow_point'|'knee'|'shin'|'instep'|'ball_of_foot'|'heel'|'shin_on_knee';
+  tick: number; subTickMs: number;     // subTickMs = 09 `subMs` (0–99)
+  attacker: number; target: number;    // fighter ids
+  tech: string;                        // tech.* (02 §2.2, 03 §5.1 clinch/ground strike ids, 'slam'/'throw' for 03/04 landings)
+  weapon: 'fist'|'backfist'|'hammerfist'|'elbow'|'elbow_point'|'knee'|'shin'|'instep'|'ball_of_foot'|'heel'
+        |'shin_on_knee'|'head'|'mat';  // 05 maps: backfist→fist (kWeapon 1.0), elbow_point→elbow, instep/ball_of_foot/heel→foot, shin_on_knee→shin (self-damage)
   region: 'head'|'body'|'leadLeg'|'rearLeg'|'arms';
-  subLocation: string;                 // chin|temple|midface|forehead|orbit|liver|solar|ribs|spleen|abdomen|thigh|calf|knee|shin|forearm
-  placement: 'flush'|'solid'|'partial'|'glancing';
-  forceN: number; vRel: number; effMassKg: number; rot: number;
-  absorb: number;                      // 0..1 from the defence outcome (DP §3.3)
+  subLocation: 'chin'|'temple'|'midface'|'forehead'|'orbit'|'topback'          // HeadSite (05 §2.3.1)
+             | 'liver'|'solar'|'ribs'|'spleen'|'sternum'|'abdomen'             // BodySite (05 §2.3.2)
+             | 'thigh_outer'|'thigh_inner'|'calf'|'shin'|'knee'                // LegSite  (05 §2.3.3)
+             | 'forearm'|'hand';                                               // ArmSite  (05 §2.3.4)
+  placement: 'flush'|'solid'|'partial'|'glancing';   // 05: cleanMult = 1.0 (forceN is already delivered); gates written "contact = flush" read placement = 'flush'
+  forceN: number;                      // DELIVERED force, Pierce scale (§2.6.4) — 05 uses it as F_del directly
+  vRel: number; effMassKg: number;
+  absorb: number;                      // 0..1 from the defence outcome (DP §3.3); 05 applies max(absorb, brace 0.3) × rocked 0.5 on top
+  defence: 'none'|'block_glove'|'block_forearm'|'roll'|'slip_late'|'check'|'knee_block'|'catch';
+                                       // 02 maps def.block_high→block_glove, def.forearm_block_kick/def.elbow_tuck→block_forearm,
+                                       // def.roll/def.duck/narrow-fail evasions→roll, failed def.slip_*/def.pull→slip_late,
+                                       // def.check→check, def.knee_raise_block→knee_block, def.catch/def.kick_catch→catch
   seen: boolean; counter: boolean; simultaneous: boolean;
-  closingSpeed: number;                // defender's velocity component toward the attacker, m/s (05 KO term)
+  closingSpeedMs: number;              // defender's velocity component toward the attacker, m/s, ≥ 0 (05 kClosing)
   attackerState: { rocked: boolean; fatigue: number };
-  targetState:   { midAction: boolean; mouthOpen: boolean; guardHand: 'up'|'away' };
-  gloveType: 'mma'|'boxing'|'bare';
-  selfDamage?: StrikeImpact;           // checked-kick shin, punch-on-skull hand roll owned by 05
+  targetState:   { midAction: boolean; mouthOpen: boolean; guardHand: 'up'|'away'; braced: boolean; grounded: boolean };
+                                       // 05: targetRelaxed = midAction || mouthOpen; targetBraced = braced; targetGrounded = grounded
+  posture: 'distance'|'clinch'|'groundTop'|'groundBottom'|'wallPinned';   // attacker's posture at contact (05 energy/stat position)
+  gloveType: 'mma4oz'|'boxing8oz'|'boxing10oz'|'boxing12oz'|'bare';
+  rotProxy?: number;                   // optional rad/s² if a head-kinematics model exists later (05 §2.1); v1 never sets it
+  selfDamage?: StrikeImpact;           // checked-kick shin (weapon 'shin_on_knee', forceN = 0.6 × forceN), punch-on-skull hand roll owned by 05
 }
 ```
+
+05 reads `attackerMassKg` / `targetMassKg` from the fighter records (01 `fightNightKg`), not from the payload.
 
 05 returns nothing synchronously; state changes (`state.rocked`, knockdown, `state.body_hurt`, leg mobility) are read
 from the fighter state on the next tick. `BoutEvent.result` for the recorder: `landed` (flush/solid/partial),
@@ -920,10 +960,13 @@ edge is familiarity [S: MIS §5; FD #120 use ≈ 52 %]. Open-stance bouts finish
 | preferred range | 0 | `+0.10` m for both; clinch entry weight ×0.9 | [S: MIS ST-4] |
 | circling | both directions equal | to the outside foot ×1.5 selection (07); orthodox steps left, southpaw right | [S: MIS ST-1] |
 
-**Familiarity.** `stanceExposure[opponentStance]` (0–100, section 01). Below `p.strike.stance.exposureThreshold =
-30` [E]: latency ×1.10, counter bonus `−0.15` logit, wrong-way circling (steps into the rear hand) 15 % of lateral
-moves → `unseen` rear hand for that exchange [S: MIS ST-5 +10 % RT, −10 % counter, 15 % footwork errors]. Applied to
-the less-exposed fighter; by default the orthodox one. Calibrate so equally exposed pairs are 50/50 and inexperienced
+**Familiarity.** `stanceFamiliarity[opponentStance] = 1 − exp(−bouts vs that stance / 4)` (0–1, 01 §2.4.4)
+[REVIEW: was "`stanceExposure` 0–100 below threshold 30"; 01 stores `stanceExposure` as bout counts and derives the
+0–1 familiarity, and 07 ST-5 uses "< 3 fights"]. Below `p.strike.stance.familiarityThreshold = 0.5` (≈ < 3 bouts,
+= 07's threshold): latency ×1.10, counter bonus `−0.15` logit, wrong-way circling (steps into the rear hand) 15 % of
+lateral moves → `unseen` rear hand for that exchange, each scaled by `(1 − familiarity)` per 01 `beh.gen.stance_familiarity`
+[S: MIS ST-5 +10 % RT, −10 % counter, 15 % footwork errors]. Applied to the less-familiar fighter; by default the
+orthodox one; T4+ immune (07 ST-5, `[S: LB §3.15]`). Calibrate so equally exposed pairs are 50/50 and inexperienced
 orthodox vs southpaw ≈ 45/55 [S: MIS §10.11].
 
 **Switching** (`move.switch_stance`, §2.1.5). Only `canSwitch` fighters switch without penalty; others get `−0.40`
@@ -993,19 +1036,19 @@ priors, LB §4. Every cell without a tag is [E] anchored on the row's source.
 | Execution-time multiplier, kicks (01 `execTimeMult` ÷ 0.90 so that the §2.2 T4 times are ×1.0) | 1.67 | 1.56 | 1.39 | 1.11 | 1.00 | 0.94 | [D: 01 §2.7 `execTimeMult` 1.50/1.40/1.25/1.00/0.90/0.85, S: MTK §6] |
 | Execution-time multiplier, punches/elbows/knees (01: `0.5 + 0.5 × execTimeMult`, ÷ 0.95) | 1.32 | 1.26 | 1.18 | 1.05 | 1.00 | 0.97 | [D: 01 §2.7] |
 | Telegraph add (ms) = 01 `telegraphMod` × 600 | +150 | +120 | +90 | 0 | −30 | −60 | [D: 01 §2.7 `telegraphMod` +0.25/+0.20/+0.15/0/−0.05/−0.10, S: MTK §6; the ×600 ms/probability-point conversion is E] |
-| `readBase` (§2.4.3; replaced by 01 `anticipation.readP` when supplied) | 0.50 | 0.58 | 0.66 | 0.74 | 0.81 | 0.87 | [D: LB §4.1] |
-| Feint bite (as defender) | 0.65 | 0.60 | 0.50 | 0.40 | 0.30 | 0.22 | [D: LB §4.5] |
-| Counter-on-read | 0.05 | 0.12 | 0.25 | 0.35 | 0.50 | 0.60 | [D: LB §4.4] |
+| `readBase` (reference only — the engine uses 01 `readP_dom` [REVIEW]) | 0.50 | 0.58 | 0.66 | 0.74 | 0.81 | 0.87 | [D: LB §4.1] |
+| Feint bite (as defender; reference only — engine uses 01 `feintBiteP` [REVIEW]) | 0.60 | 0.55 | 0.46 | 0.38 | 0.30 | 0.24 | [D: 01 §2.7.6 at tier-midpoint skills; LB §4.5] |
+| Counter-on-read (reference only — engine uses 01 `counterOnReadP` [REVIEW]) | 0.05 | 0.11 | 0.22 | 0.33 | 0.44 | 0.53 | [D: 01 §2.7.6 at tier-midpoint skills; LB §4.4] |
 | Feints per strike thrown (07 rate) | 0 | 0.05 | 0.15 | 0.30 | 0.50 | 0.70 | [E; S: BOX §6 "no feints" → "layered feints"] |
 | Feint types available | none | none | 1 (`feint.jab`) | + rear-hand, step, kick, level-change | + eyes, layered (2 feints before a strike) | all, chosen per opponent | [S: BOX §8 H31] |
-| Combination cap | 2 | 3 | 3 | 4 | 5 | 6 | [E] |
+| Combination cap (availability; 07 `ai.combo.cap.tier` is the AI's default selection cap and must be ≤ this row [REVIEW]) | 2 | 3 | 3 | 4 | 5 | 6 | [E] |
 | Punches available | jab, cross, wild lead hook | + rear hook, uppercuts (poor), 1-2, 1-2-3 | + all punches, body work | + check hook, shoulder roll (style), overhand set-ups | + delayed counters, rhythm breaking | everything | [S: BOX §8 H31] |
 | Kicks available | rear low / body only (instep, "leg swing") | + teep, switch kick | full round-kick set, calf, oblique | + question mark, spinning | + deception layers (question mark disguise) | all | [S: MTK §6, §8.26] |
 | Elbows / knees | none | straight knee | + horizontal/diagonal elbow | + upward/downward | + spinning | all | [S: MTK §8.26: T0 no K6/E5/N4/S1; T1 no K6/E5] |
 | Defences available | `guard.cover_turtle`, `def.flinch`, backs straight up, turns away | `guard.high`, `def.block_high`, one slip direction | + `def.parry`, `def.catch`, `def.slip_*`, `def.roll` (one side), `def.check`, `def.step_back` | + all defences; `def.shoulder_roll` if style; `def.step_off`, `def.pull`, `def.kick_catch` follow-ups, cage cutting | anticipatory (pattern) defence; defences become counters | defence that creates the *next* opening | [S: BOX §6, §8 H31; MTK §6] |
-| Check rate (of readable low kicks) | 0.10 | 0.25 | 0.40 | 0.50 | 0.60 | 0.70 | [S: MTK §6 <10 % / 25 / 50 / 60 / 70 → mapped] |
+| Check rate (of readable low kicks) | 0.10 | 0.10 | 0.25 | 0.50 | 0.60 | 0.70 | [S: MTK §6 <10 % / 25 / 50 / 60 / 70 → 01 `beh.mt.check_rate` mapping T0–T1 / T2 / T3 / T4 / T5] [REVIEW: was 0.10/0.25/0.40/…; aligned to 01] |
 | Kick-catch behaviour | attempts on anything, poor grip | catches, no follow-up | catch → knee / sweep | chooses by opponent balance | catches and dumps, baits kicks | — | [S: MTK §6] |
-| P(stumble after missed / checked kick) | 0.35 / 0.45 | 0.15 / 0.25 | 0.08 / 0.15 | 0.05 / 0.10 | 0.03 / 0.06 | 0.02 / 0.04 | [S: MTK §6 mapped] |
+| P(stumble after missed / checked kick) | 0.35 / 0.45 | 0.35 / 0.45 | 0.15 / 0.25 | 0.05 / 0.10 | 0.03 / 0.06 | 0.02 / 0.04 | [S: MTK §6 via 01 `beh.mt.balance_after_kick` (T0–T1 / T2 / T3 / T4 / T5)] [REVIEW: was T1 0.15/0.25, T2 0.08/0.15; aligned to 01] |
 | Return to stance after kick | skipped (counter window ×2) | slow (×1.5) | normal | fast | reset is part of the kick | — | [S: MTK §6] |
 | Force `tierMult` | see §2.6.4 | | | | | | [D] |
 | `commitMult` default | arm punches 0.60; overcommits (balance cost ×1.5) | hip rotation appears; 0.80; overcommits ×1.3 | full chain on the 2; 1.0 | economical inside | elite RFD | + deception on every punch | [S: BOX §6 "punch mechanics"] |
@@ -1130,7 +1173,7 @@ The tables of §2.2 (A and B) are registry entries keyed `p.strike.tech.<id>.<fi
 | `p.strike.combo.illegalRate[T0,T1]` | 0.30 / 0.15 | prob | [E] |
 | `p.strike.feint.startupMs` | 80–150 | ms | [S: BOX §5] |
 | `p.strike.feint.windowMs` | 400 | ms | [E] |
-| `p.strike.feint.bite[T0..T5]` | 0.65 / 0.60 / 0.50 / 0.40 / 0.30 / 0.22 | prob | [D: LB §4.5] |
+| `p.strike.feint.bite[T0..T5]` | retired — 01 `feintBiteP` [REVIEW] | prob | [S: 01 §2.7.6] |
 | `p.strike.feint.sellK` | 1.5 | logit / 100 pts | [E] |
 | `p.strike.feint.habituation` | −0.70 | logit per repeat in 20 s | [E] |
 | `p.strike.feint.bonus[defTier]` | 0.40 (T0–2) / 0.20 (T3) / 0.10 (T4–5) | logit | [D: BOX §8 B7] |
@@ -1162,16 +1205,16 @@ The tables of §2.2 (A and B) are registry entries keyed `p.strike.tech.<id>.<fi
 | `p.strike.glove.boxing.powerLogit` | +0.30 | logit | [D] |
 | `p.strike.glove.boxing.blockLogit` | +0.90 | logit | [D: MIS §2.4] |
 | `p.strike.glove.boxing.blockPassthrough` | 0.35 (MMA 0.55) | fraction | [S: BOX §3 D1] |
-| `p.strike.glove.boxing.rotFactor` | 0.87 | × | [E; S: LA Bartsch] |
+| `p.strike.glove.boxing.rotFactor` | retired — 05 `ko.kGlove` [REVIEW] | × | — |
 | `p.strike.react.rtSimple` | 01 `reactionTimeMs` (225 − 0.65 × (reactionTime − 50)) | ms | [S: 01 §2.2.1] |
 | `p.strike.react.choiceMs` | 60 | ms | [E] |
 | `p.strike.react.fatigueMult` | 0.15 | × f | [S: LB §4.7] |
 | `p.strike.react.rockedMult` | 1.15 | × | [S: DP §2.1] |
 | `p.strike.react.noviceAddMs` | 30 | ms per tier below T2 | [S: BOX §8 C13] |
 | `p.strike.react.visionBlockedMs` | 80 | ms | [E] |
-| `p.strike.read.base[T0..T5]` | 0.50 / 0.58 / 0.66 / 0.74 / 0.81 / 0.87 (default; 01 `anticipation.readP` overrides) | prob | [D: LB §4.1] |
+| `p.strike.read.base[T0..T5]` | retired — 01 `readP_dom` [REVIEW] | prob | [S: 01 §2.7.6] |
 | `p.strike.read.telegraphSlope` | 0.004 | logit / ms | [E] |
-| `p.strike.read.skillK` | 1.5 | logit / 100 pts | [E] |
+| `p.strike.read.skillK` | retired — skill enters through 01 `readP_dom` [REVIEW] | logit / 100 pts | — |
 | `p.strike.read.fatigue` | −0.50 | logit × f | [E] |
 | `p.strike.read.hurtPenalty[T]` | 0.65 (T0–1) / 0.40 (T2–3) / 0.20 (T4–5) | logit | [D: LB §4.3] |
 | `p.strike.read.visionBlocked` | −0.40 | logit | [E] |
@@ -1181,7 +1224,7 @@ The tables of §2.2 (A and B) are registry entries keyed `p.strike.tech.<id>.<fi
 | `p.strike.read.patternRepeat3` | 0.60 | logit | [D: MTK §8.3] |
 | `p.strike.read.patternHabit` | 0.40 | logit | [E] |
 | `p.strike.read.afterBite` | −0.60 | logit | [E] |
-| `p.strike.read.counterOnRead[T0..T5]` | 0.05 / 0.12 / 0.25 / 0.35 / 0.50 / 0.60 | prob | [D: LB §4.4] |
+| `p.strike.read.counterOnRead[T0..T5]` | retired — 01 `counterOnReadP` [REVIEW] | prob | [S: 01 §2.7.6] |
 | `p.strike.read.noviceDefaultBlockP` | 0.80 | prob | [S: LB §4.4] |
 | `p.strike.ctr.windowMissed` | 1.0 | × recovery | [S: BOX §8 D14] |
 | `p.strike.ctr.windowChecked` | 1.2 | × recovery | [E] |
@@ -1223,7 +1266,7 @@ The tables of §2.2 (A and B) are registry entries keyed `p.strike.tech.<id>.<fi
 | `p.strike.force.sigma` | 0.30 | ln units | [D] |
 | `p.strike.force.tierStraight[T0..T5]` | 0.50 / 0.60 / 0.72 / 0.85 / 1.00 / 1.05 | × | [D: LA Smith 2000] |
 | `p.strike.force.tierHook[T0..T5]` | 0.22 / 0.35 / 0.55 / 0.78 / 1.00 / 1.05 | × | [D: BOX §1.4, LA Dinu] |
-| `p.strike.force.tierKick[T0..T5]` | 0.50 / 0.75 / 0.90 / 1.00 / 1.05 / 1.10 | × | [D: MTK §6] |
+| `p.strike.force.tierKick[T0..T5]` | 0.50 / 0.60 / 0.75 / 1.00 / 1.05 / 1.10 (= 01 `hipRotationMult`) [REVIEW] | × | [S: 01 §2.7.8; MTK §6] |
 | `p.strike.force.powerSlope` | 0.008 | × per attribute pt | [E] |
 | `p.strike.force.powerMix` | 0.6 explosiveness / 0.4 strength | weights | [E] |
 | `p.strike.force.massExpPunch` | 0.5 | exponent on massKg/77 | [E] |
@@ -1238,14 +1281,14 @@ The tables of §2.2 (A and B) are registry entries keyed `p.strike.tech.<id>.<fi
 | `p.strike.force.commitTouch` | 0.50 | × | [E] |
 | `p.strike.force.commitInstep` | 0.70 | × | [E] |
 | `p.strike.force.capOvershoot` | 1.15 | × F_cap | [E] |
-| `p.strike.force.refFlushCross` | 1400 | N (for 05 re-anchoring) | [D] |
+| `p.strike.force.refFlushCross` | retired — 05 consumes delivered force directly (§2.6.4) [REVIEW] | N | — |
 | `p.strike.reach.perTenCm` | 0.12 | logit | [E] |
 | `p.strike.reach.classScale` | 0.7 (FLW–LW) / 1.0 (WW–MW) / 1.5 (LHW–HW) | × | [E; S: LB §2.3, FD §4] |
 | `p.strike.reach.cap` | 20 | cm | [E] |
 | `p.strike.reach.closePenalty` | −0.05 | logit per 10 cm | [E] |
 | `p.strike.reach.weightThreshold` | 5 | cm | [S: MIS R-1] |
 | `p.strike.stance.open.*` / `.closed.*` | §2.7 table | logit | [D: MIS §5] |
-| `p.strike.stance.exposureThreshold` | 30 | attribute | [E] |
+| `p.strike.stance.familiarityThreshold` | 0.5 (01 `stanceFamiliarity`, ≈ < 3 bouts) [REVIEW: was `exposureThreshold` 30] | – | [E] |
 | `p.strike.stance.famLatency` | 1.10 | × | [S: MIS ST-5] |
 | `p.strike.stance.famCounter` | −0.15 | logit | [D: MIS ST-5] |
 | `p.strike.stance.famWrongWay` | 0.15 | prob per lateral move | [S: MIS ST-5] |
@@ -1256,9 +1299,9 @@ The tables of §2.2 (A and B) are registry entries keyed `p.strike.tech.<id>.<fi
 | `p.strike.tier.execMultPunch[T0..T5]` | 1.32 / 1.26 / 1.18 / 1.05 / 1.00 / 0.97 | × | [D: 01 §2.7] |
 | `p.strike.tier.telegraphAdd[T0..T5]` | 150 / 120 / 90 / 0 / −30 / −60 (= 01 `telegraphMod` × 600) | ms | [D: 01 §2.7; ×600 E] |
 | `p.strike.tier.feintRate[T0..T5]` | 0 / 0.05 / 0.15 / 0.30 / 0.50 / 0.70 | per strike | [E] |
-| `p.strike.tier.checkRate[T0..T5]` | 0.10 / 0.25 / 0.40 / 0.50 / 0.60 / 0.70 | prob | [S: MTK §6] |
-| `p.strike.tier.stumbleMiss[T0..T5]` | 0.35 / 0.15 / 0.08 / 0.05 / 0.03 / 0.02 | prob | [S: MTK §6] |
-| `p.strike.tier.stumbleChecked[T0..T5]` | 0.45 / 0.25 / 0.15 / 0.10 / 0.06 / 0.04 | prob | [S: MTK §6] |
+| `p.strike.tier.checkRate[T0..T5]` | 0.10 / 0.10 / 0.25 / 0.50 / 0.60 / 0.70 (= 01 `beh.mt.check_rate`) [REVIEW] | prob | [S: MTK §6] |
+| `p.strike.tier.stumbleMiss[T0..T5]` | 0.35 / 0.35 / 0.15 / 0.05 / 0.03 / 0.02 (= 01 `beh.mt.balance_after_kick`) [REVIEW] | prob | [S: MTK §6] |
+| `p.strike.tier.stumbleChecked[T0..T5]` | 0.45 / 0.45 / 0.25 / 0.10 / 0.06 / 0.04 (= 01) [REVIEW] | prob | [S: MTK §6] |
 | `p.strike.tier.noReturnWindow[T0,T1]` | 2.0 / 1.5 | × counter window | [S: MTK §6] |
 | `p.strike.tier.overcommit[T0,T1]` | 1.5 / 1.3 | × balance cost | [E] |
 | `p.strike.tier.fatigueTellF[T0,T1]` | 0.60 / 0.75 | f | [S: BOX §8 F26] |
@@ -1302,7 +1345,7 @@ This section is responsible for the following `FD §3` rows (headless batch ≥ 
 | 25–26 | distance power-head accuracy 25 % (SD 7.8 pp); jab 29 % | ±3 pp; SD ±2 pp | power-punch `P_land` splits; fighter-level variance via sub-skill spread (01) |
 | 27 | KO-causing strike type punch 85 / knee 6 / kick 8 % | ±5 pp | `rot`, `F_med` for knees/kicks vs punches; head-kick `P_land` |
 | 29 | fight-ending punch type rear straight 29 / lead hook 27 / rear hook 24 / other 20 % | ±6 pp | hook `rot` 1.5 vs straight accuracy; reach mix shift (§2.8) |
-| 36–38 | KD per landed distance power head strike 3.9 %; by round ×1.0 / ×0.45 / ×0.28 | ±1 pp | **shared with 05**: placement weights (flush 0.20) × 05's P(KD | placement) must give 0.039; §2.6.3 arithmetic assumes P(KD|flush) ≈ 0.12, solid 0.04, partial 0.01 [D]; round decay comes from 05 fatigue and vulnerability, not from this section |
+| 36–38 | KD per landed distance power head strike: **2.3 %** joint working target (05 §2.4.1 Monte-Carlo; sits between FD #36 3.9 % and FD #37 0.82 per 100 head sig — 05 C3 says C2 wins); by round ×1.0 / ×0.45 / ×0.28 | ±1 pp | **owned by 05** [REVIEW: was 3.9 % with assumed P(KD|flush) 0.12 / solid 0.04 / partial 0.01 — those are now outputs of 05's pipeline run on this section's placement mix, not assumptions here]; this section's levers are the placement weights and `σ_F`; round decay comes from 05 fatigue/vulnerability and the `seen` decay |
 | 44–46 | KO/TKO winner sig landed 38 / 29; head 27 / 20; loser head absorbed 11 / 6 | ±5 | volume in rocked windows (`state.rocked` +0.80) |
 | 48 | 18.5 strikes in the final 30 s before TKO, 92 % head | ±4 | combination cap, rocked-defender modifiers, overlap 0.40 |
 | 50–52 | head sig absorbed 2.4 / min; 26 per fight; total head strikes 6.3 / min | ±0.3 / ±4 / ±0.8 | head `P_land`, 07 head share |
@@ -1354,9 +1397,10 @@ here by what they assume, with the tradeoff stated. Default is realism.
 10. **Placement distribution** (`placement.*`) — entirely a design distribution. It is constrained only through the
     joint fit with 05 on knockdown rate per landed power head strike (3.9 %) and the Pierce force distribution. The
     assumed split P(KD | flush / solid / partial) = 0.12 / 0.04 / 0.01 is an open question for 05.
-11. **Force scale mismatch with 05** — our `F` is in-fight delivered force (Pierce scale, median ≈ 950 N landed);
-    DP §3.1 anchors rotational acceleration on a 3427 N lab punch. One of the two references must move
-    (`force.refFlushCross = 1400` N is our proposal). Resolved in the joint calibration of §5 rows 36–38.
+11. **Force scale with 05** — [REVIEW: resolved, §2.6.4 "Force-scale handoff"]: `forceN` is delivered force; 05
+    keeps its 3,400 N / 6,300 rad/s² anchor and sets `cleanMult = 1.0` for placed strikes; the delivered distribution
+    here already matches the lognormal 05's Monte-Carlo assumed, so the 2.3 % KD rate holds; residual tail
+    differences are tuned by 05 `ko.alphaCal` in the joint C1–C3 run.
 12. **Force multipliers** (`force.powerSlope`, `massExp*`, `commit*`, `speed*`) — directions from LA (Loturco,
     Lenetsky, Walilko effective mass; Pierce's null on mass); magnitudes ours. Tier multipliers are derived from
     Smith 2000 / Dinu 2020 / MTK §6 but the T1–T3 interior points are interpolated.

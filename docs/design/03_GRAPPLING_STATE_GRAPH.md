@@ -34,8 +34,8 @@ Interfaces:
 | §05 Damage / physiology | fatigue (0–1), `state.rocked`, leg damage, grip fatigue; slam damage events emitted by lift/throw edges. |
 | §06 Referee / judging | "work" events, control-time accrual, stand-up and clinch-break timers (§6), fouls (fence grab, back-of-head strikes, knees to a grounded head). |
 | §07 AI / decision layer | edge availability and the tier behaviours in §8; the decision layer chooses *which* available edge to attempt and when; this section resolves it. |
-| §08 Multi-opponent | §7 here defines the engagement invariant; §08 owns targeting. |
-| Presentation | node ids are the animation keys; `phase` and `progress` fields on an in-flight edge drive blending. |
+| §07 Strategy & AI (multi-opponent, §07 §2.7) and §09 (match modes, §09 §3.1) | §7 here defines the engagement invariant; §07 owns targeting; §09 owns the multi-opponent manager (slots, fringe queue). [REVIEW: was "§08 Multi-opponent" — 08 is Presentation] |
+| §08 Presentation | node ids are the animation keys (08 §5.7 pose table); `phase` and `progress` fields on an in-flight edge drive blending. |
 
 Not in scope: submission mechanics (§04), striking damage (§02/§05), gi grappling rulesets (IBJJF/ADCC points
 are listed as flags only; the engine's first target is MMA-unified).
@@ -344,7 +344,7 @@ Node count: 4 + 14 + 8 + 4 + 5 + 5 + 8 + 5 + 7 + 3 + 7 + 4 = **74** distinct ids
 | `pos.ground_side_control` / `pos.ground_side_control_wall` | `pos.ground_side` (`cage = true` for the wall variant) | |
 | `pos.ground_kesa_gatame` / `pos.ground_reverse_kesa` | `pos.ground_side_kesa` / `pos.ground_side_reverse_kesa` | |
 | `pos.ground_knee_on_belly` | `pos.ground_side_kob` | |
-| `pos.ground_closed_guard_bottom` / `_broken` / `pos.ground_high_guard` / `pos.ground_rubber_guard` / `pos.ground_closed_guard_standing_top` | `pos.ground_closed_posture_up` / `pos.ground_closed_posture_broken` / `pos.ground_closed_high` / `pos.ground_closed_rubber` / `pos.ground_closed_top_standing` | |
+| `pos.ground_closed_guard_bottom` / `pos.ground_closed_guard_broken` / `pos.ground_high_guard` / `pos.ground_rubber_guard` / `pos.ground_closed_guard_standing_top` | `pos.ground_closed_posture_up` / `pos.ground_closed_posture_broken` / `pos.ground_closed_high` / `pos.ground_closed_rubber` / `pos.ground_closed_top_standing` | |
 | `pos.ground_open_guard_kneeling_top` / `pos.ground_open_supine_legs_up` / `pos.ground_butterfly` / `pos.ground_seated_shin_to_shin` / `pos.ground_x_guard` | `pos.ground_open_kneeling_top` / `pos.ground_open_legs_up` / `pos.ground_open_butterfly` / `pos.ground_open_seated` / `pos.ground_open_x` | |
 | `pos.leg_ashi_slx` / `pos.leg_outside_ashi` / `pos.leg_saddle` / `pos.leg_50_50` / `pos.leg_cross_ashi` | `pos.ground_ashi_slx` / `pos.ground_ashi_outside` / `pos.ground_saddle` / `pos.ground_5050` / `pos.ground_ashi_cross` | |
 | `pos.ground_cage_seated_bottom` | `pos.ground_cage_seated` | |
@@ -377,21 +377,21 @@ WRESTLING `0.005 P/pt` → k 2.1 `[D: 0.005/0.24]`; JUDO tier multipliers f(+1) 
 | id | from | → success | → fail / counter | requirements | dur ms | base | k_skill | phys | state | counters | src |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | `tech.level_change` | `pos.standing_mid/close` | same node, `levelChanged = true` for 500 ms (SETUP granted to the next shot) | same node; if defender reads it (`def.read_level_change`, P 0.30 [E] × defender `mma.anti_wrestling` gap) the defender gets a free knee/uppercut with +0.63 hit logit (§02) | not `state.rocked`; stance | 200–300 | n/a (setup) | — | — | FAT: at fatigue > 0.7 the AI stops level-changing 25 % of the time [S: WRESTLING §3.1] | knee, uppercut, sprawl-in-place | [S: WRESTLING §3.1] |
-| `def.read_level_change` | `pos.standing_mid/close` (defender) while the opponent level-changes | defender's free knee/uppercut with +0.63 hit logit (§02) and the level change is cancelled; sprawl-in-place ready (`def.sprawl` window +100 ms) | the shot proceeds normally | reactionTime attribute ≥ 50 [E] | 200 | 0.30 [E] | `mma.anti_wrestling` vs `mma.level_change`, k 2.5 [E] | — | a feint (`tech.level_change_feint`) that succeeds consumes this read for 400 ms | feint first | [E] (MMA_INTEGRATION I-6 gives the +15–25 % hit bonus; the read probability is the estimate) |
-| `tech.level_change_feint` | `pos.standing_mid/close` | same; opponent's sprawl reaction consumed → next strike (uppercut/knee) +0.63 hit logit for 400 ms | same; costs 1 % stamina [E] | opponent has shown a sprawl reaction this bout | 250 | 0.55 that the defender bites [E] | `mma.level_change` vs `mma.anti_wrestling`, k 2.0 [E] | — | — | none (stamina cost) | [S: MMA_INTEGRATION §2.1 I-6] (+15–25 % hit chance) |
+| `def.read_level_change` | `pos.standing_mid/close` (defender) while the opponent level-changes | defender's free knee/uppercut with §02's counter bonus (`ctr.intercepting_knee` +0.60 / `ctr.uppercut_on_level_change` +0.70; [REVIEW: was "+0.63", §02 owns it]) and the level change is cancelled; sprawl-in-place ready (`def.sprawl` window +100 ms) | the shot proceeds normally | reactionTime attribute ≥ 50 [E] | 200 | 0.30 [E] | `mma.anti_wrestling` vs `mma.level_change`, k 2.5 [E] | — | a feint (`tech.level_change_feint`) that succeeds consumes this read for 400 ms | feint first | [E] (MMA_INTEGRATION I-6 gives the +15–25 % hit bonus; the read probability is the estimate) |
+| `tech.level_change_feint` (= §02 `feint.level_change`) | `pos.standing_mid/close` | same; opponent's sprawl reaction consumed → next strike (uppercut/knee) +0.70 hit logit (§02 `p.strike.feint.levelChangeBonus`) for 400 ms | same; costs 1 % stamina [E] | opponent has shown a sprawl reaction this bout | 250 | bite = 01 `feintBiteP` in the takedown domain (`defSkill = wrestling.takedownDefence`; T4 vs T4 ≈ 0.30) + §02 §2.3.4 modifiers [REVIEW: was 0.55 [E]; 01 owns the bite probability, 02 the follow-up bonus] | `mma.level_change` vs `mma.anti_wrestling`, k 2.0 [E] | — | — | none (stamina cost) | [S: MMA_INTEGRATION §2.1 I-6] (+15–25 % hit chance) |
 | `tech.shot_reactive` | `pos.standing_mid` during opponent's committed rear hand/kick | `tech.double_leg` / `tech.single_leg` / `tech.high_crotch` capture stage with SETUP | as the underlying shot | attacker `wr.shot` ≥ 40; opponent's strike commitment ≥ 300 ms | 400 | underlying + SETUP | `mma.level_change` vs `mma.anti_wrestling`, k 2.5 | EXP+ | SETUP (+0.63); available only if attacker reactionTime ≥ 60 [E] | opponent retracts fast / throws with less commitment | [S: WRESTLING §3.1] |
 | `tech.jab_to_double` | `pos.standing_mid`, jab thrown ≤ 800 ms ago | `tech.double_leg` with SETUP | as double | opponent guard raised or stepping back | 450 entry | double base + SETUP | as double | as double | SETUP | pull hands down + sprawl; counter-jab into knee; frame and circle | [S: MMA_INTEGRATION §2.1 I-2] (≈ 40–45 % full TD) |
 | `tech.cross_to_single` | `pos.standing_mid`, cross thrown ≤ 600 ms ago and opponent stepped laterally | `tech.single_leg` with SETUP (converts to a cage single if ≤ 1.5 m from the fence) | as single | rear hand extended | 450 entry | single base + SETUP (≈ 0.38–0.42 full TD) | as single | as single | SETUP | limp-leg/whizzer, sprawl on one leg, hop to cage + hip-in | [S: MMA_INTEGRATION §2.1 I-3] |
 | `tech.hook_to_body_lock` | `pos.standing_close`, hook thrown and opponent covers/ducks, distance < 1.0 m | `pos.clinch_body_lock_front` | `pos.clinch_over_under` 0.6 / `pos.standing_close` 0.4 | hook rotation carries the rear arm inside | 500 | 0.55 | `mma.level_change` vs `wr.pummel`, k 2.0 | STR+ | SETUP | frame on hip, underhook, hitting on the entry | [S: MMA_INTEGRATION §2.1 I-4] (50–60 %) |
 | `tech.clinch_entry_strikes` | `pos.standing_close`, ≥ 2 strikes thrown in the last 1.5 s | `pos.clinch_collar_tie` 0.5 / `pos.clinch_over_under` 0.35 / `pos.clinch_underhook` 0.15 | `pos.standing_close` (defender frames/pivots; defender's free knee on entry P 0.25 [E]) | distance < 1.0 m | 400 | 0.47 | `mma.level_change` vs `mma.clinch_strike`, k 2.0 | STR+ | SETUP, CAGE+0.35 | frame, pivot off, knee on entry, hitting on the entry | [S: MMA_INTEGRATION §2.2 I-9] (40–55 %) |
 | `tech.clinch_entry_cold` | `pos.standing_close` | `pos.clinch_collar_tie` 0.5 / `pos.clinch_over_under` 0.4 / `pos.clinch_hand_fight` 0.1 | `pos.standing_mid` (defender steps off) 0.7 / defender's free strike 0.3 [E] | none | 400 | 0.35 [E] | `wr.pummel` vs `wr.pummel`, k 2.0 | STR+ | TELE, CAGE+0.35, RCK | as above | [E] anchored on I-9 minus setup |
-| `tech.kick_catch` | `pos.standing_mid` while opponent's body/low kick (≥ mid height) is in flight | `pos.td_kick_caught` | strike resolves normally (§02) | catcher balance ≥ 60; attempt within the 200 ms contact window | 200 | 0.25 vs bodyKick (0.15 vs low kick [E]) | `mma.anti_wrestling` vs opponent's kick discipline skill (§02), k 2.5 | — | reactionTime ≥ 55 required [E] | kicker retracts fast | [S: MMA_INTEGRATION §2.1 I-5] (20–30 %) |
+| `tech.kick_catch` | `pos.standing_mid` while opponent's body/low kick (≥ mid height) is in flight | `pos.td_kick_caught` | strike resolves normally (§02) | catcher balance ≥ 60; attempt within the 200 ms contact window | 200 | = §02 `def.kick_catch` success: 0.28 vs body kick / 0.35 teep / 0.25 knee / 0.10 head kick (0.15 vs low kick [E]) [REVIEW: was 0.25; §02 owns the catch roll, this row is the resulting edge] | `mma.anti_wrestling` vs opponent's kick discipline skill (§02), k 2.5 | — | reactionTime ≥ 55 required [E] | kicker retracts fast | [S: MMA_INTEGRATION §2.1 I-5] (20–30 %) |
 | `tech.kick_catch_takedown` | `pos.td_kick_caught` | `pos.ground_open_kneeling_top` 0.40 / `pos.ground_half_flat` 0.35 / `pos.ground_side` 0.25 (run the pipe / trip / lift) | `pos.standing_close` (kicker pulls free) 0.7 / `pos.clinch_over_under` 0.3 | leg held ≥ 300 ms | 700–1,200 | 0.55 (= cold single + 0.20) | `wr.finish` vs `wr.sprawl`, k 2.1 | STR+, MASS+ | CAGE+0.42 (kicker can't hop away), FAT−, LEGDMG | kicker hops/frames on the shoulder (0.30 per beat), punches while held (lands 0.45, forces release 0.25), re-teep with the free leg 0.20 | [S: MUAY_THAI §3.1] (`[D: equal-tier T2 value adopted as base]`) |
 | `tech.kick_catch_strike` | `pos.td_kick_caught` | same node + strike (§02: punch lands 0.60, knee to body/thigh 0.65, kick the post 0.55) | release | — | 300–500 | per §02 | `mma.clinch_strike` | — | — | kicker's elbow/punch while held | [S: MUAY_THAI §3.1] |
 | `def.kick_pull_free` | `pos.td_kick_caught` (kicker) | `pos.standing_mid` | stays caught (rolled every 300 ms) | grip not yet closed (first 300 ms): 0.35; afterwards hop-and-frame 0.30 per beat | 300 | 0.35 first beat / 0.30 later | kicker `bjj.retention` ∥ `wr.sprawl` vs catcher `wr.finish`, k 2.0 | FLX+, own balance +0.05/10 [E] | FAT− | catcher steps and pulls (+0.15 P to sweep) | [S: MUAY_THAI §3.1] |
 | `tech.knee_catch_single` | `pos.clinch_collar_tie` / `pos.clinch_thai_plum` when the opponent throws a knee | `pos.td_single_leg_in` (leg: hip) | same clinch node | knee thrown from the tie | 300 | 0.30 [E] (+0.08 P window per WRESTLING) | `wr.shot` vs `mma.clinch_strike`, k 2.0 | — | SETUP | knee with less commitment; plum control | [S: WRESTLING §5.4] (+8 pp single-catch window) |
 | `tech.strike_in_tie` | any `pos.clinch_*` with a free hand/knee | same node + strike (§02 owns damage; land rates: dirty boxing 0.55–0.70 [S: MMA_INTEGRATION I-10], cage-pin knees 0.50–0.65 [S: MMA_INTEGRATION I-11]) | same node; each strike thrown from a tie gives the opponent +0.21 logit `[D: +5 pp]` on duck-under/arm-drag/snap-down for 1 s | free limb | 300–600 | per §02 | `mma.clinch_strike` | — | KUZ: a landed strike sets kuzushi mag +1 in the direction it pushes for 1 s [S: JUDO §2.4] | pummel for double unders, head position, break | [S: WRESTLING §5.4] [S: JUDO §5.4] |
-| `tech.hit_on_break` | any `pos.clinch_*` → `pos.standing_close` | disengage + free strike with a 300 ms head start (+0.63 hit logit, §02) | disengage | the breaker initiates the break | 500 | break 0.60 [S: MUAY_THAI §4.3 "post and exit"] | `mma.clinch_strike` vs `mma.clinch_strike`, k 2.0 | — | — | step out with hand up / pivot | [S: MMA_INTEGRATION §2.2 I-12] (+20–30 % hit chance) |
+| `tech.hit_on_break` | any `pos.clinch_*` → `pos.standing_close` | disengage + free strike with a 300 ms head start (+1.0 hit logit = §02 `ctr.hit_on_break`; [REVIEW: was +0.63 — §02 owns the hit bonus]) | disengage | the breaker initiates the break | 500 | break 0.60 [S: MUAY_THAI §4.3 "post and exit"] | `mma.clinch_strike` vs `mma.clinch_strike`, k 2.0 | — | — | step out with hand up / pivot | [S: MMA_INTEGRATION §2.2 I-12] (+20–30 % hit chance) |
 | `tech.pull_guard` | `pos.clinch_collar_tie` / `pos.clinch_over_under` / `pos.clinch_front_headlock` (as the head holder) | `pos.ground_closed_posture_up` (bottom) 0.7 / `pos.ground_open_butterfly` 0.3; front-headlock version → `sub.guillotine_high_elbow` entry with guard pulled | `pos.ground_open_legs_up` (opponent stays standing) 0.6 / `pos.ground_hq` 0.4 | grips | 800 | 0.94 (success = ends on the ground; whether the opponent follows is the AI's choice) | — | — | judges score it for the top (§06) | opponent stays standing, strikes, or the referee stands (§6) | [S: BJJ_POSITIONS §7.4] (guard pull 94 %, Williams 2019) |
 
 #### B. Leg attacks — single, double, high crotch, low single, ankle pick
@@ -658,6 +658,22 @@ T4 15 % `[S: WRESTLING §7]`.
 Edge count: A 17 · B 30 · C 24 · D 24 · E 12 · F 12 · G 17 · H 17 · I 20 · J 7 · L 6 = **186** edge rows (a few rows bundle mirror variants)
 (plus the K stabilisation roll).
 
+#### M. Trigger events emitted to §04 [REVIEW: added — §04 §1 lists these `evt.*` as inputs from this section but no edge named them]
+
+| event id | emitted when | by edge / state |
+|---|---|---|
+| `evt.arm_crossed_centre` | the bottom fighter's arm crosses the centre line while framing under strikes | `tech.pass_with_gnp`, any postured GnP (§5.1) when the bottom covers (STK−) |
+| `evt.hand_posted` | the top fighter posts a hand on the mat while `posture = 'postured'` | `tech.gnp_posture`, `tech.sweep_on_strike` window |
+| `evt.back_taken` | arrival in `pos.ground_back_hooks` / `_body_triangle` / `_one_hook` / `_seatbelt` | `tech.turtle_to_back`, `tech.tech_mount_to_back`, `tech.rear_mat_return`, `tech.arm_drag_back_take_bottom`, scramble outcomes |
+| `evt.sprawl_front_headlock` | arrival in `pos.td_sprawl` or `pos.clinch_front_headlock` / `pos.ground_front_headlock` after a shot | `def.sprawl`, `tech.sprawl_to_front_headlock`, `tech.snap_down` |
+| `evt.step_over_guard` | the top fighter steps a leg over/through the bottom's guard during a pass | `tech.pass_knee_cut`, `tech.pass_hq`, `tech.pass_leg_drag` (attempt start) |
+| `evt.turn_away` | the bottom fighter turns to the belly / gives the back | `tech.escape_mount_turn_belly`, `beh.bjj.turns_back` share of `tech.escape_side_underhook_turn`, `beh.gen.turn_away` on the ground |
+| `evt.posture_broken` | top posture pulled down in closed guard | arrival in `pos.ground_closed_posture_broken` |
+| `evt.underhook_from_bottom` | bottom wins the underhook in half guard | arrival in `pos.ground_half_underhook`, `tech.dogfight_entry` |
+| `evt.head_down_standing` | a standing fighter's head drops below the opponent's chest (bent-over shot, snap-down, hurt) | `tech.snap_down` success, `beh.wr.no_level_change` shots, `state.rocked` + `tech.level_change` |
+
+Each event carries `{ tick, subMs, fighter (the exposed fighter), node }` and is consumed by §04 §2.4.1 within its 3 s trigger window.
+
 ---
 
 ## 3. Chain grappling
@@ -821,6 +837,27 @@ All `[S: BJJ_POSITIONS §4]` unless tagged.
 | `pos.ground_front_headlock` / `pos.td_sprawl` (top) | knees to the body, short uppercuts, elbows to the side/top of the head | 10–20 | 0.55 | 0.6 | knees to the body, uppercuts, elbows | `tech.re_shot` +0.42 | none (the guillotine is the top's exit) | 2 |
 | **bottom striking** (any guard) | elbows from closed/half guard, hammerfists, up-kicks vs a standing top | 5–15 | 0.40 | 0.3 (elbows 0.4; up-kicks 0.6) | elbows, short punches, up-kicks (only vs standing), heel kicks to the kidneys | — | — | 0.5 (rarely wins rounds; stops 10-8s) |
 
+#### 5.1.1 Clinch and ground strike ids [REVIEW: added — no section defined these ids; §02 §1 assigns tied clinch strikes and ground striking to this section, §05 needs a `tech` and `weapon` per impact, and §01's presets reference `tech.gnp_cross` / `tech.clinch_knee`]
+
+Every strike thrown from a tie or a ground node is one of the ids below; force is taken from the named §02 Table B
+row and multiplied by the **dmg×** of §5.1 (or the clinch rate/land values of §2.3 A/C/E), then handed to §05 as a
+`StrikeImpact` with `posture ∈ {clinch, groundTop, groundBottom, wallPinned}`. Land rates are the §5.1 / §2.3 values.
+
+| id | weapon | §02 force row | where | notes |
+|---|---|---|---|---|
+| `tech.clinch_uppercut` | fist | `tech.uppercut_lead/_rear` | `pos.clinch_collar_tie`, `pos.clinch_over_under`, cage pins | dirty boxing; lands 0.55–0.70 [S: MMA_INTEGRATION I-10] |
+| `tech.clinch_hook` | fist | `tech.hook_lead` | as above | short hook over the tie |
+| `tech.clinch_elbow` | elbow | `tech.elbow_*` | collar tie, plum, cage pins, front headlock | cut channel (§05); 12-6 flag |
+| `tech.clinch_knee` | knee | `tech.knee_straight` | plum (`tech.plum_knee` is the plum-specific edge), collar tie, cage pins, front headlock, sprawl | body/thigh default; head only where legal (§06) |
+| `tech.foot_stomp` | heel | — (no damage) | cage pins | already an edge in §2.3 E |
+| `tech.gnp_punch` | fist | `tech.cross` (postured) / `tech.hook_lead` (seated) | any top node with a free hand | dmg× per §5.1 |
+| `tech.gnp_hammerfist` | hammerfist | `tech.hook_lead` × 0.6 | mount, side, back, crucifix | 05 `kWeapon` hammerfist 0.6 |
+| `tech.gnp_elbow` | elbow | `tech.elbow_*` | mount, side, half, crucifix, deep half | 12-6 flag; cut channel |
+| `tech.gnp_knee_body` | knee | `tech.knee_straight` × 0.5 (body) | side, north-south, turtle, sprawl | never to a grounded head under Unified (§06) |
+| `tech.upkick` | heel | `tech.teep_rear` × 0.6 | `pos.ground_open_legs_up` (bottom) | legal only vs a standing top (§06) |
+| `tech.bottom_elbow` | elbow | `tech.elbow_horizontal` × 0.4 | closed / half guard bottom | |
+| `tech.bottom_punch` | fist | `tech.jab` × 0.5 | any guard bottom | |
+
 ### 5.2 Posture-vs-control trade-off
 
 Entering `posture = 'postured'` (`tech.gnp_posture`) unlocks the row above and simultaneously grants the bottom
@@ -842,9 +879,13 @@ The bottom's covering (STK− on its own edges: −0.20 per strike absorbed) mod
 
 ### 5.4 Finish and referee interface (owned by §05/§06; stated here for closure)
 
-Per landed strike: damage = `dmg× × strikerPower × (1 + 0.15 × posture)` into the ground-damage pool;
-`P(stoppage per landed clean strike) = 0.02 × dmg× × (1 + pool/threshold)` after **≥ 3 unanswered clean
-strikes**, plus the hard KO threshold `[S: BJJ_POSITIONS §4, §8 r9]`. Sanity: elite top vs T1 bottom in
+[REVIEW: the stoppage *decision* is §06's — `ref.tkoUnansweredGround` 6 / 4 / 3 unanswered clean head strikes
+(lenient / standard / strict), `ref.tkoNoDefenceS` 3.0 / 2.0 / 1.2 s and `ref.tkoAbsorbed30`, all read from §05's
+`RefObservables` (`unansweredHead`, `tSinceDefenceS`, `intelligentDefence`). The BJJ_POSITIONS per-strike stoppage
+formula below is retained only as a calibration sanity check for the §5.1 rates; it is not rolled by the engine.]
+Per landed strike: damage = `dmg× × strikerPower × (1 + 0.15 × posture)` into the ground-damage pool (§05 `raw`
+via the §5.1 ids' `StrikeImpact`); sanity formula `P(stoppage per landed clean strike) ≈ 0.02 × dmg× × (1 + pool/threshold)`
+after ≥ 3 unanswered clean strikes, plus the hard KO threshold `[S: BJJ_POSITIONS §4, §8 r9]`. Sanity: elite top vs T1 bottom in
 `pos.ground_mount_high` ≈ 50 % TKO within 30 s; equal elite ≈ 15 % per 30 s (the bottom escapes/turtles first);
 no bottom fighter spends > 5 min in `pos.ground_mount_high` without a stoppage roll every 5 s
 `[S: BJJ_POSITIONS §8 r30]`. Per-minute finish anchors (equal tier): back hooks 0.20, mount high 0.15–0.20 (TKO
@@ -901,7 +942,7 @@ only (§06).
 
 ---
 
-## 7. Multi-opponent notes (interface to §08)
+## 7. Multi-opponent notes (interface to §07 §2.7 and §09 §3.1) [REVIEW: was "§08"]
 
 The engagement invariant (§2.1.1) already decomposes the world into pairs. Rules when a **third fighter** C
 approaches an engagement between A (top/attacker) and B (bottom/defender):
@@ -922,11 +963,11 @@ approaches an engagement between A (top/attacker) and B (bottom/defender):
    `tech.technical_standup` at 0.90 in 1.5–3 s (disengaged branch); A–C becomes a `clinch` engagement in
    `pos.clinch_body_lock_rear` or `pos.clinch_over_under`.
 4. **Team-mate assist without contact.** If C is A's team-mate, C's presence at ≤ 1.5 m gives A `+0.3` logit on
-   finishing edges and B `−0.3` on get-ups `[E]` (B must split attention; §08 `focusPenaltyLogit` continuity with
+   finishing edges and B `−0.3` on get-ups `[E]` (B must split attention; §07 §2.7.3 `focusPenaltyLogit` continuity with
    the current engine `[S: AUDIT §1.1]`).
 5. **Scrambles stay pairwise.** `pos.scramble` never admits a third fighter; C waits or strikes.
 6. **Free-for-all sanity.** A fighter leaving an engagement (stand-up, break, referee) is free for one tick
-   before any new engagement can claim it, so two claimants resolve by the §08 targeting order, not by tick
+   before any new engagement can claim it, so two claimants resolve by the §07 §2.7.2 targeting order, not by tick
    ordering.
 7. **Determinism.** Engagement creation/dissolution is processed in ascending fighter id inside the existing
    tick order (`actions (ascending id)`) `[S: AUDIT §1.1]`.
@@ -945,14 +986,14 @@ advanced / elite) map onto T0–T1 / T2 / T3 / T4 / T5 `[D: band midpoints]`.
 |---|---|---|---|---|---|---|---|
 | level change before a shot | never: bends at the waist, reaches (shots −0.85 logit, eats a counter 30 % of the time) | 30 % of shots [E] | 60 % | 90 % | always; feinted and mixed with strikes | always; off the opponent's tendencies | [S: WRESTLING §7] [S: MMA_INTEGRATION §8] |
 | head position on shots | down/outside/low: guillotine catch ×2.5 | ×2.0 [E] | correct 60 % | correct 85 % | correct; ×0.5 catch | ×0.5 | [S: WRESTLING §7, §9 r6] |
-| sprawl denial (`def.sprawl` tier table) | 0.20 (reaction ≥ 600 ms) | 0.35 [E] | 0.50 | 0.70 | 0.85 | 0.90 | [S: WRESTLING §7, §9 r10] |
+| sprawl denial (`def.sprawl` tier table) | 0.20 (reaction ≥ 600 ms) | 0.20 [REVIEW: was 0.35 [E]; 01 `beh.wr.sprawl_late` puts T0–T1 at ≈ 20 %] | 0.50 | 0.70 | 0.85 | 0.90 | [S: WRESTLING §7, §9 r10] |
 | chain after a stall (§3.1) | 0.15 | 0.31 | 0.47 | 0.63 | 0.79 | 0.91 | [D: §3.1] |
 | reactive / set-up shots | never; no SETUP bonus | 5 % [E] | 10 % | 30 % | ≥ 50 %; +0.63 | ≥ 60 % [E] | [S: WRESTLING §7, §9 r5] |
 | finish selection | one finish (a drive), repeats it | one finish | 2 finishes | 3–4, switches on the whizzer | full tree; picks the finish the defence hands them | full tree + baits | [S: WRESTLING §7] |
 | cage use (drives a stalled attempt to the fence) | no; stalls in `pos.td_single_leg_in` and loses it to hops/limp legs | 25 % [E] | 50 % | 75 % | 90 % | 90 % + denies the opponent's wall | [S: WRESTLING §7] |
 | bottom stand-up | turns away, gives the back (30 % of attempts cost `pos.ground_back_hooks`) | technical stand-up late | technical stand-up 0.25 per attempt | wall walk + kimura grip 0.35 | 0.45–0.55 per attempt; rarely gives the back | never lets the top settle; stand-ups lead into offence | [S: WRESTLING §7] [S: MMA_INTEGRATION §8] |
 | energy | shoots from far; 2× energy per attempt | 1.6× | normal | fewer wasted shots | attempts per landed TD ≈ 1.6 vs population 2.5 | 1.5 [E] | [S: WRESTLING §7] |
-| top retention (loses position within 30 s) | 55 % | 50 % [E] | 40 % | 25 % | 15 % | 10 % [E] | [S: WRESTLING §7] |
+| top retention (loses position within 30 s) | 55 % | 55 % [REVIEW: was 50 % [E]; 01 `beh.wr.ride_retention` T0–T1 55 %] | 40 % | 25 % | 15 % | 10 % [E] | [S: WRESTLING §7] |
 | edge availability | `tech.double_leg` (no level change), `tech.single_leg` (head outside), `tech.clinch_entry_cold`, `tech.snap_down` (bent target) | + `tech.high_crotch`, `def.sprawl`, `tech.pummel` | + `tech.single_run_pipe`, `tech.double_drive_through`, `tech.arm_drag`, `tech.inside_trip`, `tech.rear_mat_return`, `tech.re_shot` | + all finishes, `tech.cage_drive`, `tech.hc_cage_drive_single`, `tech.front_headlock_go_behind`, `tech.ankle_pick` | full catalogue incl. `tech.single_low`, `tech.funk_roll` (if `wr.scramble` ≥ 70), `tech.rear_lift_suplex` | full | [E] gating by the WRESTLING §7 rows |
 
 ### 8.2 Judo (no-gi)
@@ -975,15 +1016,15 @@ advanced / elite) map onto T0–T1 / T2 / T3 / T4 / T5 `[D: band midpoints]`.
 |---|---|---|---|---|---|---|---|
 | bottom default | flat on the back; turns to the belly under strikes (`tech.escape_mount_turn_belly` 90 % of the time); straight-arm pushes from mount (armbar exposure ×3) | closed guard, holds and stalls (→ referee stand-ups); hip escape slow (dur ×1.5) | half-guard game: knee shield, underhook, dogfight; some butterfly; wall walks | full retention; butterfly/SLX entries; wrestle-ups; leg-lock threats deter passes; cage-savvy | fluid: never flat; chains sweep → sub → get-up; wrestle-ups from every seated guard; uses strike openings (upa on posts) | as T4 + baits posture to create openings [E] | [S: BJJ_POSITIONS §6] |
 | top default | lies in guard, punches wildly, posts hands (upa +0.85); swept from mount by upa 2× | basic knee cut / stack; holds side control without advancing; GnP from half at a low rate | knee cut + smash + cross-face GnP from half; takes mount; loses the back by rushing the RNC | chain passing (pass → pass 0.30); body lock; floating; strikes to pass; systematic back control (hooks → body triangle → hand fight) | positional chains with minimal risk; converts turtle to back 60 %+; GnP volume without giving up posture; finishes from every dominant node | as T4 | [S: BJJ_POSITIONS §6] |
-| grappling stamina cost | ×1.6 (panics, holds breath) | ×1.3 | ×1.1 | ×1.0 | ×0.9 | ×0.85 [E] | [S: BJJ_POSITIONS §6] |
-| decision latency between edge attempts (s) | 4–8 | 3–5 | 2–4 | 1.5–3 | 1–2 | 1–2 | [S: BJJ_POSITIONS §6] |
-| turns the back / gives up the back (share of side-control escapes) | 60 % | 40 % | 20 % | 8 % | 3 % | 2 % [E] | [S: BJJ_POSITIONS §6] |
-| escape attempts per 30 s under mount | 1 (bridge-and-push) | 2 | 3 | 4 | 5 | 5 | [S: BJJ_POSITIONS §6] |
-| submission-exit awareness while striking | none (arm extended: armbar 5 %/10 s) | low | medium | high | very high | very high | [S: BJJ_POSITIONS §6] |
-| uses the cage | no | rarely | yes (wall walk) | both sides | both sides + denies the opponent's use (knee pin, body-lock pinning) | as T4 | [S: BJJ_POSITIONS §6] |
-| pass repertoire (AI weights) | stack 60 / knee cut 40 | knee cut 50 / stack 30 / toreando 20 | knee cut 35 / smash 25 / toreando 20 / over-under 10 / body lock 10 | knee cut 25 / body lock 20 / leg drag 15 / toreando 15 / HQ 15 / float 10 | body lock 25 / float 20 / knee cut 20 / leg drag 15 / toreando 10 / cage 10 | as T4 | [S: BJJ_POSITIONS §6] |
-| sweep repertoire | none (bucks) | hip bump / scissor / basic butterfly | butterfly / underhook half / knee-shield wrestle-up | + X/SLX, deep half, arm drag | + K-guard, leg entanglements, matrix back takes | as T4 | [S: BJJ_POSITIONS §6] |
-| guard retention vs strikes | breaks: opens on 3 landed | opens on 5 | holds, re-guards | holds; frames + wrist control | holds; counters strikes with sweeps/subs | as T4 | [S: BJJ_POSITIONS §6] |
+| grappling stamina cost | ×1.6 (panics, holds breath) | ×1.3 | ×1.1 | ×1.1 | ×1.0 | ×0.9 | [S: BJJ_POSITIONS §6] via 01 `energy.actionCostMult` [REVIEW: re-mapped — 01 §2.3.4 maps BJJ_POSITIONS' five tiers 0/1/2/3/4 → T0/T1/T2–T3/T4/T5, so BJJ tier 2 (×1.1) covers T2 and T3; was ×1.1/×1.0/×0.9/×0.85 for T2…T5] |
+| decision latency between edge attempts (s) | 4–8 | 3–5 | 2–4 | 2–4 | 1.5–3 | 1–2 | [S: BJJ_POSITIONS §6] via 01 `beh.bjj.decision_latency` [REVIEW: re-mapped to 01 §2.3.4 (T2–T3 share BJJ tier 2)] |
+| turns the back / gives up the back (share of side-control escapes) | 60 % | 40 % | 20 % | 20 % | 8 % | 3 % | [S: BJJ_POSITIONS §6] via 01 `beh.bjj.turns_back` [REVIEW: re-mapped to 01 §2.3.4] |
+| escape attempts per 30 s under mount | 1 (bridge-and-push) | 2 | 3 | 3 | 4 | 5 | [S: BJJ_POSITIONS §6] via 01 `beh.bjj.mount_escape_attempts` [REVIEW: re-mapped to 01 §2.3.4] |
+| submission-exit awareness while striking | none (arm extended: armbar 5 %/10 s) | low | medium | medium | high | very high | [S: BJJ_POSITIONS §6] = 01 `beh.bjj.sub_exit_awareness` [REVIEW: re-mapped] |
+| uses the cage | no | rarely | yes (wall walk) | yes (wall walk) | both sides | both sides + denies the opponent's use (knee pin, body-lock pinning) | [S: BJJ_POSITIONS §6] = 01 `beh.bjj.cage_use` [REVIEW: re-mapped] |
+| pass repertoire (AI weights) | stack 60 / knee cut 40 | knee cut 50 / stack 30 / toreando 20 | knee cut 35 / smash 25 / toreando 20 / over-under 10 / body lock 10 | as T2 | knee cut 25 / body lock 20 / leg drag 15 / toreando 15 / HQ 15 / float 10 | body lock 25 / float 20 / knee cut 20 / leg drag 15 / toreando 10 / cage 10 | [S: BJJ_POSITIONS §6] = 01 `beh.bjj.pass_repertoire` [REVIEW: re-mapped to 01 §2.3.4; the T4/T5 columns were one tier too low] |
+| sweep repertoire | none (bucks) | hip bump / scissor / basic butterfly | butterfly / underhook half / knee-shield wrestle-up | as T2 | + X/SLX, deep half, arm drag | + K-guard, leg entanglements, matrix back takes | [S: BJJ_POSITIONS §6] = 01 `beh.bjj.sweep_repertoire` [REVIEW: re-mapped] |
+| guard retention vs strikes | breaks: opens on 3 landed | opens on 5 | holds, re-guards | holds, re-guards | holds; frames + wrist control | holds; counters strikes with sweeps/subs | [S: BJJ_POSITIONS §6] = 01 `beh.bjj.guard_vs_strikes` [REVIEW: re-mapped] |
 | bottom priority (AI) | turn away / push 60 % | closed-guard hold 50 / hip escape 30 / get-up 20 | get-up on 60 % of decisions unless a sweep/sub has P ≥ 0.45 | same | same, with sweep → sub chains | same | [S: BJJ_POSITIONS §8 r14] |
 
 Cross-discipline MMA consensus that the AI (§07) should encode: bottom priority in MMA is stand up > sweep >
@@ -1075,12 +1116,12 @@ node ratings in §2.2 become `params/grappling/nodes.ts`. Global tunables:
 | `grap.gnpStaminaDrainPerLanded` | 0.005 | stamina fraction | [S: BJJ_POSITIONS §8 r8] |
 | `grap.gnpRetentionPenaltyPer5pct` | −0.10 | logit | [S: BJJ_POSITIONS §8 r23] |
 | `grap.guardOpensAfterStrikes` | T0 3 / T1 5 | count | [S: BJJ_POSITIONS §6] |
-| `grap.gnpStoppageBase` / `.minUnanswered` | 0.02 × dmg× × (1 + pool/threshold) / 3 | P, count | [S: BJJ_POSITIONS §4, §8 r9] |
+| `grap.gnpStoppageBase` / `.minUnanswered` | 0.02 × dmg× × (1 + pool/threshold) / 3 — calibration sanity check only; the engine's stoppage is §06 `ref.tkoUnansweredGround` 6/4/3 [REVIEW] | P, count | [S: BJJ_POSITIONS §4, §8 r9] |
 | `grap.gnpPostureDmgBonus` | 0.15 | × | [S: BJJ_POSITIONS §4] |
 | `grap.gnpTable` | §5.1 | — | [S: BJJ_POSITIONS §4] |
 | `grap.groundFatigueMult` | top control 1.0 / top passing-GnP 1.4 / bottom escaping 1.6 / bottom closed-guard hold 0.6 | × | [S: BJJ_POSITIONS §8 r19] |
-| `grap.tierStaminaMult` | 1.6 / 1.3 / 1.1 / 1.0 / 0.9 / 0.85 | × (T0…T5) | [S: BJJ_POSITIONS §6] + [E] T5 |
-| `grap.decisionLatencyS` | 4–8 / 3–5 / 2–4 / 1.5–3 / 1–2 / 1–2 | s (T0…T5) | [S: BJJ_POSITIONS §6] |
+| `grap.tierStaminaMult` | = 01 `energy.actionCostMult` 1.6 / 1.3 / 1.1 / 1.1 / 1.0 / 0.9 (T0…T5) [REVIEW: was 1.6/1.3/1.1/1.0/0.9/0.85 — 01 owns the tier mapping and 05 reads 01's value] | × | [S: BJJ_POSITIONS §6 via 01 §2.3.4] |
+| `grap.decisionLatencyS` | 4–8 / 3–5 / 2–4 / 2–4 / 1.5–3 / 1–2 (T0…T5) [REVIEW: re-mapped to 01 §2.3.4] | s | [S: BJJ_POSITIONS §6] |
 | `grap.shotEnergyVsJab` / `.failedShotDefenderMult` | 3.0 / 1.5 | × | [S: WRESTLING §9 r25] |
 | `grap.stuffedShotShooterMult` | 2–3 × the striker's stamina | × | [S: MMA_INTEGRATION I-20] |
 | `grap.tdPropensityByClass` (AI) | FLW/BW/FW 1.15 · LW/WW 1.0 · MW 0.95 · LHW/HW 0.75; women 1.0 | × | [S: WRESTLING §9 r20, §10] |

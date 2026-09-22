@@ -29,8 +29,8 @@ teams, free-for-all and crowd modes:
 Not owned here: hit/miss/damage resolution (§02–§05), judge scoring (§06), technique durations (§02–§04),
 movement integration (§09 P5). This section only chooses actions, targets and steering goals.
 
-Numbering note: §01's interface table labels this section "06" and calls referee/judging "07"; the numbering here
-follows the file names (`06_RULES_REFEREE_JUDGING.md`, `07_STRATEGY_AND_AI.md`). §01's `iqTier` is 1–5
+Numbering note [REVIEW: updated — §01's interface table now uses the file numbering (06 Rules, 07 Strategy & AI), so no
+remapping is needed]. §01's `iqTier` is 1–5
 (`fightIQ` < 30 → 1); this section's "T0" IQ row applies when the fighter's overall tier is T0 (untrained), i.e.
 `iqTier07 = overallTier == T0 ? 0 : iqTier01` `[D: conventions §3 + 01 §2.3.4]`. Mode ids map 1:1 onto §01's
 `PrimaryMode` values (`distanceStriking` ↔ `mode.distance_striking`, `counter` ↔ `mode.counter_striking`, …);
@@ -72,20 +72,23 @@ if f.free            // not mid-technique, not stunned/grounded-locked
     emit ActionRequest{a*, target, exec}
 ```
 
-**Determinism contract.** Per fighter per tick the AI consumes exactly **6 RNG draws in fixed order**, whether
-or not each branch is active (inactive branches still draw and discard) so the stream position is a pure
-function of `(tick, fighterId)`:
+**Determinism contract.** Per fighter per tick the AI consumes exactly **8 RNG draws in fixed order** (the P3
+block of the authoritative schedule in §09 §2.7 [REVIEW: was 6; §02's pattern read and §09's commit jitter are
+folded in]), whether or not each branch is active (inactive branches still draw and discard) so the stream
+position is a pure function of `(tick, fighterId)`:
 
 | # | Draw | Used by |
 |---|---|---|
-| 1 | `u_read` | anticipation read of the most-threatening incoming technique (§2.4.4) |
-| 2 | `u_feint` | feint bite (§2.4.5) |
-| 3 | `u_eval` | P(change \| signal) at a tactical evaluation (§2.6.2) |
-| 4 | `u_select` | softmax action selection (§2.2.4) |
-| 5 | `u_timing` | timing error (§2.3) |
-| 6 | `u_target` | target/accuracy error (§2.3) |
+| 1 | `u_pattern` | §02 §2.4.3 pattern read (pre-commit) of the predicted incoming technique [REVIEW: added] |
+| 2 | `u_read` | §02 §2.4.3 cue read of the most-threatening in-flight technique (§2.4.4 supplies the opponent-model terms) |
+| 3 | `u_feint` | feint bite (§2.4.5; probability = 01 `feintBiteP` + §02 modifiers) |
+| 4 | `u_eval` | P(change \| signal) at a tactical evaluation (§2.6.2) |
+| 5 | `u_select` | softmax action selection (§2.2.4) |
+| 6 | `u_timing` | timing error (§2.3) |
+| 7 | `u_target` | target/accuracy error (§2.3) |
+| 8 | `u_commit` | §09 §2.2 intra-tick commitment jitter U{0..99} ms [REVIEW: added] |
 
-Multi-opponent adds one draw per tick for target switching (`u_switch`, §2.7.2) — draw 7, always taken. Per-bout
+Multi-opponent adds one draw per tick for target switching (`u_switch`, §2.7.2) — draw 9, always taken. Per-bout
 draws (plan generation, scouting noise) happen once before tick 0 in fighter-id order. Round-break draws
 (corner cue correctness, uptake) happen in fighter-id order in the break step. `[E]` on the fixed-6 layout;
 the count is a design choice, the principle is conventions §4.
@@ -210,13 +213,13 @@ Applied at commit; the resolution sections consume the outputs.
 
 | Output | Formula | Tags |
 |---|---|---|
-| `telegraph` (0–1, read by the opponent's anticipation, §2.4.4) | `tele_base(a) × (1 + 0.5 f) × tierMult`; tierMult T0 1.6, T1 1.4, T2 1.2, T3 1.0, T4 0.85, T5 0.7 | `tele_base` per technique from §02; tier multipliers `[E]` anchored on the novice tells "fist drops before the punch, wide loops, elbows flare" `[S: BOXING §6]` |
+| `telegraph` (ms, read by the opponent's anticipation, §2.4.4) | = §02 `telegraphMs(tech) + p.strike.tier.telegraphAdd[tier]` (+150 / +120 / +90 / 0 / −30 / −60 ms = 01 `telegraphMod` × 600) × (1 + 0.5 f) [REVIEW: was a 0–1 score with tierMult 1.6 … 0.7; §02/§01 own telegraph in ms and read-probability units, so this layer only adds the fatigue term] | `[S: 01 §2.7.8; 02 §3]`; fatigue term `[E]` |
 | `timingOffset` (ticks) | 0 with p = p_ontime(tier); else +1 tick (late) with p = 0.75, −1 tick (early, on nothing) with p = 0.25; p_ontime T0 0.55, T1 0.65, T2 0.75, T3 0.85, T4 0.92, T5 0.95; ×(1 − 0.15 f) | `[E]`; direction from "broken rhythm makes anticipatory defence fire at the wrong time" `[S: BOXING §5]` |
 | `accuracyMod` (logit) | −k_exec × (1 − p_ontime) − 0.18 f/0.8 at f = 0.8 (accuracy −18 %) | fatigue accuracy `[S: DAMAGE_PHYSIOLOGY §4.3]`; k_exec = 0.6 logit `[E]` |
 | `targetError` | with p = 0.10 (T0), 0.06 (T1), 0.03 (T2), 0.015 (T3), 0.008 (T4), 0.005 (T5) the requested target region is swapped for an adjacent one (head→body etc.) | `[E]` — "head-only slips, arm punches" `[S: BOXING §6]` |
 | `powerCommit` | T0–T1 overcommit: 1.15 power, −0.2 balance on power strikes with p = 0.4/0.25 | `[S: BOXING §6]` "overcommitting for power" (qualitative), numbers `[E]` |
-| `stanceIntegrity` | T0: square/crossed feet 30 % of movement ticks (TD defence −10 pts, kick check −); T1 10 %; T2+ 0 | `[S: BOXING §6]` qualitative; numbers `[E]` |
-| `eyesClosed` | T0: 35 % of exchanges, T1: 15 % — read probability 0 for that exchange | `[S: BOXING §6]` "eyes close on contact"; numbers `[E]` |
+| `stanceIntegrity` | feet cross on a lateral step with p = 0.25 (T0) / 0.10 (T1) / 0.02 (T2) / 0 = §02 `p.strike.move.feetCrossP` = 01 `beh.box.cross_feet` (effects: `state.feet_crossed` 300 ms, §02 §2.1.5) [REVIEW: was 30 % / 10 % of movement ticks [E]; aligned to BOX §8 r32] | `[S: BOXING §8 r32]` |
+| `eyesClosed` | = 01 `beh.gen.eyes_close` / `beh.gen.eyes_close_t1`: P = 0.70 (T0) / 0.30 (T1) per incoming power strike — read probability 0 for that exchange, absorb −0.15 [REVIEW: was 35 % / 15 % of exchanges; 01 owns the tell] | `[S: BOXING §6, §8 r31]` via 01 §3.0 |
 
 Kinetic-chain efficiency (strength → punch force by training age) is a §02/§05 matter
 (`[S: LIT_B §4.10]`), not repeated here.
@@ -304,8 +307,15 @@ Each tick, for the single most-threatening incoming technique (highest expected 
 techniques not yet resolved), one read roll (draw 1):
 
 ```
-p_read = sigmoid( logit(p_tier) + 2.0 × (t_elapsed / t_commit − 0.5) + 1.2 × telegraph − anxietyPen − famPen )
+p_read = §02 §2.4.3 cue-read probability = sigmoid( logit(readP_striking [01 §2.7.6]) + 0.004 × telegraph_ms
+         − feintSuppression − 0.5·f − hurtPenalty − 0.4·visionBlocked + patternMods [§2.4.3 opponent model] )
 ```
+[REVIEW: was `sigmoid(logit(p_tier) + 2.0 × (t_elapsed/t_commit − 0.5) + 1.2 × telegraph − anxietyPen − famPen)`.
+01 owns the base (`readP_dom`, which already carries the anxiety penalty via `anxietyReadPenalty` and the fightIQ
+term), 02 owns the situational modifiers (its `hurtPenalty` is the pressure/rocked term; the familiarity penalty is
+02 §2.7 `(1 − stanceFamiliarity)` scaling), and this section owns the opponent-model `patternMods` and the draw. The
+elapsed-time slope is dropped: 02 evaluates the cue read once, at launch + telegraph. The table below is reference
+only.]
 
 | tier | p_tier | tag |
 |---|---|---|
@@ -332,8 +342,10 @@ Consequences of a successful read (flags passed to §02 resolution and to the ac
 1. The defender's defensive action for that technique is chosen with **full information** (correct guard side,
    check vs catch, sprawl vs frame) at the observed lag.
 2. With probability `p_counter(tier)` the read also triggers a **counter-on-read**: the action layer is forced
-   to score counter families ×2.5 for this tick `[E]` on the multiplier: T0 0.02, T1 0.05, T2 0.15, T3 0.25,
-   T4 0.40, T5 0.50 `[D: LIT_B §4.4 suggests novice 0.05 / intermediate 0.25 / expert 0.5; T0 and T4 interpolated]`.
+   to score counter families ×2.5 for this tick `[E]` on the multiplier: `p_counter` = 01 `counterOnReadP` =
+   `0.05 + 0.45 × clamp((boxing.counters − 10)/80, 0, 1)` (T0 0.05, T2 0.22, T4 0.44, T5 0.53) [REVIEW: was a tier
+   table 0.02 / 0.05 / 0.15 / 0.25 / 0.40 / 0.50; 01 §2.7.6 owns it and 02 §2.4.3 uses the same formula]
+   `[S: LIT_B §4.4 novice 0.05 / intermediate 0.25 / expert 0.5]`.
    Winners' block-and-counter rate 2.8 vs 0.1 per bout in novice boxing `[S: LIT_B §5.1]` is the validation
    anchor.
 3. A failed read on a *telegraphed* attack still gets the generic defence chosen by the utility layer at the
@@ -347,8 +359,9 @@ feint of family F (jab/rear-hand/level-change/step/kick feint; each 80–150 ms 
 rolls draw 2:
 
 ```
-p_bite(B) = p_bite_tier(B) × (1 + 0.3 × feintQuality(A)) × repeatPenalty
+p_bite(B) = feintBiteP(B) [01 §2.7.6 = 0.62 − 0.40 × defSkill/100] × (1 + 0.3 × feintQuality(A)) × repeatPenalty, then §02 §2.3.4's logit modifiers (sell skill, habituation −0.7/repeat, vision, fatigue)
 ```
+[REVIEW: `p_bite_tier` table below is reference only; 01 owns the base and 02 §2.3.4 the situational terms — `repeatPenalty` here and 02's habituation term are the same effect and must be implemented once (02's −0.7 logit per repeat is kept; this section's 0.6^(n−2) is retired).]
 
 | tier of B | p_bite_tier | tag |
 |---|---|---|
@@ -754,7 +767,7 @@ On perceiving `opp hurt` (§2.4.2), `emergency = 'finish'`:
 | finisher profile | behaviour | stop rule | tags |
 |---|---|---|---|
 | **reckless**: effectiveIqTier <= T2, or personality aggression >= 80 with composure < 50 | swing families ×2.0; defensive families ×0.5; stamina drain ×2 (§05 input); no balance floor | none (keeps swinging until the opponent recovers or the finisher gasses — gets countered vs good chins) | `[S: §7.5 D-3 (est.)]` |
-| **measured**: effectiveIqTier >= T3 | straight punches and knees ×1.5; keep balance >= 0.6 (power strikes with balance cost gated); cut the cage; take the back/mount if the opponent shoots or covers; GnP within the referee window | stop when hit-rate on the hurt opponent < 40 % over 8 attempts → return to plan | `[S: §7.5 D-3 (est.)]` |
+| **measured**: effectiveIqTier >= T3 | straight punches and knees ×1.5; keep balance >= 0.6 (power strikes with balance cost gated); cut the cage; take the back/mount if the opponent shoots or covers; GnP within the referee window (= §06 `ref.tkoUnansweredGround` 6 / 4 / 3 unanswered clean head strikes and `ref.tkoNoDefenceS` 3.0 / 2.0 / 1.2 s by strictness, read from §05 `unansweredHead` / `tSinceDefenceS` [REVIEW]) | stop when hit-rate on the hurt opponent < 40 % over 8 attempts → return to plan | `[S: §7.5 D-3 (est.)]` |
 | **trap** (T5) | measured + one feint before the finishing strike (hurt fighters flinch: bite p +0.2) | as measured | `[S: §8]` "Finisher: traps"; +0.2 `[E]` |
 
 Follow-up windows after a knockdown (grounded 1–3 s minimum, referee lag 3.5 s / 2.6 extra strikes) are §05's
@@ -778,10 +791,11 @@ Corners perform diagnosis, strategy, implementation, affirmation, consolidation 
   T1 0.40, T2 0.55, T3 0.70, T4 0.85, T5 0.95 `[S: §7.7 CO-1 (est.)]`. A wrong cue is a random other
   adjustment from the table (it still rewrites weights if accepted). Corner tier is a bout-setup input (default:
   the fighter's own iqTier − 1, floor T1 `[E]`).
-- **CO-2 uptake.** P(accept) = 0.5 + 0.1 × max(0, fighterIqTier − 2) − 0.2 × [damage > 60 %] − 0.1 × [cue
-  contradicts primaryMode] `[S: §7.7 CO-2 (est.)]`; pace cues ×0.5 at T4+ (§2.5.7). Accepted cues rewrite
-  `w_adapt` for the next round with `source: 'corner'` and reset the dwell timer. Uptake by tier reproduces
-  the brief's 0.5/0.6/0.7/0.8/0.9 ladder `[S: MMA_INTEGRATION §8]`.
+- **CO-2 uptake.** P(accept) = 0.4 + 0.1 × fighterIqTier + 0.1 × (adaptability − 50)/50 − 0.2 × [damage > 60 %] − 0.1 × [cue
+  contradicts primaryMode] `[S: §7.7 CO-2 (est.)]` [REVIEW: was `0.5 + 0.1 × max(0, iqTier − 2)`, which gives
+  0.5/0.5/0.6/0.7/0.8 and contradicted the 0.5/0.6/0.7/0.8/0.9 ladder it claims; now = 01 `beh.gen.corner_uptake`
+  (iqTier 1–5 → 0.5/0.6/0.7/0.8/0.9) plus 01's adaptability term]; pace cues ×0.5 at T4+ (§2.5.7). Accepted cues rewrite
+  `w_adapt` for the next round with `source: 'corner'` and reset the dwell timer.
 - **CO-3 risk call.** The corner sets round `riskAppetite` from *its* σ-adjusted score (SC-2/3/4) and can call
   "you need a finish" only when that estimate supports it; low-tier corners are wrong about the score more
   often `[S: §7.7 CO-3]`.
@@ -1001,7 +1015,7 @@ recorded state (no RNG at emission).
 | `tgt.*` | nearest, most_dangerous, weakest, assigned, leader | target policies (§2.7.2) |
 | `role.*` | solo, engage, flank, fringe, hold, hit, protect, flee, bystander | multi-opponent roles (§2.7.4) |
 | `evt.*` | see §2.8 | strategy events |
-| new actions required from §02/§03/§09 | `tech.feint_*` (jab, rear_hand, level_change, step, kick), `switchStance`, `wallWalk`, `hitOnBreak` (chained), `flee` (street), `cageProximity` field | `[S: MMA_INTEGRATION §10 rule 1]` + `flee` `[E]` |
+| actions this section requires from §02/§03/§09 (canonical ids [REVIEW]) | feints = §02 `feint.jab`, `feint.rear_hand`, `feint.level_change`, `feint.step`, `feint.kick` (was `tech.feint_*`); `switchStance` = §02 `move.switch_stance`; `wallWalk` = §03 `tech.wall_walk`; `hitOnBreak` = §03 `tech.hit_on_break` with §02 `ctr.hit_on_break`; `flee` (street, this section); `def.neutral` in this section = "no reactive defence chosen" (§02 §2.6.1 step 6 passive-posture roll), not a `def.*` id; `cageProximity` = §09 §3.3 field | `[S: MMA_INTEGRATION §10 rule 1]` + `flee` `[E]` |
 
 ---
 
@@ -1019,9 +1033,9 @@ mappings are §2's parameters.
 | P(change \| signal) | — | 0.30 | 0.50 | 0.70 | 0.85 | 0.95 |
 | Temperature τ | 1.00 | 0.80 | 0.60 | 0.45 | 0.35 | 0.28 |
 | Pattern recognition (opponent model) | none | τ_mem 20 s, prior 2 | 40 s, 4 | 60 s, 8 | 90 s, 12 | 120 s, 16 + trap building |
-| Anticipation p_read | 0.50 | 0.58 | 0.68 | 0.75 | 0.83 | 0.87 |
-| Counter-on-read | 0.02 | 0.05 | 0.15 | 0.25 | 0.40 | 0.50 |
-| Feint bite | 0.65 | 0.60 | 0.50 | 0.40 | 0.30 | 0.25 |
+| Anticipation p_read (01 `readP_dom` at tier-midpoint skills; reference only [REVIEW]) | 0.57 | 0.62 | 0.68 | 0.75 | 0.81 | 0.86 |
+| Counter-on-read (01 `counterOnReadP`; reference only [REVIEW]) | 0.05 | 0.11 | 0.22 | 0.33 | 0.44 | 0.53 |
+| Feint bite (01 `feintBiteP`; reference only [REVIEW]) | 0.60 | 0.55 | 0.46 | 0.38 | 0.30 | 0.24 |
 | Feints available | none | none | 1 kind | set-up chains, cage cutting | layered feints, delayed counters, rhythm breaks | everything, chosen per opponent |
 | Range management | stands at the end of the opponent's reach | knows own range, forgets it when pressured | fights planned range most of the time | manipulates range with feints | controls range and the opponent's perception of it | — |
 | Level-change hygiene | kicks with the rear leg vs wrestlers | same; stops kicking only after being taken down | follows S-1 | uses kicks as bait for counters (I-6) | off the opponent's tendencies | — |
@@ -1031,9 +1045,9 @@ mappings are §2's parameters.
 | Score awareness σ | none | 1.0 (corner-driven) | 0.7 | 0.5 | 0.3, adjusts last 60 s | 0.2, plans rounds |
 | Hurt behaviour | cover on the fence | clinch (grabs and holds) | clinch/shoot | clinch or angle out | counters while hurt | — |
 | Finisher | reckless | reckless | reckless (measured vs poor chins only) | measured | measured | traps |
-| Corner uptake | 0.5 | 0.5 | 0.5 | 0.6 | 0.7 | 0.8 (pace cues ×0.5) |
+| Corner uptake (= 01 `beh.gen.corner_uptake` by iqTier [REVIEW]) | — (no corner) | 0.5 | 0.6 | 0.7 | 0.8 | 0.9 (pace cues ×0.5) |
 | Composure (typical) | very low (dump ≈ 0.6–0.9) | low | moderate | moderate-high | high | very high |
-| Tells (execution layer) | telegraph ×1.6, eyes closed 35 %, square stance 30 %, target error 10 % | ×1.4, 15 %, 10 %, 6 % | ×1.2, —, —, 3 % | ×1.0, 1.5 % | ×0.85, 0.8 % | ×0.7, 0.5 % |
+| Tells (execution layer) [REVIEW: telegraph/eyes/feet now from 01/02] | telegraph +150 ms, eyes closed 0.70 per power strike, feet cross 0.25, target error 10 % | +120 ms, 0.30, 0.10, 6 % | +90 ms, —, 0.02, 3 % | 0 ms, 1.5 % | −30 ms, 0.8 % | −60 ms, 0.5 % |
 | Combination cap | 1–2 | 2 | 3 | 3–4 | 4 | 4 with branch/abort |
 | Ground decision latency (§04) | 4–8 s between edge attempts | 3–5 s | 2–4 s | 1.5–3 s | 1–2 s | 1–2 s |
 
@@ -1056,7 +1070,7 @@ values are research-side estimates (Assumption A-1).
 | id | value | unit | tag |
 |---|---|---|---|
 | **architecture** | | | |
-| `ai.rng.draws_per_tick` | 6 (7 with multi-opponent) | count | `[E]` |
+| `ai.rng.draws_per_tick` | 8 (9 with multi-opponent) — §09 §2.7 [REVIEW] | count | `[E]` |
 | `ai.utility.clamp` | [0.25, 3.0] | × | `[S: MMA_INTEGRATION §10 rule 22]` |
 | `ai.utility.compensation` | √n form | — | `[E]` (IAUS principle `[S: LIT_C §2]`) |
 | `ai.style.weight_range` | [0.5, 2.0] | × | `[E]` |
@@ -1067,12 +1081,12 @@ values are research-side estimates (Assumption A-1).
 | `ai.q.rocked` | 0.40 | fraction | `[S: DAMAGE_PHYSIOLOGY §7 rule 6]` |
 | `ai.q.dump` | 0.20 × dump, first 150 s of R1 | fraction | `[S: DAMAGE_PHYSIOLOGY §4.6]` |
 | `ai.q.second_wind` | +0.10 for 60 s | fraction | `[S: DAMAGE_PHYSIOLOGY §4.5]` |
-| `ai.combo.cap.tier` | 2 / 2 / 3 / 4 / 4 / 4 | strikes | `[S: BOXING §6]` qualitative; numbers `[E]` |
+| `ai.combo.cap.tier` | 2 / 2 / 3 / 4 / 4 / 4 — the AI's default *selection* cap; must be ≤ §02 `p.strike.combo.cap` (2/3/3/4/5/6), which is the availability cap [REVIEW] | strikes | `[S: BOXING §6]` qualitative; numbers `[E]` |
 | `ai.combo.cap_vs_wrestler` | 3 | strikes | `[S: MMA_INTEGRATION §3.1 S-4 (est.)]` |
 | `ai.combo.max_any` | 4 | strikes | `[S: MMA_INTEGRATION §6]` (Wittman) |
 | `ai.mcts.enabled` / `playouts` / `horizon` / `budget_ms` | false / 64 / 3–5 t / 2 | — | `[S: LIT_C §2]`; disabled `[E]` |
 | **execution quality** | | | |
-| `ai.exec.tele_mult.tier` | 1.6 / 1.4 / 1.2 / 1.0 / 0.85 / 0.7 | × | `[E]` |
+| `ai.exec.tele_mult.tier` | retired — §02 `p.strike.tier.telegraphAdd` (= 01 `telegraphMod` × 600 ms) [REVIEW] | × | — |
 | `ai.exec.tele_fatigue` | 0.5 (× (1 + 0.5 f)) | — | `[E]` |
 | `ai.exec.p_ontime.tier` | 0.55 / 0.65 / 0.75 / 0.85 / 0.92 / 0.95 | p | `[E]` |
 | `ai.exec.p_ontime_fatigue` | −0.15 f | p | `[E]` |
@@ -1081,8 +1095,8 @@ values are research-side estimates (Assumption A-1).
 | `ai.exec.accuracy_fatigue` | −18 % @ f = 0.8 (linear) | fraction | `[S: DAMAGE_PHYSIOLOGY §4.3 (est.)]` |
 | `ai.exec.target_error.tier` | 0.10 / 0.06 / 0.03 / 0.015 / 0.008 / 0.005 | p | `[E]` |
 | `ai.exec.overcommit` | p 0.40 (T0) / 0.25 (T1); power ×1.15; balance −0.2 | — | `[E]` |
-| `ai.exec.stance_break_p` | 0.30 (T0) / 0.10 (T1) / 0 | p per movement tick | `[E]` |
-| `ai.exec.eyes_closed_p` | 0.35 (T0) / 0.15 (T1) / 0 | p per exchange | `[E]` |
+| `ai.exec.stance_break_p` | = §02 `p.strike.move.feetCrossP` 0.25 / 0.10 / 0.02 / 0 [REVIEW] | p per lateral step | `[S: BOXING §8 r32]` |
+| `ai.exec.eyes_closed_p` | = 01 `beh.gen.eyes_close.p` 0.70 (T0) / 0.30 (T1) / 0 [REVIEW] | p per incoming power strike | `[S: BOXING §8 r31]` |
 | **perception** | | | |
 | `ai.percept.base_ms.tier` | 300 / 300 / 200 / 200 / 100 / 100 | ms | `[S: 09 §2.5 (E)]` (owned jointly; §09 plumbing) |
 | `ai.percept.reaction_slope` | −1 ms per `reactionTime` point above 50 | ms | `[S: 09 §2.5 (E)]` |
@@ -1096,17 +1110,17 @@ values are research-side estimates (Assumption A-1).
 | `ai.oppmodel.tau_mem.tier` | — / 20 / 40 / 60 / 90 / 120 | s | `[E]` (deviates from LIT_C 6 s; A-4) |
 | `ai.oppmodel.kl_adjust_threshold` | 0.35 | nats | `[E]` |
 | `ai.ledger.window` | 30 | s | `[S: MMA_INTEGRATION §7.1]` |
-| `ai.read.p_tier` | 0.50 / 0.58 / 0.68 / 0.75 / 0.83 / 0.87 | p | `[D: LIT_B §4.1]`; T0 `[E]` |
-| `ai.read.elapsed_slope` | 2.0 | logit | `[E]` (shape `[S: LIT_B §4.6]`) |
-| `ai.read.telegraph_coef` | 1.2 | logit | `[E]` |
-| `ai.read.anxiety_pen` | 0.15 / 0.15 / 0.10 / 0.10 / 0.05 / 0.05 | p | `[S: LIT_B §4.3]` (ends); middle `[E]` |
-| `ai.read.familiarity_pen` | 0.10 (T0–T3); 0 (T4+) | p | `[S: MMA_INTEGRATION §5.1 ST-5 (est.)]`, `[S: LIT_B §3.15]` |
+| `ai.read.p_tier` | retired — 01 `readP_dom` via §02 §2.4.3 [REVIEW] | p | — |
+| `ai.read.elapsed_slope` | retired (02 evaluates the cue read once at launch + telegraph) [REVIEW] | logit | — |
+| `ai.read.telegraph_coef` | retired — §02 `p.strike.read.telegraphSlope` 0.004 logit/ms [REVIEW] | logit | — |
+| `ai.read.anxiety_pen` | retired — 01 `anxietyReadPenalty` + §02 `p.strike.read.hurtPenalty` [REVIEW] | p | — |
+| `ai.read.familiarity_pen` | retired — §02 §2.7 familiarity block scaled by (1 − 01 `stanceFamiliarity`) [REVIEW] | p | — |
 | `ai.read.familiarity_threshold` | 3 | fights vs stance | `[E]` |
-| `ai.read.counter_p.tier` | 0.02 / 0.05 / 0.15 / 0.25 / 0.40 / 0.50 | p | `[D: LIT_B §4.4]` |
+| `ai.read.counter_p.tier` | retired — 01 `counterOnReadP` [REVIEW] | p | — |
 | `ai.read.counter_mult` | 2.5 | × | `[E]` |
-| `ai.feint.bite.tier` | 0.65 / 0.60 / 0.50 / 0.40 / 0.30 / 0.25 | p | `[S: LIT_B §4.5]` (T1, T5); rest `[E]` |
+| `ai.feint.bite.tier` | retired — 01 `feintBiteP` [REVIEW] | p | — |
 | `ai.feint.quality_coef` | 0.3 | — | `[E]` |
-| `ai.feint.repeat_threshold` / `repeat_decay` | 3 / 0.6 | count / × | `[S: BOXING §5]` (threshold); decay `[E]` |
+| `ai.feint.repeat_threshold` / `repeat_decay` | retired — §02 `p.strike.feint.habituation` −0.7 logit/repeat and `overFeintN` 3 [REVIEW] | count / × | — |
 | `ai.feint.walkthrough_drop` | 0.30 for 5 s | fraction | `[E]` |
 | `ai.feint.hurt_bonus` | +0.20 | p | `[E]` |
 | `ai.feint.followup_bonus` | +15–25 % hit chance (I-6, in §02) | pp | `[S: MMA_INTEGRATION §2.1 I-6 (est.)]` |
@@ -1192,7 +1206,7 @@ values are research-side estimates (Assumption A-1).
 | `ai.finish.trap_bite_bonus` | +0.20 | p | `[E]` |
 | `ai.finish.ground_strike_on_downed` | 3.0 | × | `[E]` |
 | `ai.corner.correct.tier` | — / 0.40 / 0.55 / 0.70 / 0.85 / 0.95 | p | `[S: §7.7 CO-1 (est.)]` |
-| `ai.corner.uptake` | 0.5 base; +0.1 per iqTier > 2; −0.2 damage > 60 %; −0.1 contradiction; pace cues ×0.5 at T4+ | p | `[S: §7.7 CO-2 (est.)]`; pace factor `[S: §7.6]` |
+| `ai.corner.uptake` | 0.4 + 0.1 × iqTier (= 01 `beh.gen.corner_uptake`) + 01 adaptability term; −0.2 damage > 60 %; −0.1 contradiction; pace cues ×0.5 at T4+ [REVIEW] | p | `[S: MMA_INTEGRATION §8 via 01]`; pace factor `[S: §7.6]` |
 | `ai.corner.affirm` | +10 composure | attribute | `[S: §7.7 CO-4]` |
 | `ai.corner.default_tier` | fighter iqTier − 1 (floor T1) | tier | `[E]` |
 | `ai.corner.max_cues` | 2 | count | `[S: §7.7 CO-1]` |
@@ -1253,7 +1267,7 @@ per-strike rates; this section owns the *mix* and the *dynamics*. Each check run
 | V-18 | street durations | untrained 1v1: median < 60 s; > 1 min ≈ 20 %; indecisive ≈ 45–50 %; KO ≈ 25 % with ≈ 64 % of KOs inside 30 s | ±10 s; ±8 pp; ±10 pp; ±8 pp | street ruleset | `[S: FIGHT_DATA §6.3, §6.1]` (weak) |
 | V-19 | team roles | T4 teams vs a single T4: `hold`/`hit` role pairs occur in >= 60 % of 2v1 bouts; T1 teams 0 % | ±10 pp | teams | `[E]` |
 | V-20 | mustNot slips | `evt.mustnot.violated` per bout: T1 >= 3, T3 <= 1, T5 ≈ 0 | ±1 | by tier | `[E]` |
-| V-21 | determinism | identical seed → identical event log including all `evt.*` payloads; RNG draw count per tick = 6 (+1 multi) | exact | all | conventions §4 |
+| V-21 | determinism | identical seed → identical event log including all `evt.*` payloads; RNG draw count per fighter per tick in P3 = 8 (+1 multi) per §09 §2.7 [REVIEW] | exact | all | conventions §4 |
 | V-22 | plan failure modes | each of §2.5.9's six failure modes occurs in >= 1 % of a mixed batch and is tagged in the event log | >= 1 % | mixed | `[E]` |
 
 Debug surface: the Model tab (kept, `docs/AUDIT.md §1.3`) gains an "AI" page listing per-tier realised
@@ -1269,9 +1283,9 @@ Every `[E]` above is covered by one of the following.
   and adaptation numbers, hurt/finisher weights, scouting σ) are design parameters with no published
   measurement; they are the primary Phase 9 tuning set. Their *directions* are anchored in data (winners take
   more, better-set-up takedowns; make more positional improvements; trailing fighters drop TD/sub attempts).
-- **A-2 Fixed RNG draw layout** (6 per fighter per tick, 7 with multi-opponent; 5 per fighter at breaks) is a
-  design choice for replay stability; the count may change when §02–§04 finalise their own draws, but the
-  principle (draws taken whether or not used) must not.
+- **A-2 Fixed RNG draw layout** (8 per fighter per tick in P3, 9 with multi-opponent; 5 per fighter at breaks;
+  the full per-tick schedule across P2–P7 is §09 §2.7 [REVIEW]) is a design choice for replay stability; the
+  principle (draws taken whether or not used) must not change.
 - **A-3 Temperature ladder** τ = 1.00…0.28, the phase/IQ 50/50 blend, the √n compensation, the style-weight
   range [0.5, 2.0] and the reduced style jitter σ 0.10 are estimates chosen so that T0 approximates the
   current lottery and T5 approaches argmax without reaching it (predictability ceiling V-10).

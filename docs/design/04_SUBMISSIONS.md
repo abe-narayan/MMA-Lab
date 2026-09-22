@@ -88,7 +88,7 @@ Ids follow conventions §5. Suffix `_bottom` on guard nodes is part of the **nod
 |---|---|---|
 | `sub.*` | `sub.rnc`, `sub.guillotine_high_elbow`, `sub.heel_hook_inside` | §3 catalogue |
 | `def.*` | `def.hand_fight`, `def.stack`, `def.hitchhiker`, `def.slam` | §2.5 |
-| `state.*` | `state.sub_attempt`, `state.sub_locked`, `state.unconscious`, `state.injured_limb`, `state.neck_strain`, `state.post_loc_symptoms` | §2.1, §2.6 |
+| `state.*` | `state.sub_attempt`, `state.sub_attacking`, `state.sub_defending`, `state.sub_locked`, `state.post_loc_symptoms` (this section's transient states); the physiological outcomes use §05's ids: `state.choked_out` (was `state.unconscious`), `state.joint_failure[joint]` (was `state.injured_limb`), `state.neck_cranked` (was `state.neck_strain`; the cumulative 0–1 strain value is carried as its severity) [REVIEW: aliased to 05 §2.3.8 / §2.10 so referee, career layer and presentation see one vocabulary] | §2.1, §2.6 |
 | `evt.*` | `evt.sub_attempt_logged`, `evt.tap`, `evt.technical_submission`, `evt.injury`, `evt.slam`, `evt.sub_escape`, `evt.sub_chain` | §2.9 |
 | `edge.sub.*` | `edge.sub.tri_to_armbar` | §4 chain graph |
 | `param.sub.*` | `param.sub.k_skill_entry` | §7 registry |
@@ -150,7 +150,7 @@ SubmissionAttempt {                    // live state.sub_attempt; at most one pe
 }
 ```
 
-States set on fighters by this section: `state.sub_attacking`, `state.sub_defending`, `state.sub_locked` (finish clock running), `state.unconscious` (→ §05/referee), `state.injured_limb{side, joint, severity}`, `state.neck_strain` (cumulative 0–1), `state.post_loc_symptoms` (cosmetic; feeds commentary and §05 `recovery_time`).
+States set on fighters by this section: `state.sub_attacking`, `state.sub_defending`, `state.sub_locked` (finish clock running), `state.choked_out` (→ §05/referee; §05's id, was `state.unconscious` [REVIEW]), `state.joint_failure{side, joint, severity}` (§05's id, was `state.injured_limb` [REVIEW]), `state.neck_cranked` with severity = cumulative strain 0–1 (§05's id, was `state.neck_strain` [REVIEW]), `state.post_loc_symptoms` (cosmetic; feeds commentary and §05 `recovery_time`). Wherever the rest of this section says `state.unconscious` / `state.injured_limb` / `state.neck_strain`, read the §05 id.
 
 ### 2.2 The four stages
 
@@ -223,7 +223,7 @@ A submission is *available* on a tick when the attacker is in one of its `entrie
 Each window: (1) the defender selects an option from the stage's list (§2.5, AI policy §6.3); (2) compute `p_e` for that option, roll `u_def`; on success apply the option's outcome distribution (escape → return node; regress → previous stage with stage clock reset; hold → nothing); (3) if no escape/regress, compute `p_a`, roll `u_att`; on success advance one stage (S1 → S2 fires `evt.sub_attempt_logged`; S3 → `locked` fires `evt.sub_locked` and starts the finish clock §2.6); (4) accrue energy (§2.8). Both fighters remain in their §03 node throughout; §03 edges are suspended for the pair while `state.sub_attempt` exists except the counters listed in the catalogue (slam, strikes, counter-submission), which are resolved as defender options here.
 
 #### 2.4.3 Roll order and determinism
-Per window, in this order from the seeded RNG: `u_def`, `u_att`, then any outcome-split draw, then chain draw. In a mutual-exposure entanglement (§2.6.6) the fighter with the higher `sk.legLocks` resolves first; ties → lower fighter index `[E]`.
+Per window, in this order from the seeded RNG: `u_def`, `u_att`, then any outcome-split draw, then chain draw — always four draws per window, consumed whether or not each applies (09 §2.7 [REVIEW]); the lock-time draws (`pGoOut` uniform, `tLoc` normal = 2 calls, `tTap` uniform) are taken once at `lockedAtMs` in that order. In a mutual-exposure entanglement (§2.6.6) the fighter with the higher `sk.legLocks` resolves first; ties → lower fighter index `[E]`.
 
 #### 2.4.4 Stall and abandon
 When `stageElapsedMs ≥ dMax`, each further window the attacker rolls **abandon** with `pAbandon = 0.35 − 0.25 × patience` where `patience = clamp((sk_family − 50)/50, 0, 1) × (1 − 0.5 × fAtt)` `[E]`; a `style.subHunter` halves `pAbandon`; a T≤1 attacker never abandons voluntarily (§6). Abandon → the catalogue's `abandon` node (usually the origin position retained for top attacks; guard retained for bottom attacks). Long, stalled triangles (30–60 s) are produced by this rule with `dMax` = 3 × 6,500 ms plus the re-rolls `[S: SUBMISSIONS §2.6 "held 30–60 s"]`.
@@ -302,7 +302,7 @@ stakes  : 1.2 in title fights, 1.0 otherwise
 The attacker releases when the referee intervenes (§2.6.4). Attacker awareness: a T4+ attacker notices the limp body and releases within 1 s with p 0.6 (T5 0.8, T≤2 0.2) `[E]`. If the hold persists ≥ 4 s past `tLoc`, set `state.post_loc_symptoms` with p 0.6 (convulsions/staggering; commentary + §05 recovery time) `[S: rule 7; P9 OR 6.7, 61.5 % symptomatic]`. Consciousness returns 2–5 s after release (coherent within 1–2 min) `[S: SUB_PHYS §1 working numbers]` — §05 owns the recovery state.
 
 #### 2.6.4 Referee detection lag (technical submission)
-- Choke LOC: referee stops `U(0.8, 2.0)` s after `tLoc` `[D: rule 7 "+1–2 s"]`; in a ruleset with `refereeStopsOnLoc = false` (street) there is no stop.
+- Choke LOC: referee stops after §06's `cfg.locDetectS` (1.0 s median, §06 §2.3.5) [REVIEW: was `U(0.8, 2.0)` s from rule 7 "+1–2 s"; §06 owns referee latencies and its 1.0 s + the attacker-release 0.5–1.5 s lands in SUBPHYS's 2.4 s asymptomatic band]; in a ruleset with `refereeStopsOnLoc = false` (street) there is no stop.
 - Joint-lock injury (§2.6.5): referee stops `U(0.5, 1.5)` s after `evt.injury` with p 0.7 (visible break / scream); otherwise the fight continues with `state.injured_limb` `[S: rule 7 "p 0.3 continues"]` `[E: lag]`.
 - Verbal tap / tapping on the opponent are treated as `evt.tap` with zero lag `[S: SUB_PHYS §3]`.
 - `evt.near_submission` is raised for judging when an attempt reaches S3 or `locked` `[S: RULES §2 "chokes causing visible distress, joint hyperextension"]`.
@@ -325,7 +325,7 @@ evt.slam { slammed: attackerId, height: 'knees'|'waist'|'shoulder'|'overhead', s
            forceMult: knees 0.8 · waist 1.2 · shoulder 1.6 · overhead 2.0   // × the hook-punch reference force, DAMAGE §3.1
            target: 'head_back'|'upper_back', surface: 'mat'|'concrete' }
 ```
-`[E: forceMult ladder; SUBMISSIONS rule 19 placeholder "8–25 head-damage units" superseded by handing the impact to §05's alphaEq model with its ground ×0.7 rotational / ×1.3 structural rule]`. Height draw: knees 0.35 / waist 0.40 / shoulder 0.20 / overhead 0.05 `[E]` (overhead requires strength ≥ 80). If the lock survives the slam (1 − p above), the attacker's finish clock, if `locked`, continues (the Rampage–Arona and Hughes–Newton cases are lock-break successes that also hurt the attacker `[S: W7]`). If the slammed fighter is KO'd by §05, the attempt ends. A slam while the attacker is `locked` on a **functional choke** that is past `tLoc − 2 s` does not save the defender `[E]`.
+`[E: forceMult ladder; SUBMISSIONS rule 19 placeholder "8–25 head-damage units" superseded by handing the impact to §05's alphaEq model with its ground ×0.7 rotational / ×1.3 structural rule]`. [REVIEW: §05 §2.1 consumes only `StrikeImpact`; `evt.slam` is therefore delivered as `StrikeImpact { tech: 'slam', weapon: 'mat', region: 'head', subLocation: 'topback' (target 'head_back') or region 'body', subLocation 'sternum' (target 'upper_back'), placement: 'flush', forceN: forceMult × 4,400 N (DAMAGE §3.1 hook reference), absorb: 0, defence: 'none', seen: false, closingSpeedMs: 0, targetState.grounded: true, posture: 'groundTop', gloveType per ruleset }`, `forceN` further × `Arena.surfaceHardness` (§09 §3.3). With §05's `ko.kWeapon.mat` 0.35 and `kLever.topback` 0.7 a waist slam gives `alphaEq ≈ 6,300 × (5,280/3,400) × 0.35 × 0.7 × 1.35 (unseen) ≈ 3,200 rad/s²` → `pConcuss ≈ 0.5 %` [D] — well below §03's 3–8 % "KO-class chance per slam" (`grap.slamKoClassP`); the two are reconciled in calibration via `ko.kWeapon.mat`, not here (REVIEW_LOG open issue).] Height draw: knees 0.35 / waist 0.40 / shoulder 0.20 / overhead 0.05 `[E]` (overhead requires strength ≥ 80). If the lock survives the slam (1 − p above), the attacker's finish clock, if `locked`, continues (the Rampage–Arona and Hughes–Newton cases are lock-break successes that also hurt the attacker `[S: W7]`). If the slammed fighter is KO'd by §05, the attempt ends. A slam while the attacker is `locked` on a **functional choke** that is past `tLoc − 2 s` does not save the defender `[E]`.
 
 **Von Flue (`def.counter_sub` → `sub.von_flue`).** When a guillotine attacker retains the grip after the defender passes to the choking-arm side (`def.walk_weak_side` success path 50 % → side control), the defender may start `sub.von_flue` at S2 (entry skipped) `[S: rule 20]`. The bottom fighter releases (`def.release_grip`) with p 0.8 (T3+), 0.4 (T2), 0.1 (T≤1) per window before S3 `[S: rule 20]`.
 
@@ -349,7 +349,7 @@ evt.slam { slammed: attackerId, height: 'knees'|'waist'|'shoulder'|'overhead', s
 
 ### 2.8 Energy
 
-Per-second energy costs in §05's units (one "average" round ≈ 100): attacker S1 0.9, S2 0.7, S3 0.9 (squeeze), locked 0.6; grip-heavy attacks (guillotine family, kimura, D'Arce/anaconda, ankle lock, toe hold) +0.3/s; defender: standard options 0.7/s, high-cost options (`def.stack`, `def.walk_weak_side`, `def.roll_with`, `def.spin_out`, `def.clear_hooks_turn_in`, `def.turn_in_bridge`, `def.clear_knee_line`, `def.post_against_roll`) 1.4/s, `def.slam` 4.0 per attempt, `def.endure` 0.5/s, panic (`def.none` for T0–T1) 1.6/s `[E, scaled to BJJ_POS §8 rule 19 ground drains 1.0/1.4/1.6 and its tier multipliers T0 ×1.6, T1 ×1.3, T2 ×1.1, T4 ×1.0, T5 ×0.9 (S: BJJ_POS §6)]`.
+Per-second energy costs in §05's units (one "average" round ≈ 100): attacker S1 0.9, S2 0.7, S3 0.9 (squeeze), locked 0.6; grip-heavy attacks (guillotine family, kimura, D'Arce/anaconda, ankle lock, toe hold) +0.3/s; defender: standard options 0.7/s, high-cost options (`def.stack`, `def.walk_weak_side`, `def.roll_with`, `def.spin_out`, `def.clear_hooks_turn_in`, `def.turn_in_bridge`, `def.clear_knee_line`, `def.post_against_roll`) 1.4/s, `def.slam` 4.0 per attempt, `def.endure` 0.5/s, panic (`def.none` for T0–T1) 1.6/s `[E, scaled to BJJ_POS §8 rule 19 ground drains 1.0/1.4/1.6 and 01's `energy.actionCostMult` tier multipliers T0 ×1.6, T1 ×1.3, T2–T3 ×1.1, T4 ×1.0, T5 ×0.9 (S: BJJ_POS §6 via 01 §2.3.4) — §05 applies the multiplier, this section only names the action classes [REVIEW]]`.
 
 ### 2.9 Events and logging
 
@@ -1185,7 +1185,7 @@ stateMult   : ×1.5 if the opponent is rocked · ×0.5 if fAtt > 0.7 (except RNC
 rulesetMult : MMA 1.0 · sub-only 1.6 · ADCC/IBJJF 1.3 (no strikes to worry about) · judo 0.6 (ne-waza time-limited) · street 0.8
 classMult   : women's divisions ×1.15
 ```
-`[S: SUBMISSIONS §5 rule 2 (base, style, rocked, fatigue); FIGHT_DATA #129 trailing −49 %; rule 17 women ×1.15]` `[E: rulesetMult]`. Decision latency between evaluations: T0 4–8 s, T1 3–5 s, T2 2–4 s, T3 1.5–3 s, T4 1.5–2.5 s, T5 1–2 s `[S: BJJ_POS §6 decision latency]`.
+`[S: SUBMISSIONS §5 rule 2 (base, style, rocked, fatigue); FIGHT_DATA #129 trailing −49 %; rule 17 women ×1.15]` `[E: rulesetMult]`. Decision latency between evaluations = 01 `beh.bjj.decision_latency`: T0 4–8 s, T1 3–5 s, T2–T3 2–4 s, T4 1.5–3 s, T5 1–2 s `[S: BJJ_POS §6 decision latency via 01 §2.3.4 tier mapping]` [REVIEW: was T3 1.5–3 / T4 1.5–2.5, which used BJJ_POS's five tiers one-for-one; 01 maps BJJ tier 2 to T2–T3].
 
 **Selection weights** among available submissions (relative, multiplied by the catalogue's `Conv` so that high-percentage attacks dominate; §8 tunes them to the attempt-mix targets):
 
@@ -1349,7 +1349,7 @@ All ids prefixed `param.sub.`; catalogue stage values are registered as `param.s
 | `param.sub.attempt.fatigueMult` | 0.5 at f > 0.7 (RNC/arm-tri exempt) | × | `[S: rule 2]` |
 | `param.sub.attempt.trailingMult` | 0.51 (R3+, trailing) | × | `[S: FIGHT_DATA #129]` |
 | `param.sub.attempt.rulesetMult` | MMA 1.0 · sub-only 1.6 · ADCC/IBJJF 1.3 · judo 0.6 · street 0.8 | × | `[E]` |
-| `param.sub.attempt.latencyS` | T0 4–8 · T1 3–5 · T2 2–4 · T3 1.5–3 · T4 1.5–2.5 · T5 1–2 | s | `[S: BJJ_POS §6]` |
+| `param.sub.attempt.latencyS` | T0 4–8 · T1 3–5 · T2–T3 2–4 · T4 1.5–3 · T5 1–2 (= 01 `beh.bjj.decision_latency`) [REVIEW] | s | `[S: BJJ_POS §6 via 01 §2.3.4]` |
 | `param.sub.patience.tier` | T0–1 never · T2 0.2 · T3 0.5 · T4 0.7 · T5 0.9 | — | `[E]` |
 | `param.sub.t5.availabilityMult` | 0.6 | × | `[S: rule 23]` |
 | `param.sub.t5.painSubImmunity` | structuralHead < 50 and f < 0.8 | condition | `[S: rule 23]` |

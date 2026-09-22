@@ -9,8 +9,9 @@ Provenance tags follow `00_CONVENTIONS §1`. Deviation stated here: this section
 rendering path, and it cites `research/LIT_B…` as `[S: LIT_B §n]`. Other design sections referenced: §01 fighter model
 (`01_FIGHTER_MODEL.md`: attributes, appearance record), §03 grappling state graph (`03_GRAPPLING_STATE_GRAPH.md`,
 owner of the `pos.*` ids used in §5.7), §04 submissions (`sub.*` stages), §07 strategy/AI (plan intent for the
-debug overlay). Sections not yet written (striking, damage, referee/judging, UI/features) are referenced by
-subject name.
+debug overlay), §02 striking (technique ids, durations, contact tick), §05 damage/physiology (states, cuts,
+swelling), §06 rules/referee/judging (referee events, counts, scorecards), §09 architecture (`TickSnapshot`,
+`SimEvent`, replay) [REVIEW: section numbers added — these sections now exist].
 
 Target machine (all budgets below are for it): Intel Arc 140V iGPU, 8 cores, 16 GB shared; "near-4K" = 1440p
 internal + TAA upscale; 60 fps live; 30 fps acceptable for DoF / motion-blur replays [S: docs/ENGINE_DECISION]
@@ -58,9 +59,12 @@ and decision scores → debug overlay); referee/judging (ref events, counts, sco
 
 ### 2.2 `PresentationFrame` schema
 
-The adapter `src/presentation/adapter.ts` builds this from the engine tick snapshot; it is the only module that
-imports both engine internals and the contract. Fields marked *(debug)* are omitted in shipped replays unless the
-debug overlay is enabled.
+The adapter `src/presentation/adapter.ts` builds this from §09's `TickSnapshot` + `SimEvent` window +
+`FighterDefinition[]` through `src/sim/index.ts` only — it never imports sim internals (§09 §1.1 import rule)
+[REVIEW: the first draft said "imports engine internals"; instead §09 §1.4 `FighterSnapshot` / `EngagementSnapshot`
+were extended with every field this schema needs (`vx/vz`, `partnerId`, fence data, `actionDetail`, `grips`,
+`contacts`, `damageVisual`, `fatigueVisual`, `balance`, `states`, engagement root/kuzushi/underhook)]. Fields marked
+*(debug)* are omitted in shipped replays unless the debug overlay is enabled.
 
 ```ts
 // src/presentation/contract.ts  — the only file src/render/** may import engine-shaped types from
@@ -98,9 +102,15 @@ export interface FighterState {
   damage: DamageVisual;
   fatigue: { f: number; breathingRate: number; handsDrop: number; flatFeet: number; chinUp: number };  // 0..1 except Hz
   vitals: { stamina: number; staminaMax: number; balance: number };
-  states: StateFlag[];                           // state.stunned, state.rocked, state.flash_kd, state.body_hurt,
-                                                 // state.winded, state.dead_leg_lead, state.dead_leg_rear,
-                                                 // state.dead_arm_L/R, state.eye_swollen_L/R, state.ko, state.tapped
+  states: StateFlag[];                           // §05 §2.10 ids verbatim [REVIEW: was flash_kd / dead_leg_lead / dead_arm_L …]:
+                                                 // state.stunned, state.rocked, state.knockdown_flash, state.knockdown_hurt, state.ko,
+                                                 // state.choked_out, state.body_hurt, state.body_worn, state.winded, state.body_collapse,
+                                                 // state.dead_leg, state.leg_compromised, state.leg_collapse, state.dead_arm,
+                                                 // state.hand_injured, state.foot_injured, state.limb_fracture, state.nose_broken,
+                                                 // state.eye_swollen_shut, state.joint_failure, state.second_wind, state.adrenaline_dump,
+                                                 // plus §04 state.sub_locked. Sided states carry a suffix ':L' | ':R' (dead_arm, hand_injured,
+                                                 // foot_injured, eye_swollen_shut) or ':lead' | ':rear' (dead_leg, leg_compromised, leg_collapse);
+                                                 // a tap is the `tap` event, not a state.
   debug?: { intent: string; plan: string; decisionScores: { id: TechniqueId; score: number }[];
             perceptionDelayTicks: number; hitboxes: Hitbox[] };   // (debug)
 }
@@ -110,8 +120,10 @@ export interface ActionState {
   startTick: number; totalMs: number;            // design durations in ms (00_CONVENTIONS §2)
   contactTick: number; contactOffsetMs: number;  // engine resolve tick + sub-tick offset
   phase: number;                                 // 0..1 at the *tick*; renderer recomputes continuously (§2.4)
-  target: 'head' | 'body' | 'lead_leg' | 'rear_leg' | 'arm' | 'none';
-  subTarget?: 'chin' | 'temple' | 'nose' | 'forehead' | 'orbit' | 'liver' | 'solar' | 'ribs' | 'thigh' | 'calf';
+  target: 'head' | 'body' | 'lead_leg' | 'rear_leg' | 'arm' | 'none';   // adapter maps §02/§05 region ids leadLeg/rearLeg/arms [REVIEW]
+  subTarget?: 'chin' | 'temple' | 'midface' | 'forehead' | 'orbit' | 'topback'          // §05 HeadSite [REVIEW: 'nose' → 'midface']
+            | 'liver' | 'solar' | 'ribs' | 'spleen' | 'sternum' | 'abdomen'             // §05 BodySite
+            | 'thigh_outer' | 'thigh_inner' | 'calf' | 'shin' | 'knee';                  // §05 LegSite
   side: 'L' | 'R';                               // which limb of the actor
   targetId: number | null;
   result?: 'landed' | 'blocked' | 'evaded' | 'missed' | 'success' | 'stuffed' | 'checked' | 'caught';
@@ -142,7 +154,10 @@ Forehead redness is folded into zones 0/1; arms are shown by posture (dead-arm g
 ### 2.3 `PresentationEvent` stream
 
 Events are the *triggers* (reactions, cuts, replays, HUD toasts); the frame is the *state*. Every event carries
-`tick`, `t`, `subTickMs` (0–99) so the renderer can place it between display frames.
+`tick`, `t`, `subTickMs` (0–99) so the renderer can place it between display frames. [REVIEW: these kinds are
+derived by the adapter from §09 §1.4's canonical `SimEvent` union; the mapping table there names the source kind
+for each row below (e.g. `contact` ← `strike`, `ref_stoppage` ← `refereeStoppage`, `sub_stage` ← `submissionStage`,
+`plan_change` ← `intentChange`).]
 
 | Kind | Payload | Consumers |
 |---|---|---|
@@ -394,10 +409,10 @@ or commission later (upgrade path). Counts are the number of distinct clips need
 | Footwork | advance, retreat, circle L/R, pivot, L-step, shift, cut-off, level-change feint | step-drag F/B/L/R, pivot L/R, L-step, shuffle, push-off retreat, shift, stance switch | ACCAD Walks/Turns, CMU boxing, 100STYLE (aggressive, tired, cautious) | 5–10 min DB | M+ (the movement primitives of [S: BOXING §4] must all be present; gaps filled by mirroring and time-warp) |
 | Punches | tech.jab, cross, lead_hook, rear_hook, lead_uppercut, rear_uppercut, overhand, spinning_backfist, body variants | each punch: standing, stepping-in, retreating variant | ACCAD Punches, CMU boxing, Rokoko | 18 | M+ |
 | Elbows | tech.elbow_horizontal/upward/downward/spinning | derived from hook/uppercut clips with shortened lever + procedural tip | derived | 6 | P (from M) |
-| Kicks | tech.low_kick, body_kick, head_kick, teep, side_kick, front_kick, spinning_back_kick, question_mark, calf_kick, switch variants | roundhouse ×3 heights ×2 legs, teep ×2, side, spinning back, question-mark | ACCAD Kicks (21) | 14 | M+ (calf kick, switch kick, question-mark: P) |
+| Kicks | `tech.kick_low_rear`, `tech.kick_low_lead`, `tech.kick_body_rear`, `tech.kick_head_rear`, `tech.teep_lead`/`_rear`, `tech.kick_side`, `tech.kick_front_snap`, `tech.kick_spinning_back`, `tech.kick_question_mark`, `tech.kick_calf`, `tech.kick_oblique`, `*_switch` variants (§02 §2.2.2 ids [REVIEW]) | roundhouse ×3 heights ×2 legs, teep ×2, side, spinning back, question-mark | ACCAD Kicks (21) | 14 | M+ (calf kick, switch kick, question-mark: P) |
 | Knees | tech.knee_straight, curved, jumping, clinch_knee | standing knee ×2, clinch knee (paired) | Rokoko (pending) / P | 5 | P |
-| Defence | def.high_guard, slip_L/R, parry, roll, pull, shoulder_roll, check_L/R, catch, cover, frame, sprawl | each as a short clip with hold pose | ACCAD stances (partial) / P | 14 | P (mostly) |
-| Feints | tech.feint_jab, feint_level_change, feint_kick | first 30 % of the matching strike clip, then return | derived | 0 new | P (derived) |
+| Defence | `def.block_high`, `def.slip_out`/`def.slip_in` (L/R), `def.parry`, `def.roll`, `def.duck`, `def.pull`, `def.shoulder_roll`, `def.check` (L/R), `def.catch`, `def.kick_catch`, `guard.cover_turtle`, `def.frame`, `def.sprawl` (§02 §2.4 / §03 ids [REVIEW]) | each as a short clip with hold pose | ACCAD stances (partial) / P | 14 | P (mostly) |
+| Feints | `feint.jab`, `feint.rear_hand`, `feint.level_change`, `feint.step`, `feint.kick` (§02 §2.3.4 ids [REVIEW]) | first 30 % of the matching strike clip, then return | derived | 0 new | P (derived) |
 | Hit reactions (standing) | contact events | head snap ×3 directions ×3 power, body fold ×2, leg buckle ×2, stagger F/B/L/R | CMU stumbling (partial) / P springs | 12 authored + springs | P + M+ |
 | Knockdown / fall | knockdown, ko | ragdoll (§5.9) + landing-settle poses; flash-KD "sit down" | CMU falling | 4 | P (ragdoll) + M |
 | Get-up | standUp from down / ground | technical stand-up, wall walk, push-up get-up, wobbly get-up (rocked) | CMU "getting up", P | 4 | M+ / P |
@@ -496,7 +511,7 @@ sock.sternum, sock.ribs_L/R, sock.waist_back, sock.hip_L/R, sock.thigh_L/R, sock
 sock.shin_L/R, sock.ankle_L/R, sock.foot_L/R, sock.back_upper, sock.back_lower`, plus world sockets
 `sock.fence(panel, height)`, `sock.canvas`.
 
-**Node → paired pose table.** Node ids are exactly those of `03_GRAPPLING_STATE_GRAPH.md` (73 nodes; the
+**Node → paired pose table.** Node ids are exactly those of `03_GRAPPLING_STATE_GRAPH.md` (74 nodes [REVIEW: was 73; two rows added below]; the
 research inventories behind them are [S: WRESTLING §2], [S: BJJ_POSITIONS §2], [S: MUAY_THAI_KICKBOXING §4.1],
 [S: JUDO §2.2]). **Every node §03 adds later must get a row here before it ships.** "Pose" is a paired pose set
 (P) unless a mocap clip exists (M). Sockets are written `holder.hand → partner.socket`; `a` is the initiative
@@ -570,11 +585,13 @@ holder / top as §03 defines the roles for that node. Root distances are for a 1
 | `pos.ground_5050` | symmetric entanglement, both seated | legs entangled, hand on b's foot | mirrored | a.legs ↔ b.legs (a.thigh_R → b.thigh_R); a.hands → b.ankle_R; b.hands → a.ankle_R | P |
 | `pos.ground_saddle` | b's legs triangled around a's far thigh | on knees/side, posting, hammerfist hand free | inside sankaku, hands on a's ankle/heel | b.legs → a.thigh_R (triangle); b.hands → a.ankle_R; a.L → mat | P |
 | `pos.ground_reap` | b's inside leg across a's knee line, foot to far hip | kneeling, posting | reap, hands on ankle | b.shin_L → a.knee_front_R (across); b.foot_L → a.hip_L; b.hands → a.ankle_R | P |
+| `pos.ground_ashi_cross` [REVIEW: added] | b's legs crossed over a's trapped leg from the outside, knee line controlled | kneeling/standing, posting | cross ashi, hands on heel | b.legs → a.shin_R (crossed); b.foot_R → a.hip_R; b.hands → a.ankle_R / heel | P |
+| `pos.ground_truck` [REVIEW: added] | b on side, a behind with one of b's legs triangled (twister side control), back partly taken | kneeling behind, leg triangle, hand on b's far wrist | on side, trapped leg bent, free hand posting | a.legs → b.thigh_L (triangle); a.R → b.wrist_R; a.L → b.chin (twister grip); b.L → mat | P |
 | `pos.ground_cage_seated` | b seated back to fence, a kneeling/standing in front | body-lock pin, head on b's chest | seated, frames on a's shoulders | a.hands → b.waist_back; b.hands → a.shoulder_L/R; b.back → fence | P |
 | `pos.ground_wall_walk` | b hips off mat, one foot planted, hand on fence; a on the hips | body lock / underhook on hips | one hand on fence, hips rising | a.hands → b.hip_L/R; b.R → fence; b.back → fence; b.foot_L → canvas | P |
 | `pos.scramble` | root follows the fighter the engine marks as currently winning the roll | scramble blend (procedural, ≤ 2 s) | scramble blend | grips from the source node decay over the scramble duration | P |
 | `pos.ground_knockdown` | single-fighter root (b down), a standing over / stepping in | standing over or diving (GnP entry clip) | ragdoll → settle pose (§5.9), then cover/turtle | ragdoll contacts; none for a until the follow-up node | P |
-| `pos.sub_*` stage poses (30 submissions × 4 stages, owned by the submissions section) | inherits the parent node's root | finishing pose per stage (entry / lock / finish / tap) | defending pose per stage (frame / hand fight / escape / tap) | per-submission socket list authored with the pose (e.g. `sub.rnc`: a.R → b.neck under chin, a.L → b.crown; b.hands → a.wrist_R) | P |
+| `pos.sub_*` stage poses (54 submissions × 4 stages per §04 §3 [REVIEW: was 30], owned by the submissions section) | inherits the parent node's root | finishing pose per stage (entry / lock / finish / tap) | defending pose per stage (frame / hand fight / escape / tap) | per-submission socket list authored with the pose (e.g. `sub.rnc`: a.R → b.neck under chin, a.L → b.crown; b.hands → a.wrist_R) | P |
 
 Pose sets are authored as JSON keyframes (`assets/poses/pairs/<node>.json`, 68 bones × 2 fighters + socket list),
 editable in a small in-app pose tool (debug build) so that iteration does not require Blender [E].
@@ -625,9 +642,9 @@ where the difference is a different *movement* (novice wild swings, novice squar
 | Stunned | `state.stunned` (acute head 30–45) | 1 blink-and-reset, guard 5 % lower for the state duration | [S: DAMAGE_PHYSIOLOGY §2.1] [E: 5 %] |
 | Rocked ("legs gone") | `state.rocked` (acute 45–65) | knee-angle noise 1.5 Hz ± 6°, stance width +25 %, pelvis 4 cm lower, hands 15 % lower, head lag on turns; MM prefers "tired" clips; get-up uses the wobbly variant; referee prop moves closer | [S: DAMAGE_PHYSIOLOGY §2.1 (movement −40 %, guard −35 %)] [E: motion amplitudes] |
 | Body hurt / winded | `state.body_hurt`, `state.winded` | elbows in, torso pitched 15° forward, mouth open, one hand drifts to the struck side, retreat clips preferred | [S: DAMAGE_PHYSIOLOGY §2.2 (guard drops to protect body)] [E: 15°] |
-| Dead leg (structural 30 / 55 / 75) | `state.dead_leg_*` | 30: stance visibly compromised — weight shifts 60/40 off the leg, lead-leg check clips slower; 55: stance switch or stops planting (the engine decides; renderer shows the hop-and-reset); 75: limp cycle in MM (100STYLE "injured"-style tag), flat-footed stalk | [S: DAMAGE_PHYSIOLOGY §2.3 (thresholds)] [E: amounts] |
-| Dead arm | `state.dead_arm_*` | that guard hand 25 % lower, elbow tucked | [S: DAMAGE_PHYSIOLOGY §2.4 (guard height −25 %)] |
-| Eye swollen | `state.eye_swollen_*` | lid blend, head turns 10° to bring the good eye forward | [S: DAMAGE_PHYSIOLOGY §5.2] [E: 10°] |
+| Dead leg (structural 30 / 55 / 75) | `state.leg_compromised:lead/:rear` sev 1–3 and `state.dead_leg:lead/:rear` [REVIEW: §05 ids] | 30: stance visibly compromised — weight shifts 60/40 off the leg, lead-leg check clips slower; 55: stance switch or stops planting (the engine decides; renderer shows the hop-and-reset); 75: limp cycle in MM (100STYLE "injured"-style tag), flat-footed stalk | [S: DAMAGE_PHYSIOLOGY §2.3 (thresholds)] [E: amounts] |
+| Dead arm | `state.dead_arm:L/:R` [REVIEW: §05 id + side suffix] | that guard hand 25 % lower, elbow tucked | [S: DAMAGE_PHYSIOLOGY §2.4 (guard height −25 %)] |
+| Eye swollen | `state.eye_swollen_shut:L/:R` [REVIEW: §05 id + side suffix] | lid blend, head turns 10° to bring the good eye forward | [S: DAMAGE_PHYSIOLOGY §5.2] [E: 10°] |
 | Cut bleeding into eye | cut on lid/brow severity ≥ 2 | glove wipes across the eye every 6–10 s between actions (seeded) | [S: DAMAGE_PHYSIOLOGY §2.5] [E: cadence] |
 | Fatigue tells | `fatigue.f`, `handsDrop`, `flatFeet`, `chinUp`, `breathingRate` | chin up, hands drop, mouth open, feet flat: hands −(20 % · handsDrop), chin +8° · chinUp, heel contact in MM (flat-foot tag) at flatFeet > 0.5, chest rise amplitude ∝ breathingRate (0.4–1.0 Hz) | [S: BOXING §6 (fatigue tells)] [E: amounts] |
 | Adrenaline dump | engine flag during round 1 for low-experience fighters | breathing rate ×1.4, mouth open earlier | [S: DAMAGE_PHYSIOLOGY §4.6] [E: ×1.4] |
@@ -819,7 +836,7 @@ alone:
 - original:     <original file name and format>   e.g. Male2_C3D_Kicks_take07.bvh
 - modified:     <what we changed>                 e.g. retargeted to mma-sim skeleton, trimmed, mirrored
 - sha256:       <hash of the shipped file>
-- used-by:      <engine technique ids / systems>  e.g. tech.head_kick, tech.switch_head_kick
+- used-by:      <engine technique ids / systems>  e.g. tech.kick_head_rear, tech.kick_head_switch
 - notes:        <e.g. NSF acknowledgement text; Rokoko email date>
 ```
 

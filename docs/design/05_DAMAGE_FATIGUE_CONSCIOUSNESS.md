@@ -33,7 +33,7 @@ Interfaces (by section number):
 
 | Direction | Section | What crosses the boundary |
 |---|---|---|
-| in | §01 (fighter model) | attributes: `chin`, `bodyToughness`, `cardio`, `recovery`, `strength`, `massKg`, `age`, `bodyFatPct`, `composure`, `heart`, `discipline`; career: `priorKOs`, `proFights`; camp: `residualDehydration`, `acclimatised`; venue: `altitudeM`; ruleset: `gloveType`, round length/rest |
+| in | §01 (fighter model) | attributes: `chinEff` (01 §2.4.3 — age- and KO-history-adjusted; every `chin` below means `chinEff` [REVIEW]), `neck` (01 `neckMult`), `bodyToughness` (`bodyToughnessThresholdMult`), `cardio`, `recovery` (`recoveryHalfLifeMult`), `strength`, `fightNightKg` (= `massKg` below), `age`, `bodyFatPct`, `composureEff`, `heart`, `discipline`; career: `kKOHistoryMult` (01 §2.4.3, = `historyMult` below), `experience` (01 §2.4.1 — replaces this section's `proFights/12` mapping [REVIEW]); energy composites `energy.pcrRefillHalfLifeS`, `energy.lactateClearance`, `energy.breakRefillFrac`, `energy.actionCostMult` (01 §2.7.5; the `aerobicRate` parameterisation below is the same curve to within 4 % over cardio 20–80 and 01's registry values are authoritative [REVIEW]); camp: `residualDehydration`, `acclimatised`; venue: `altitudeM`; ruleset: `gloveType`, round length/rest |
 | in | §02 (striking resolution) | one `StrikeImpact` per landed strike (§2.1) |
 | in | §03 (grappling) / §04 (submissions) | `StrikeImpact` for slams/throws (weapon `mat`), posture/position tags for energy costs, submission events (`sub.*` LOC / joint-failure — see §2.3.8) |
 | out | §02 / §03 / §04 | capability multipliers (§2.5.5, §2.3.7): power, speed, accuracy, defence, TD/TDD, movement, kick power per leg, guard height per arm; `absorb` modifiers |
@@ -56,47 +56,56 @@ fighter id order, drawing from the engine RNG in the fixed order listed in §2.1
 
 ### 2.1 Impact input contract (from §02 / §03)
 
-Every landed strike (and every slam/throw with head or body contact) produces one `StrikeImpact` (the payload §02 §2.6.5 emits; §03 emits the same shape for slams and throw landings), delivered to this
-section synchronously in the resolution phase:
+Every landed strike (and every slam/throw with head or body contact) produces one `StrikeImpact` (the payload §02
+§2.6.5 emits; §03 §5.1.1 strikes and §04 §2.6.6 slams emit the same shape), delivered to this section synchronously
+in the resolution phase. [REVIEW: this is the merged contract agreed with §02; field names are §02's, the `defence`
+enum, `posture`, `gloveType` enum and site names are this section's. `forceN` is **delivered** force on the Pierce
+in-ring scale — placement is already applied upstream — so `cleanMult` is 1.0 for every impact that carries a
+`placement` (see §2.2.1).]
 
 ```ts
 interface StrikeImpact {
-  tick: number;
-  attackerId: number; targetId: number;
-  techId: string;                       // e.g. tech.cross, tech.rear_low_kick, tech.gnp_elbow
-  weapon: 'fist' | 'hammerfist' | 'elbow' | 'knee' | 'shin' | 'foot' | 'head' | 'mat';
-  gloveType: 'mma4oz' | 'boxing8oz' | 'boxing10oz' | 'boxing12oz' | 'bare';
+  tick: number; subTickMs: number;     // §09 subMs
+  attacker: number; target: number;
+  tech: string;                        // tech.* (§02 §2.2, §03 §5.1.1), 'slam' / 'throw' (§03/§04 landings)
+  weapon: 'fist'|'backfist'|'hammerfist'|'elbow'|'elbow_point'|'knee'|'shin'|'instep'|'ball_of_foot'|'heel'
+        |'shin_on_knee'|'head'|'mat';  // mapped here: backfist→fist, elbow_point→elbow, instep/ball_of_foot/heel→foot, shin_on_knee→shin
   region: 'head' | 'body' | 'leadLeg' | 'rearLeg' | 'arms';
-  site: HeadSite | BodySite | LegSite | ArmSite;   // sub-location tables in §2.3
-  forceN: number;                       // peak force the weapon would deliver on flush contact (§02 owns generation)
-  contact: 'flush' | 'partial' | 'glancing';       // §02 hit-quality outcome
-  rotProxy?: number;                    // optional rad/s² if §02 computes one; otherwise derived here (§2.2.2)
-  seen: boolean;                        // target had visual/anticipatory read (§02 telegraph/read outcome)
-  targetBraced: boolean;                // chin down / shoulder up / neck set (§02 defensive posture)
-  targetRelaxed: boolean;               // mid-strike, mouth open, resetting (§02 exposes; default false)
-  closingSpeedMs: number;               // relative velocity of target toward attacker along the strike line, ≥ 0, m/s
+  subLocation: HeadSite | BodySite | LegSite | ArmSite;   // = §02 `subLocation`; tables in §2.3 (`topback` = §02 "topback")
+  placement: 'flush' | 'solid' | 'partial' | 'glancing';  // gates below written "contact = flush" read placement === 'flush'; 'solid' is not flush
+  forceN: number;                      // DELIVERED force (§02 §2.6.4); F_del = forceN
+  vRel: number; effMassKg: number;     // informational (§02); not used by v1 formulas
+  absorb: number;                      // §02's defence-outcome absorb fraction (DP §3.3); used as absorbBase below
   defence: 'none' | 'block_forearm' | 'block_glove' | 'roll' | 'slip_late' | 'check' | 'knee_block' | 'catch';
-  attackerMassKg: number; targetMassKg: number;
-  posture: 'distance' | 'clinch' | 'groundTop' | 'groundBottom' | 'wallPinned';
-  targetGrounded: boolean;              // head backed by the mat
-  attackerFatigue: number;              // f in 0–1 (this section's own output for the attacker)
+  seen: boolean; counter: boolean; simultaneous: boolean;
+  closingSpeedMs: number;              // relative velocity of target toward attacker, ≥ 0, m/s
+  attackerState: { rocked: boolean; fatigue: number };        // fatigue = this section's f for the attacker
+  targetState:   { midAction: boolean; mouthOpen: boolean; guardHand: 'up'|'away'; braced: boolean; grounded: boolean };
+                                       // targetRelaxed = midAction || mouthOpen; targetBraced = braced; targetGrounded = grounded
+  posture: 'distance' | 'clinch' | 'groundTop' | 'groundBottom' | 'wallPinned';   // attacker's posture at contact
+  gloveType: 'mma4oz' | 'boxing8oz' | 'boxing10oz' | 'boxing12oz' | 'bare';
+  rotProxy?: number;                   // optional rad/s² if §02 computes one; otherwise derived here (§2.2.2)
+  selfDamage?: StrikeImpact;           // checked-kick shin (§2.3.3), hand/foot injury roll (§2.3.5)
 }
 ```
+`attackerMassKg` / `targetMassKg` are read from the fighter records (01 `fightNightKg`), not from the payload.
 
-Expectations on §02 (calibration responsibilities shared with this section; see §5):
+Expectations on §02 (calibration responsibilities shared with this section; see §5) [REVIEW: rewritten for the
+delivered-force contract; the earlier "flush median 2,100 N rear straight" expectation was on a peak-force scale
+that §02 never produces]:
 
-- `forceN` for T4 fighters, flush, fresh: rear straight median ≈ 2,100 N, lead straight ≈ 1,250 N, hook ≈ 2,400 N
-  [D: 60 % of the Smith 2000 elite lab ceilings 3,722/2,283 (intermediate) … 4,800/2,847 (elite) — LIT_A notes
-  in-fight median is ~25–30 % of ceiling *after* contact quality; we place the flush median at 0.6 × ceiling so that
-  `forceN × cleanMult` reproduces Pierce's in-fight distribution] `[S: LIT_A §2 Smith 2000; Pierce 2006]`.
-- Delivered force `F_del = forceN × cleanMult` (§2.2.1) for landed **power head strikes at distance** must be
-  approximately lognormal, median ≈ 1,150 N, σ_ln ≈ 0.45, so that 2–4 % of landed punches exceed 2,000 N and the
-  max sits near 5,000 N `[D: Pierce 2006 in-ring, median ≈ 950 N over all punches incl. jabs, 88 % < 1,500 N,
-  2–4 % ≥ 2,000 N, max 5,358 N — LIT_A §0.4; power subset shifted +20 % [E]]`. Jabs: median ≈ 700 N, σ_ln 0.40 [E].
-- Kick/knee forces: T4 rear round kick to the body/head flush ≈ 1.3 × rear straight; knee ≈ 1.4 ×; teep ≈ 0.7 ×;
-  elbow ≈ 0.9 × `[E; anchored on Gavagan 2017 1,400 N pad roundhouse vs ~1,500 N elite jab (Liu 2022) and
-  Vagner 2023 front-kick > roundhouse — LIT_A §2; heterogeneous instruments, so a ratio to the same fighter's punch
-  is used rather than absolute N]`.
+- Delivered force `F_del = forceN` for landed **power head strikes at distance** must be approximately lognormal,
+  median ≈ 1,100–1,150 N, σ_ln ≈ 0.45–0.5, so that ≈ 2–5 % of landed power punches exceed 2,000 N and the max sits
+  near 5,000 N `[D: Pierce 2006 in-ring, median ≈ 950 N over all punches incl. jabs, 88 % < 1,500 N, 2–4 % ≥ 2,000 N,
+  max 5,358 N — LIT_A §0.4; power subset shifted +20 % [E]]`. §02 §2.6.4 shows that its `F_med` (flush cross 1,400 N,
+  hooks 1,500–1,600 N) × its placement mix (0.20/0.35/0.30/0.15 at ×1.00/0.75/0.45/0.25, `σ_F` 0.30) produces
+  exactly this mixture (component medians ≈ 1,500 / 1,125 / 675 / 375 N; mixture median ≈ 1,100 N), which is the
+  distribution the §2.4.1 Monte-Carlo was run on — the 2.3 % KD rate therefore holds with no change to `F_med`,
+  `dmg.forceRef` or `dmg.rawScale`. Jabs: median ≈ 700 N, σ_ln 0.40 [E] (§02 `tech.jab` 900 N × placement).
+- Kick/knee forces follow §02 Table B directly (rear body kick 1,600 N ≈ 1.15 × cross, knee 2,200 N ≈ 1.6 ×, teep
+  1,500–1,900 N, elbow 1,400 N ≈ 1.0 ×) — replacing the earlier ratio expectations (kick 1.3 ×, knee 1.4 ×, teep
+  0.7 ×, elbow 0.9 ×) [REVIEW: §02 owns the values; the §2.4.1 rows for kicks/knees/elbows must be re-run with
+  §02's ratios in the C1–C3 batch].
 - `seen = false` fraction for landed distance power head strikes ≈ 0.30 in R1 falling to ≈ 0.15 in R3 as fighters
   learn timing [E; needed to reproduce the KD-rate decay by round, FD #38 — see §5].
 
@@ -108,13 +117,15 @@ Every field is required except `rotProxy`. If `rotProxy` is present it replaces 
 #### 2.2.1 Contact and absorption
 
 ```
-cleanMult   = { flush: 1.0, partial: 0.5, glancing: 0.25 }[contact]                  [E; DAMAGE §3.1]
-absorbBase  = { none: 0, block_glove: 0.5, block_forearm: 0.5, roll: 0.6, slip_late: 0.6,
-                check: 0.85, knee_block: 0.7, catch: 0.9 }[defence]                   [E; DAMAGE §3.3; MT §3]
+cleanMult   = impact.placement !== undefined ? 1.0                                       // §02 strikes: forceN is already delivered [REVIEW]
+            : { flush: 1.0, partial: 0.5, glancing: 0.25 }[contact]                  // only for impacts built without a placement (legacy/ad-hoc) [E; DAMAGE §3.1]
+absorbBase  = impact.absorb !== undefined ? impact.absorb                                // §02's defence-outcome fraction (blocked 0.45 MMA / 0.65 boxing, partial 0.45, glancing 0.6; BOX §3 D1) [REVIEW]
+            : { none: 0, block_glove: 0.5, block_forearm: 0.5, roll: 0.6, slip_late: 0.6,
+                check: 0.85, knee_block: 0.7, catch: 0.9 }[defence]                   // fallback table for §03/§04 impacts [E; DAMAGE §3.3; MT §3]
 braceAbsorb = targetBraced ? 0.3 : 0                                                  [E; DAMAGE §3.3]
 gloveBlockMult = { mma4oz: 0.7, bare: 0.6, boxing8oz: 1.0, boxing10oz: 1.0, boxing12oz: 1.1 }
                                                        // only applied to block_* absorb   [E; BOX §3 D1: 30–40 % less effective in MMA]
-absorb      = clamp( max(absorbBase × (isBlock ? gloveBlockMult : 1), braceAbsorb) × rockedAbsorbMult, 0, 0.95 )
+absorb      = clamp( max(absorbBase × (isBlock && impact.absorb === undefined ? gloveBlockMult : 1), braceAbsorb) × rockedAbsorbMult, 0, 0.95 )   // §02's absorb already includes the glove pass-through
 rockedAbsorbMult = target in state.rocked or worse ? 0.5 : 1.0                        [E; DAMAGE §3.3]
 F_del       = forceN × cleanMult
 ```
@@ -143,7 +154,7 @@ ALPHA_REF = 6,300 rad/s², F_REF = 3,400 N        [S: DAMAGE §3.1 — Walilko 2
 | `kLever` chin/jaw / temple-behind-ear / mid-face / forehead-crown / orbit / top-back | 1.30 / 1.20 / 0.80 / 0.70 / 0.80 / 0.70 | `[S: DAMAGE §3.1]` (orbit, top-back [E]) |
 | `kGlove` mma4oz / bare / boxing8oz / 10oz / 12oz | 1.15 / 1.20 / 1.00 / 0.97 / 0.93 | direction `[S: LIT_A §2 Bartsch 2012 — padding cuts linear not rotational; MMA glove > boxing glove rotational dosage]`; magnitudes [E; LIT_A suggests ×1.1–1.2] |
 | `kUnseen` | `seen ? 1.0 : 1.35` | `[S: DAMAGE §3.2 — Eckner 2014, Mihalik 2010; magnitude E]` |
-| `kBrace` | `1.15 − 0.30 × neckBrace`, `neckBrace = (0.6 × chin + 0.4 × strength) / 100` | form `[S: DAMAGE §3.2 — Collins 2014, −5 % odds per lb neck strength]`; attribute blend [E] |
+| `kBrace` | = 01 `neckMult` = `1.15 − 0.30 × neck/100` (01's `neck` attribute, default `40 + 0.2 × strength` in the legacy importer) [REVIEW: was a `(0.6 × chin + 0.4 × strength)` blend; 01 §2.2.1 defines `neck` for exactly this factor and 04 `M_NECK` uses the same attribute] | form `[S: DAMAGE §3.2 — Collins 2014, −5 % odds per lb neck strength]` |
 | `kRelaxed` | `targetRelaxed ? 1.2 : 1.0` | [E; DAMAGE §3.2] |
 | `kClosing` | `1 + 0.5 × min(closingSpeedMs, 3) / 3` | [E; DAMAGE §3.2] |
 | `kFatigue` | `1 + 0.25 × f_target` | [E; DAMAGE §3.2] |
@@ -455,7 +466,9 @@ once per tick as `caps: CapabilityMultipliers` on the fighter state.
 #### 2.3.8 Submission-derived injury states (definitions only; §04 owns the mechanics)
 
 §04 emits `SubmissionOutcome { type: 'tap' | 'loc' | 'joint_failure', sub, holdAfterLocS }`. This section
-defines the resulting states so the referee and career layer see one vocabulary:
+defines the resulting states so the referee and career layer see one vocabulary [REVIEW: §04's draft ids
+`state.unconscious` / `state.injured_limb` / `state.neck_strain` are aliased to `state.choked_out` /
+`state.joint_failure` / `state.neck_cranked` below; §04 §0.3 records the alias]:
 
 - `state.choked_out` (LOC): unconscious `U(2, 5) s` after prompt release, `U(10, 20) s` if held ≥ 4 s past LOC
   (with convulsion presentation, 61.5 % `[S: SUBPHYS §1 Sasaki 2022]`); coherent within 1–2 min
@@ -476,7 +489,7 @@ For every head `StrikeImpact` with `F_del > 0`, after `alphaEq` (§2.2.2):
 
 ```
 z        = (alphaEq − ALPHA_50) / ALPHA_SCALE
-           − 0.02 × (chin − 50)                      // chin attribute 0–100; ±1.0 z at 0/100
+           − 0.02 × (chinEff − 50)                   // 01 chinEff 0–100 (age + KO history already inside, 01 §2.4.3); ±1.0 z at 0/100 [REVIEW]
            + 3 × residualDehydration                 // fraction of body mass still down at fight time, 0–0.05
 pConcuss = sigmoid(z)
 ALPHA_50 = 8,500 rad/s², ALPHA_SCALE = 1,000 rad/s²
@@ -525,7 +538,7 @@ pipeline sits between them. `ko.alphaCal` is the single knob for moving both tog
 One uniform draw `u` after `pConcuss` succeeds:
 
 ```
-kKO       = 0.20 × massSevKO × historyMult × ageMult × (1 + 0.4 × f_target)     // fraction of concussive events that are LOC
+kKO       = 0.20 × massSevKO × historyMult × (1 + 0.4 × f_target)               // fraction of concussive events that are LOC   [REVIEW: ageMult removed — see below]
 massSevKO = clamp((attackerMassKg / 77)^0.8, 0.6, 1.5)                            [E]
 outcome   = u < kKO                      → state.ko
             u < kKO + 0.10 × sevBoost    → state.knockdown_hurt
@@ -547,14 +560,17 @@ KD-fight → KO/TKO conversion from 53 % (FLW) to 84 % (HW) `[S: FD #41]` — §
 Career and age multipliers (`[S: DAMAGE §3.2 — Hutchison 2014 risk factors; Guskiewicz 2003 OR 3.0]`, slopes [E]):
 
 ```
-historyMult = 1 + 0.25 × min(priorKOs, 4)
-ageMult     = age ≤ 30 ? 1.0 : 1 + 0.04 × (min(age, 35) − 30) + 0.08 × max(0, age − 35)
+historyMult = 01 kKOHistoryMult = 1 + 0.25 × min(koLosses, 4)
+ageMult     = 1.0   [REVIEW: removed. 01 §2.2.2 owns the single age term (the chin curve −1.75 pts/yr 25–30, −2.5 pts/yr 30–40,
+                     attenuated ×0.6) and states "05 must not add its own age multiplier on kKO"; the DP §3.2 +4 %/+8 %/yr row
+                     this multiplier encoded is subsumed by that curve. Calibration hook C-4 (01) / C27 (here) tunes `fm.age.chin.*`.]
 ```
 
-Cross-check against FD: KO-loss rate <25 ≈ 10 % vs 37+ ≈ 25 % `[S: FD #119]`; `ageMult(37) = 1 + 0.20 + 0.16 =
-1.36` [D] on `kKO` plus the structural/chin career decay (§2.4.6) gets roughly halfway; the remainder must come
-from the age-linked decline of `chin`/`reactionTime` in §01 (FD: strikes-per-knockdown-absorbed falls to one
-third from early 20s to 40s). Never-dropped 14 % vs 5+ career KDs 25 % `[S: FD #119]` ↔ `historyMult(2) = 1.5`
+Cross-check against FD: KO-loss rate <25 ≈ 10 % vs 37+ ≈ 25 % `[S: FD #119]`; with the age term living in 01's
+`chinEff` (a 37-year-old loses 26 chin points → +0.52 z on every impact [D: 01 §2.2.2]) plus `historyMult` and the
+structural/chin career decay (§2.4.6), the gradient is produced jointly with 01 (FD: strikes-per-knockdown-absorbed
+falls to one third from early 20s to 40s); if C27 under-produces it, 01's `fm.age.chin.attenuation` (0.6) is the
+lever, not a second age multiplier here [REVIEW]. Never-dropped 14 % vs 5+ career KDs 25 % `[S: FD #119]` ↔ `historyMult(2) = 1.5`
 [D] — consistent in direction.
 
 #### 2.4.3 Applying the outcome
@@ -668,7 +684,8 @@ costs from Del Vecchio 2011 E:P 1:2–1:4]`:
 Modifiers on every cost:
 
 ```
-skillCostMult   = 1 − 0.003 × (relevantSubSkill − 50)              // ±15 % [E; LIT_A §3 Folhes 2023: RPE per action inversely with level]
+skillCostMult   = striking classes: 1 − 0.003 × (relevantSubSkill − 50)   // ±15 % [E; LIT_A §3 Folhes 2023: RPE per action inversely with level]
+                  grappling classes (takedown_attempt … submission_escape, scramble, wall_*): 01 `energy.actionCostMult` (1.6 / 1.3 / 1.1 / 1.1 / 1.0 / 0.9 by grappling tier, [S: BJJ §6]) instead   [REVIEW: 01 and 03 both carried this tier multiplier; it applies here, once]
 bodyCostMult    = 1 + 0.004 × body.structural                       // +4 % per 10 points [E; DAMAGE §2.2]
 bodyShotMult    = 1.10 while `bodyShotTaxUntil` > now (60 s after a body hit with raw ≥ 35)   [E; DAMAGE §4.2]
 dumpCostMult    = 1 + 0.6 × dump (§2.5.7)
@@ -772,8 +789,8 @@ regainQuality × 1.5) / 100` [E].
 #### 2.5.7 Adrenaline dump
 
 ```
-dump = (1 − experience) × (1 − composure/100) × eventMagnitude          [E; DAMAGE §4.6]
-experience = clamp(proFights / 12, 0.1, 0.8) (debut ≈ 0.1; 10+ pro fights ≈ 0.8)  [E; DAMAGE §4.6]
+dump = (1 − experience) × (1 − composureEff/100) × eventMagnitude       [E; DAMAGE §4.6]
+experience = 01 §2.4.1 `experience` = 0.1 + 0.9 × (1 − exp(−totalFights/6)) (debut 0.10; 10 pro fights 0.83)   [REVIEW: was clamp(proFights/12, 0.1, 0.8) here; 01 owns it and 07 reads the same value]
 eventMagnitude: regional card 0.6, main card 0.8, title fight 1.0, hostile crowd +0.1   [E; DAMAGE §4.6]
 ```
 
@@ -878,6 +895,12 @@ interface RefObservables {
   intelligentDefence: boolean;         // §03/§07 per the 3.0-s rule; this section supplies tSinceDefenceS and coveringStaticS
   attemptingToRise: boolean;           // §07 (forced false during body_collapse / leg cannotStand windows — see below)
   tapped; verbalTap; screams; jointFailed;   // §04
+  // [REVIEW: fields §06 §2.3.2–2.3.5 read that neither draft listed — added so the record is complete]
+  defenceQuality30: number;            // §02: share of the trailing-30-s absorbed strikes that were blocked/evaded
+  knockdownsLast10s: number;           // §06 derives from this section's `knockedDown` events (ref.secondKdWindowS)
+  underChoke: boolean;                 // §04: defender of a `state.sub_locked` choke
+  clinching: boolean;                  // §03: in a `clinch`-kind engagement
+  moving: boolean;                     // §02: footwork above `movement_low_pace` in the last 1 s
   // --- additional cues this section offers (§06 may ignore) ---
   coveringStaticS: number;             // seconds of static double-forearm cover without positional change
   limpness: 0 | 1 | 2;                 // 1: arms dropped / head lolls (acute ≥ 70 or knockdown_hurt); 2: limp (ko, or acute ≥ 85 for > 1 s)
@@ -1045,7 +1068,7 @@ seconds, u = pool units (0–100), N = newtons, mmol = mmol/L, — = dimensionle
 
 | id | value | unit | tag |
 |---|---|---|---|
-| `dmg.cleanMult.flush/partial/glancing` | 1.0 / 0.5 / 0.25 | — | [E; DAMAGE §3.1] |
+| `dmg.cleanMult.flush/partial/glancing` | 1.0 / 0.5 / 0.25 — fallback only; 1.0 for any impact carrying `placement` [REVIEW] | — | [E; DAMAGE §3.1] |
 | `dmg.absorb.block_glove/block_forearm/roll/slip_late/check/knee_block/catch` | 0.5 / 0.5 / 0.6 / 0.6 / 0.85 / 0.7 / 0.9 | — | [E; DAMAGE §3.3; MT §3] |
 | `dmg.absorb.brace` | 0.3 | — | [E; DAMAGE §3.3] |
 | `dmg.absorb.gloveBlockMult.mma4oz/bare/boxing8/10/12` | 0.7 / 0.6 / 1.0 / 1.0 / 1.1 | — | [E; BOX §3] |
@@ -1143,8 +1166,8 @@ seconds, u = pool units (0–100), N = newtons, mmol = mmol/L, — = dimensionle
 | `ko.kLever.chin/temple/midface/forehead/orbit/topback` | 1.3 / 1.2 / 0.8 / 0.7 / 0.8 / 0.7 | — | [S: DAMAGE §3.1] (orbit, topback E) |
 | `ko.kGlove.mma4oz/bare/boxing8/10/12` | 1.15 / 1.20 / 1.0 / 0.97 / 0.93 | — | [E; LIT_A Bartsch 2012 direction] |
 | `ko.kUnseen` | 1.35 | — | [E; DAMAGE §3.2] |
-| `ko.kBrace.a / b` | 1.15 / 0.30 | — | [S: DAMAGE §3.2 form] |
-| `ko.neckBrace.chinW / strengthW` | 0.6 / 0.4 | — | [E] |
+| `ko.kBrace.a / b` | 1.15 / 0.30 (= 01 `fm.attr.neck_mult_a/b`, on 01 `neck`) [REVIEW] | — | [S: DAMAGE §3.2 form] |
+| `ko.neckBrace.chinW / strengthW` | retired — `kBrace` reads 01 `neck` [REVIEW] | — | — |
 | `ko.kRelaxed` | 1.2 | — | [E; DAMAGE §3.2] |
 | `ko.kClosing.max / speedRef` | 0.5 / 3 | —, m/s | [E; DAMAGE §3.2] |
 | `ko.kFatigue` | 0.25 | — | [E; DAMAGE §3.2] |
@@ -1157,8 +1180,8 @@ seconds, u = pool units (0–100), N = newtons, mmol = mmol/L, — = dimensionle
 | `ko.kKO.fatigue` | 0.4 | — | [E] |
 | `ko.split.hurtKD / flashKD` | 0.10 / 0.25 | — | [E; DAMAGE §3.2] |
 | `ko.massSevKO.exp / min / max` | 0.8 / 0.6 / 1.5 | — | [E] |
-| `ko.historyPerKO / historyCap` | 0.25 / 4 | — | [S: DAMAGE §3.2 form; Hutchison, Guskiewicz] slope [E] |
-| `ko.age.start / slope30 / knee / slope35` | 30 / 0.04 / 35 / 0.08 | yr, per yr | [S: DAMAGE §3.2 form; ARP > 35] slopes [E] |
+| `ko.historyPerKO / historyCap` | 0.25 / 4 (= 01 `fm.career.kko_history_per_ko`) | — | [S: DAMAGE §3.2 form; Hutchison, Guskiewicz] slope [E] |
+| `ko.age.start / slope30 / knee / slope35` | retired — age enters only through 01 `chinEff` (`fm.age.chin.*`) [REVIEW] | — | — |
 | `ko.careerChinLoss` | 3 | attribute points per KO/TKO loss | [E; DAMAGE §7.21] |
 | `ko.unconsciousMin / Max` | 5 / 90 | s | [E; DAMAGE §2.1] |
 | `kd.hurt.acuteFloor / freezeMin / freezeMax / riseMin / riseMax` | 70 / 10 / 25 / 1 / 3 | u, s | [E; DAMAGE §2.1] |
@@ -1200,7 +1223,7 @@ seconds, u = pool units (0–100), N = newtons, mmol = mmol/L, — = dimensionle
 | `fat.eff.moveCap.a` | 0.25 | — | [E] |
 | `fat.bodyAerobicSlope` | 0.006 per structural u | — | [E; DAMAGE §2.2] |
 | `fat.dehydAerobicSlope` | 4 | per unit fraction | [E; DAMAGE §4.7] |
-| `fat.dump.expPerFight / expMin / expMax` | 1/12 / 0.1 / 0.8 | — | [E; DAMAGE §4.6] |
+| `fat.dump.expPerFight / expMin / expMax` | retired — 01 `experience` (`fm.exp.*`) [REVIEW] | — | — |
 | `fat.dump.magnitude.regional / main / title / hostileCrowd` | 0.6 / 0.8 / 1.0 / +0.1 | — | [E; DAMAGE §4.6] |
 | `fat.dump.durS / costMult / decisionMult / rushS / rushOutput / crashOutput` | 150 / 0.6 / 0.2 / 45 / 0.15 / 0.25 | s, — | [E; DAMAGE §4.6] |
 | `fat.alt.baseM / vo2PerKm / lacPerKm / acclimMult` | 500 / 0.063 / 0.10 / 0.5 | m, — | [S: DAMAGE §4.8 Wehrlin 2006] (lac, acclim E) |

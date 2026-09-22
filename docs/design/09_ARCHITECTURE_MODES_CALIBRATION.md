@@ -40,7 +40,7 @@ src/
     grappling/                 §03: position graph (nodes, edges), transitions, clinch/cage, scrambles
       graph.ts                 node/edge tables; complementary-node map used by the invariant
       engagement.ts            Engagement records (pair, node, since-tick); invariant checker
-    submissions/               §04: 30 techniques, 4-stage model, chain graph
+    submissions/               §04: 54 techniques (§04 §3) [REVIEW: was 30], 4-stage model, chain graph
     damage/                    §05: regional damage, rocked/KD/KO, cuts, fatigue pools, recovery
     rules/                     §06: Ruleset objects, referee (stoppages, fouls, counts, stand-ups), judges
       rulesets/                one file per ruleset id (§3.2)
@@ -228,9 +228,36 @@ export interface FighterSnapshot {
   stamina: { total: number; burst: number };            // §05 pools, 0..1
   damage: { head: number; body: number; legs: number; cut: number };   // §05, 0..1 (head ≥ 1 == KO threshold crossing)
   state: number;                                        // bitfield: rocked, kd-recovering, hurt-body, legCompromised…
-  sub: { technique: SubmissionId | null; stage: 0|1|2|3|4; progress: number };   // §04
+  sub: { technique: SubmissionId | null; stage: 0|1|2|3|4; progress: number };   // §04 (0 setup, 1 entry, 2 secure, 3 finish, 4 locked)
   sig: { landed: number; attempted: number };           // running, for HUD
   intentTag: string;                                    // §07 primary mode short id for HUD/commentary
+  // [REVIEW: added — fields §08 §2.2 consumes that the first draft did not expose. §08's adapter is a pure
+  //  function of (TickSnapshot, SimEvent window, FighterDefinition[]) and may not import sim internals, so
+  //  everything below is exposed here. Digested fields are unchanged (§1.5.3).]
+  vx: number; vz: number;                               // m/s (motion-matching trajectory)
+  partnerId: number | null;                             // engagement partner
+  againstFence: boolean; fenceNormalAngle: number;      // §03 cage flag + arena wall normal at contact
+  actionDetail: { startTick: number; totalMs: number; contactTick: number; contactOffsetMs: number;
+                  target: 'head'|'body'|'leadLeg'|'rearLeg'|'arms'|'none'; subLocation: string | null;
+                  side: 'L'|'R'; targetId: number | null; forceNorm: number; direction: 'front'|'left'|'right'|'up'|'down' };
+  defenceDetail: { phase: number; side: 'L'|'R'|'both' };
+  grips: { hand: 'L'|'R'; socket: string; on: number; strength: number }[];   // §03 handles → §08 sockets
+  contacts: { footL: boolean; footR: boolean; kneeL: boolean; kneeR: boolean; handL: boolean; handR: boolean;
+              hipL: boolean; hipR: boolean; back: boolean; chest: boolean; fence: boolean };
+  damageVisual: { zones: number[] /* 8 */; swelling: number[] /* 8 */;
+                  cuts: { site: string; severity: 1|2|3; bleeding: boolean; ageS: number }[]; bloodOnGloves: number };   // §05 §2.3.6 cuts, swelling
+  fatigueVisual: { f: number; breathingRate: number; handsDrop: number; flatFeet: number; chinUp: number };            // §05 f + tells
+  balance: number;                                      // 0..1 (§02 balance points / 100)
+  states: string[];                                     // §05 §2.10 / §04 state ids with side suffixes (see §08 §2.2); the `state` bitfield above is the digested summary
+}
+export interface EngagementSnapshot {                   // §03 §2.1.1 Engagement, snapshot form [REVIEW: added — §03's kuzushi/underhook/posture fields were missing]
+  a: number; b: number; node: PositionId; sinceTick: number;
+  kind: 'clinch'|'takedown'|'throw'|'ground'|'scramble'|'knockdown';
+  cage: boolean; underhookOwner: 'a'|'b'|null;
+  kuzushi: { dir: 0|1|2|3|4|5|6|7; mag: 0|1|2|3 };
+  posture: 'chest'|'postured';
+  inflight: { edge: string; tStart: number; dur: number; phase: number } | null;
+  rootX: number; rootZ: number; rootYaw: number;        // §08 interaction root
 }
 ```
 
@@ -238,8 +265,51 @@ export interface FighterSnapshot {
 `boutStart, roundStart, roundEnd, boutEnd, decision, strike, feint, takedown, clinch, clinchBreak, positionChange,
 scramble, reversal, submissionStage, submissionFinish, knockdown, rocked, standUp, refereeWarning, refereeCount,
 foul, deduction, refereeStoppage, doctorCheck, cornerStop, fighterOut, targetSwitch, engagementJoin, disengage,
-flight, intentChange, cornerCue, scoreUpdate`. Every event has `{ tick, subMs, round, kind, actor, target, text }`;
-`subMs ∈ [0,100)` is the intra-tick resolution offset (§2.2) and is part of the ordering contract.
+flight, intentChange, cornerCue, scoreUpdate`, plus [REVIEW: added] `slam, injury, stateChange, refereeBreak,
+refereeTimeout, standingEight, scorecardRound, pointsAwarded, judoScore, streetEnd, timidityWarning, planSet,
+adjustment, read, emergency, paceShift, stanceSwitch, roleAssign, trap`. Every event has `{ tick, subMs, round, kind,
+actor, target, text }`; `subMs ∈ [0,100)` is the intra-tick resolution offset (§2.2) and is part of the ordering contract.
+
+[REVIEW: canonical event-name map.] Four sections named events in their own vocabularies; this table is the single
+mapping the recorder implements (`src/sim/record/events.ts`). `detail` carries the source section's payload verbatim.
+
+| canonical `SimEvent.kind` | §04 `evt.*` | §06 kind | §07 `evt.*` | §08 `PresentationEvent` |
+|---|---|---|---|---|
+| `strike` (detail.result landed/blocked/evaded/missed/checked/caught; `interrupted`) | — | strike record | — | `contact` |
+| `feint` | — | — | `evt.feint.bite` / `evt.feint.ignored` (detail.bite) | — |
+| `read` | — | — | `evt.read.success` | — |
+| `takedown` (detail.result success/stuffed, landing node) | — | takedown record | — | `takedown_attempt` / `takedown_complete` / `takedown_stuffed` |
+| `positionChange` (detail.edge, from, to, result) | — | position record | — | `transition` |
+| `clinch` / `clinchBreak` / `scramble` / `reversal` / `standUp` / `engagementJoin` / `disengage` | — | — | — | `transition` |
+| `submissionStage` (detail.stage 1–4; stage 2 = `evt.sub_attempt_logged`, stage 4 = `evt.sub_locked`) | `evt.sub_start`, `evt.sub_stage`, `evt.sub_attempt_logged`, `evt.sub_locked`, `evt.sub_regress`, `evt.sub_escape`, `evt.sub_abandon`, `evt.sub_chain`, `evt.near_submission`, `evt.bell_save` | `SubmissionAttempt{stage}` | — | `sub_stage` |
+| `submissionFinish` (detail.type tap / verbal / loc / injury) | `evt.tap`, `evt.technical_submission` | `submissionTap` / `technicalSubmission` | — | `submission_finish` / `tap` |
+| `slam` (carries the `StrikeImpact` of §04 §2.6.6) | `evt.slam` | — | — | `contact` (force ≥ 0.8) |
+| `injury` (joint failure, limb fracture, hand/foot, nose) | `evt.injury` | `fractureFlag` | — | — |
+| `knockdown` (detail.kind flash/hurt/ko/body/leg, cause) | — | `knockdown` | — | `knockdown` |
+| `rocked` / `stateChange` (detail.state, on/off) | — | — | — | `rocked_enter/exit`, `stunned_enter`, `body_hurt_enter`, `winded_enter`, `dead_leg`, `dead_arm`, `cut_opened`, `cut_worsened`, `swelling_threshold` |
+| `refereeWarning` | — | `refWarning`, `refWork` | — | `ref_warning` |
+| `deduction` | — | `refPointDeduction` | — | `ref_point_deduction` |
+| `foul` (detail.detected, effect) | — | `refFoulCall` | — | `ref_foul` |
+| `refereeTimeout` | — | `refTimeout`, `refRecoveryClock` | — | (phase = paused) |
+| `refereeCount` / `standingEight` | — | `refCount`, `standingEight` | — | `ref_count(n)` |
+| `standUp` (referee-initiated, detail.reason) / `refereeBreak` | — | `refStandUp`, `refBreak` | — | `ref_standup`, `ref_break` |
+| `refereeStoppage` (detail.method, lagS, extraStrikes) | — | `refStoppage` | — | `ref_stoppage`, `ko`, `tko` |
+| `doctorCheck` (detail.decision) | — | `doctorCheck`, `doctorStoppage` | — | `ref_doctor` |
+| `cornerStop` | — | `cornerStoppage` | — | `ref_stoppage` |
+| `scorecardRound` / `decision` | — | `scorecardRound`, `scorecardFinal`, `decision`, `technicalDecision`, `noContest`, `disqualification` | — | `scorecard_reveal`, `decision` |
+| `pointsAwarded` / `judoScore` | — | `pointsAwarded`, `advantage`, `penalty`, `ippon`, `wazaAri`, `yuko`, `shido`, `hansokuMake`, `osaekomiStart/End`, `goldenScoreStart` | — | HUD only |
+| `roundStart` / `roundEnd` / `boutStart` / `boutEnd` | — | `horn`, `tenSecondWarning`, `roundStart`, `roundEnd`, `overtimeStart`, `suddenVictoryStart` | — | `round_start`, `round_end`, `bout_start`, `bout_end` |
+| `streetEnd` / `flight` | — | `streetEnd` | `evt.flee` | — |
+| `timidityWarning` | — | `timidityWarning` | — | `ref_warning` |
+| `planSet` | — | — | `evt.plan.set` | `plan_change` (debug) |
+| `intentChange` | — | — | `evt.intent.change`, `evt.emergency.enter/.exit` (detail.emergency), `evt.finish.mode` | `plan_change` (debug) |
+| `adjustment` | — | — | `evt.adjust.applied` / `.expired`, `evt.mustnot.violated`, `evt.range.control`, `evt.cage.cut` | — |
+| `cornerCue` | — | — | `evt.corner.cue`, `evt.corner.affirm` | — |
+| `scoreUpdate` | — | — | `evt.score.belief` | — |
+| `paceShift` / `stanceSwitch` | — | — | `evt.pace.shift`, `evt.stance.switch` | — |
+| `targetSwitch` / `roleAssign` / `trap` | — | — | `evt.target.switch`, `evt.role.assign`, `evt.line.formed/.broken`, `evt.trap.set/.sprung` | — |
+| (not events) | `evt.arm_crossed_centre`, `evt.hand_posted`, `evt.back_taken`, `evt.sprawl_front_headlock`, `evt.step_over_guard`, `evt.turn_away`, `evt.posture_broken`, `evt.underhook_from_bottom`, `evt.head_down_standing` | — | — | — |
+| ↳ these §03 §2.3 M trigger events are internal signals consumed by §04 §2.4.1 within the tick; they are logged as `positionChange`/`strike` detail flags, not as separate `SimEvent`s | | | | |
 
 ### 1.5 Replay file format v4
 
@@ -294,7 +364,7 @@ Generalised graph invariant, checked every tick in dev/test builds and by `scrip
 | # | Invariant | Formal statement |
 |---|---|---|
 | I1 | Matching | The set of engagements is a matching over live fighters: each fighter appears in ≤ 1 engagement. |
-| I2 | Complementarity | For engagement (a,b) at node N: `a.position == N.roleA`, `b.position == N.roleB`, where §03 defines each node's complementary pair (e.g. `pos.ground_mount_top` ↔ `pos.ground_mount_bottom`; symmetric clinch nodes map to themselves). |
+| I2 | Complementarity | For engagement (a,b) at node N: both fighters' `position == N` and `a.role` / `b.role` are the slots §03 §2.2 assigns to that node (`a` = controls/top/attacker, `b` = other); for symmetric nodes (`pos.clinch_over_under`, `pos.ground_5050`, `pos.scramble`) either assignment is valid. [REVIEW: §03 uses one node per pair with `a`/`b` slots, not `*_top` / `*_bottom` node pairs — the example `pos.ground_mount_top ↔ pos.ground_mount_bottom` was wrong.] |
 | I3 | Free ⇒ standing | A fighter in no engagement is in a standing-free node (`pos.standing_*`), `down`, or `out`; never a clinch/ground node. |
 | I4 | Contact | Engaged pair distance ≤ `core.engagedMaxDistanceM` = 0.6 m `[E]`; both velocities 0 except scramble nodes. |
 | I5 | Sub coherence | `sub.technique != null` ⇒ the fighter is in an engagement whose node lists that submission as available (§04 chain graph). |
@@ -350,11 +420,11 @@ ascending id; all loops over engagements are ascending `(a,b)`; all loops over q
 |---|---|---|---|
 | P0 | clock | tick++, t, round/break transitions, `pre → round` on first tick; break-phase recovery (§05) | none |
 | P1 | perception | push previous tick's compact `ObservedState` into each fighter's ring buffer (§2.5) | none |
-| P2 | upkeep | fatigue/recovery, damage decay, rocked/KD timers, cut bleeding, referee timers, engagement counters, multi-opponent slot recount (§3.1) | §05 draws (cut worsening, recovery) |
-| P3 | decide | for each fighter whose scheduler slot is free (idle or in `recovery` with `cancelable` true): §07 policy chooses (technique, target, defence stance, movement intent) from *observed* state; `scheduler.commit()` enqueues contact at absolute ms (§2.2) | §07 draws (softmax, feint choice, perception noise) |
-| P4 | resolve | pop every contact with `T_c < (tick+1)×100`, in `(subMs, actorId, seq)` order; each resolution sees state after the previous one; interrupts applied (§2.4); grappling transitions and submission stage advances are contacts too | §02/§03/§04/§05 draws |
-| P5 | move | steering (§07 movement intents) then integration, ascending id; pairwise separation; arena wall behaviour (§3.3) | steering jitter draws |
-| P6 | referee | §06 stoppage checks, counts, stand-ups, fouls detected this tick, doctor/corner checks (with `refReactionSeconds` latency) | §06 draws |
+| P2 | upkeep | fatigue/recovery, damage decay, rocked/KD timers, cut bleeding, referee timers, engagement counters, multi-opponent slot recount (§3.1) | none [REVIEW: §05 §2.10 draws nothing in upkeep — cut, recovery-window and delay draws all happen at impact in P4] |
+| P3 | decide | for each fighter (free or not): §07 policy chooses (technique, target, defence stance, movement intent) from *observed* state; `scheduler.commit()` enqueues contact at absolute ms (§2.2) | 8 per fighter (9 multi), always taken — §2.7 [REVIEW] |
+| P4 | resolve | pop every contact with `T_c < (tick+1)×100`, in `(subMs, actorId, seq)` order; each resolution sees state after the previous one; interrupts applied (§2.4); grappling transitions and submission stage advances are contacts too | per contact, fixed layout — §2.7 [REVIEW] |
+| P5 | move | steering (§07 movement intents) then integration, ascending id; pairwise separation; arena wall behaviour (§3.3) | 1 per fighter (steering jitter), always taken — §2.7 |
+| P6 | referee | §06 stoppage checks, counts, stand-ups, fouls detected this tick, doctor/corner checks (with `refReactionSeconds` latency) | §06 draws in the fixed order of §2.7 |
 | P7 | judges | accumulate per-round effective-scoring counters (no draws); at `roundEnd` apply judge noise and culture (§06) | §06 draws at round end only |
 | P8 | commentary hook | none in sim (commentary is post-hoc from events, §5) | none |
 | P9 | digest | §1.5.3 | none |
@@ -453,6 +523,32 @@ with `T.startupMs − telegraphMs`; this section only guarantees the plumbing. S
   intermediate logits to 1e-9 before `sigmoid` (`core.logitQuantum` = 1e-9 `[E]`) — cheap insurance for the
   Node-vs-browser digest equality test.
 
+### 2.7 Per-tick RNG draw schedule (authoritative) [REVIEW: added — composes 07 §2.1 (per-fighter draws), 02 §2.6.1 (per-strike pipeline), 04 §2.4.3 (per-window rolls), 05 §2.10 (per-impact draws), 06 §2.3 (referee) and §2.2 (commit jitter) into one order; where the sections disagreed, this table wins]
+
+Every draw is one call to the bout RNG (`normal()` = 2 calls, as today). "Always" means the draw is consumed even
+when the branch is inactive, so the stream position after each block is a pure function of state.
+
+| Phase | Loop | Draws, in order | Count |
+|---|---|---|---|
+| P0 clock | — | none. **Break step** (once per break, fighters ascending id): 07 §2.6.6 corner block `cue1_correct, cue2_correct, uptake1, uptake2, scoreNoise` (always) | 0 / 5 per fighter per break |
+| P1 perception | — | none (ring buffer) | 0 |
+| P2 upkeep | — | none (05 §2.10: decay, timers and `caps` are deterministic) | 0 |
+| P3 decide | fighters ascending id | `u_pattern` (02 pattern read), `u_read` (02 cue read), `u_feint` (bite), `u_eval` (07 P(change)), `u_select` (softmax), `u_timing`, `u_target`, `u_commit` (§2.2 jitter U{0..99}); multi-opponent modes add `u_switch` — all always | 8 (9) per fighter |
+| P4 resolve | contacts in `(subMs, actorId, seq)` order | **strike contact** (02 §2.6.1 steps 5–11, reads already drawn in P3): `arrival`, `defenceSuccess` (or `passiveBlock` — one draw either way), `placement`, `subLocation`, `forceLognormal` (`normal()` = 2), then 05 §2.10 (a)–(j) ten draws for the primary impact, then 05 (a)–(j) again for `selfDamage` if present (always drawn when the technique *can* produce self-damage: checked kicks, punches), then 06 §2.3.6(a) `foulOccurrence`, `foulDetected` | 6 + 10 (+10) + 2 per strike |
+| | | **grappling edge** (03 §2.1.2): `contested` (one draw; two-stage edges draw `capture` and `finish` as separate contacts), `outcomeSplit` (destination weights), `counterBranch` (judo failure table / whizzer / guillotine tax — one draw, always for edges that list a counter), `kuzushiKuz` (always for throws), then for a landed slam/throw the 05 (a)–(j) block on the landing `StrikeImpact`, then 06 `foulOccurrence`, `foulDetected` | 4 (+10) + 2 per edge |
+| | | **submission window** (04 §2.4.3): `u_def`, `u_att`, `outcomeSplit`, `chain` — always four; a `locked` clock tick draws `tapOrLoc` once at lock (04 §2.6.2) then `escapeHazard` per second; a `def.slam` option draws `slamAttempt`, `lift`, `lockBreak`, `height` (always when the option is available) then the 05 block on the slam impact | 4 per window (+ per-second hazards) |
+| | | **scramble** (03 §2.3 L): `winner`, `outcome` | 2 |
+| | | **interrupt** (§2.4): `p_int` roll, drawn for every contact that lands on a defender with an in-flight startup action (always when such an action exists) | 0/1 per contact |
+| P5 move | fighters ascending id | `steeringJitter` (always) | 1 per fighter |
+| P6 referee | fighters ascending id, then queue | per fighter: `gaitTest` (counted rulesets, only when a count is running — state-derived), `doctorStop` (when an exam runs); per newly queued stoppage: `lagTail`, `lagTailExp`; per detected foul: `deductAccidentalRepeat`, `protestTimeout`; per ground pair past the stand-up threshold: `standupRoll` (20 %/s, 03 §2.3 L); per clinch pair past the break threshold: `breakRoll` (0.5 per 5 s) | state-derived |
+| P7 judges | round end only, judges ascending index, fighters ascending id | `perceivedNoise` (`normal()` = 2), `tenTen` — per judge per round; judge traits (`styleScale`, `propensity1008`) are drawn once pre-bout in judge order | 3 per judge per round |
+| P8/P9 | — | none; commentary uses a forked RNG (§5.1) and never touches the bout stream | 0 |
+
+Pre-bout order (before tick 0): fighter definitions → per-fighter style jitter (07 `ai.style_jitter_sd`) → scouting
+noise per scouted field (07 §2.5.1) → plan generation → judge traits → multi-opponent crowd roles (07 §2.7.4
+non-fighter share) — all in ascending id / index order. `Sim.rngDraws` after tick 0 is therefore a constant for a
+given `(config, engineVersion)` and is the first drift diagnostic checked by `verifyReplay`.
+
 ---
 
 ## 3. Match modes and settings
@@ -481,13 +577,18 @@ Multi-opponent manager (`ai/multi.ts`), used by `teams`, `ffa`, `crowd`:
 
 ### 3.2 Rulesets (ids; §06 owns the content)
 
-`mma_unified` (3×5, 1:00), `mma_5r` (5×5), `boxing` (n×3), `kickboxing_glory`, `kickboxing_abc`, `muay_thai` (3×3 or
-5×3), `grappling_ibjjf` (1× 5–10 min by belt), `grappling_adcc` (10/20 min), `judo_ijf` (4 min + golden score),
-`street` (no rounds, no referee, everything legal) `[S: RULES_JUDGING §2.1]`. Each `Ruleset` object carries: rounds,
-round/rest seconds, legal technique predicate `(technique, attackerState, defenderState) → legal | foul(kind)`,
-knockdown/count rules, stoppage rules, judging model id, deduction ladder, weight-class table, glove model
-`[S: MMA_INTEGRATION §10 rule 7]`. `referee.strictness ∈ {lenient, standard, strict}` selects the §06 preset table
-`[S: RULES_JUDGING §5]`.
+Ids are §06 §2.2's `Ruleset.id` values [REVIEW: were `mma_unified`, `boxing`, … here and `'mma_unified' | 'boxing_abc'` in §08; §06 is the owner]:
+`mma.unified.3r` (3×300 s, 60 s), `mma.unified.5r`, `mma.unified.2017` (no 12-6 elbows, legacy judging), `mma.amateur`,
+`boxing.pro` (n×180 s), `kickboxing.glory`, `kickboxing.k1`, `muay_thai.abc` (3 or 5×180 s), `muay_thai.stadium`,
+`grappling.ibjjf` (1× 300–600 s by belt), `grappling.adcc` (600/1200 s), `grappling.subonly`, `judo.ijf` (240 s + golden
+score), `street` (no rounds, no referee, everything legal) `[S: RULES_JUDGING §2.1]`. The `Ruleset` object is §06
+§2.1's interface verbatim: `rounds`, `weightClasses`, `gloves`, `legal` (weapon × target × phase matrix — the
+"legal technique predicate" is `isLegal(action)` over it), `groundedDef`, `elbows12to6`, `clinch`, `takedowns`,
+`submissions`, `ground`, `winConditions`, `scoring` (system, `culture` = the judging model id, judges, `openScoring`),
+`knockdown`, `fouls`, `stoppage`, `referee`, `multiOpponent`, `street` `[S: MMA_INTEGRATION §10 rule 7]`.
+`MatchSettings.refereeStrictness` writes `Ruleset.referee.strictness` and selects the §06 preset table
+`[S: RULES_JUDGING §5]`; `MatchSettings.judgingMode: 'open'` maps to `Ruleset.scoring.openScoring = 'after_each_round'`
+(`'hidden'` → `'hidden'`) and `judgeCulture` to `Ruleset.scoring.culture`.
 
 ### 3.3 Arenas and geometry
 
@@ -613,7 +714,7 @@ differs are imported with `verified: false, reason: 'engine-version'`.
 | Total strikes | all landed strikes incl. non-sig | `[S: row 5]` |
 | Knockdown (KD) | `knockdown` event: defender's posture → `down` from a legal strike; in boxing/KB/MT also ropes-holding-up and voluntary knee `[S: RULES_JUDGING §2.3]` | `[S: row 30]` |
 | Takedown attempted / landed | `takedown` event with result `success|stuffed`; landed = defender reaches a ground node with attacker top **and** holds it ≥ 3 s (`stats.tdHoldSeconds` = 3 `[E]`, mirrors IBJJF 3-s stabilisation `[S: RULES_JUDGING §1 grappling]`) | `[S: rows 55–57]` |
-| Submission attempt | first `submissionStage` event reaching stage ≥ 2 ("locked", §04) for a given (attempt id); re-grips within 5 s are the same attempt `[E]` | `[S: row 69, 73 "locked-in"]` |
+| Submission attempt | first `submissionStage` event reaching stage ≥ 2 (S2 "secure", i.e. §04 `evt.sub_attempt_logged` = S1 success; "locked" is stage 4 and is what §06 counts as `subLocked`) for a given attempt id; re-grips within 5 s are the same attempt `[E]` [REVIEW: wording — stage 2 is not "locked"] | `[S: row 69, 73 "locked-in"]` |
 | Control time | seconds the fighter is the controlling party: clinch-control nodes (own back not on wall, or pinning the opponent) + ground top + back control; not counted while bottom, in neutral clinch, or in scrambles | UFCStats = clinch + ground control `[S: FIGHT_DATA §7 assumption 4]` |
 | Reversal | `reversal` event: bottom→top without a stand-up, or clinch pin flipped | `[S: row 80]` |
 | Sub attempts against, sig absorbed, head sig absorbed | mirrors from the opponent's tallies | `[S: rows 46, 50, 51]` |

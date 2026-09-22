@@ -302,6 +302,9 @@ women's 115/125/135/145 [S: RULES §2.2 (known, not re-verified)].
 | `fractureFlag` | 'nose' \| 'jaw' \| 'hand' \| 'leg' \| null | §05 | |
 | `attemptingToRise` | bool | §07 | |
 | `knockedDown` | event | §05 | with `cause: 'legal_strike' \| 'slip' \| 'foul' \| 'push'` |
+| `knockdownsLast10s` | int | this section (from `knockedDown` events, `ref.secondKdWindowS`) | [REVIEW: added — read by §2.3.3 but not listed] |
+| `underChoke` | bool | §04 (`state.sub_locked` as defender) | [REVIEW: added — read by §2.3.5] |
+| `clinching`, `moving` | bool | §03 engagement kind / §02 footwork | [REVIEW: added — read by §2.3.3 standing TKO rule; §05 §2.7 carries the same fields] |
 
 #### 2.3.2 Referee tick — master pseudocode
 
@@ -311,7 +314,7 @@ Runs once per tick (dt = 0.1 s) after resolution. `cfg` = strictness preset (§2
 refereeTick(state, rs, cfg):
   if rs.referee.present == false: return streetTick(state)                       # §2.3.11
   if state.paused: return pausedTick(state)                                       # counts, timeouts, doctor exams
-  for each pending stoppage p in ref.pending:                                     # reaction lag (§2.3.3)
+  for each pending stoppage p in ref.pending (array, insertion order — never a Set/Map iteration [REVIEW]):   # reaction lag (§2.3.3)
       if now >= p.commitAt and p.criterionStillTrue(): return endBout(p)
       if not p.criterionStillTrue(): ref.pending.remove(p)                        # fighter recovered / defended
   for f in activeFighters (ascending id):
@@ -432,7 +435,7 @@ checkSubmission(f):
       lag = cfg.tapDetectS                                # 0.3 s median, LogNormal σ 0.4 [E]; taps on the mat/opponent
       queueStoppage('submission', opp(f), subType, lagKind='tap', lag)
   elif f.consciousness <= 0 and f.underChoke:                                    # technical submission — LOC
-      lag = cfg.locDetectS                                # 1.0 s median [E]
+      lag = cfg.locDetectS                                # 1.0 s median [E]; §04 §2.6.4 defers to this value [REVIEW]
       queueStoppage('technical_submission', opp(f), 'unconscious', lag)
   elif f.jointFailed:                                                            # refused tap → fracture/dislocation
       queueStoppage('technical_submission', opp(f), 'injury', lag = cfg.refReactionS)
@@ -460,7 +463,7 @@ rates in §5 come out [D: arithmetic in the last column]:
 | front kick / teep / knee to body | `groin` (#11) | 0.006 | accidental | [S: RULES §3.4] |
 | round kick to body / low kick (inside) | `groin` | 0.003 | accidental | [S: RULES §3.4] |
 | any head strike while target turns away | `back_of_head` (#7) | 0.015 | accidental; intentional after warning | [S: RULES §3.4] |
-| ground-and-pound on turtle (`pos.ground_turtle_*`) | `back_of_head` | 0.03 per strike | accidental | [S: RULES §3.4] |
+| ground-and-pound on turtle (`pos.ground_turtle`, `pos.ground_referee`, `pos.ground_back_*` with the bottom belly-down) | `back_of_head` | 0.03 per strike | accidental | [S: RULES §3.4] [REVIEW: id was `pos.ground_turtle_*`; §03 has one turtle node with a `cage` flag] |
 | knee to head when opponent has a knee/hand-and-knee down | `grounded_head_kick_knee` (#12) | 0.02 × (1 − refJudgement) | accidental (misjudged status) | [S: RULES §3.4]; ref calls it 70/85/97 % [S: RULES §5] |
 | head kick vs opponent rising | `grounded_head_kick_knee` | 0.02 | accidental | [S: RULES §3.4] |
 | takedown defence at fence (`def.sprawl` near wall) | `fence_grab` (#15) | 0.08 | reflexive; intentional after warning | [S: RULES §3.4]; ~0.2 calls/fight [D: 2.5 fence TD-defences × 0.08] |
@@ -569,8 +572,8 @@ checkStandupsAndBreaks():
 ```
 
 `positionMult` [S: BJJ R2 "15–30 s longer if top is dominant" → ×1.5; rest [E]]:
-`pos.ground_mount_*`, `pos.ground_back_*`, `pos.ground_side_*`, `pos.ground_kob` 1.5 · `pos.ground_half_*` 1.0 ·
-closed/open guard 1.0 · `pos.ground_turtle_*` / front headlock 0.8 · standing-over-guard 0.5 · cage-seated 0.9.
+`pos.ground_mount_*`, `pos.ground_back_*`, `pos.ground_side_*` (incl. `pos.ground_side_kob`), `pos.ground_crucifix`, `pos.ground_north_south` 1.5 · `pos.ground_half_*` 1.0 ·
+`pos.ground_closed_*` / `pos.ground_open_*` / `pos.ground_hq` / leg entanglements 1.0 · `pos.ground_turtle` / `pos.ground_referee` / `pos.ground_front_headlock` 0.8 · `pos.ground_open_legs_up` (standing over guard) 0.5 · `pos.ground_cage_seated` / `pos.ground_wall_walk` 0.9 [REVIEW: ids aligned to §03 §2.2 — `pos.ground_kob` → `pos.ground_side_kob`, `pos.ground_turtle_*` → `pos.ground_turtle`].
 Bottom activity (sub or sweep attempts) resets the timer for both — "rarely stand when bottom is active" [S: RULES §5].
 Restarts after a stand-up are standing at distance, centre of the area; after a break, standing at long range [E].
 
@@ -584,7 +587,7 @@ severity scale [S: RULES §5]) maps to "severity 3 / 2.4 / 1.8 of 3" [D: × 3 an
 standard].
 
 ```
-doctorExam(f, context):                       # takes 20–60 s of wall time [E]; between rounds it consumes the break
+doctorExam(f, context):                       # takes 20–60 s of *stopped-clock sim time* (never wall-clock) [E] [REVIEW: wording]; between rounds it consumes the break
   stop = f.visionL <= 0.4 or f.visionR <= 0.4                                                    [S: DMG §5.2]
       or (cut.site in {eyelid, orbit-crossing} and cut.severity >= 3)                           [S: RULES §2.3 S5 orbit rule]
       or (cut.severity >= 3 and bleedUncontrolledAfterCutman)
@@ -623,7 +626,7 @@ scorer) [S: RULES §2.6; BJJ §9.1–9.2]:
 |---|---|---|
 | takedown → opponent back/side on mat, scorer on top (`pos.ground_*` bottom is guard/half) | 2 | 2 (4 if landed past guard) |
 | sweep / reversal from bottom guard to top | 2 | 2 (4 if past guard in the same motion); reversal counts as sweep; no sweep points if the top player initiated a submission and ended on bottom |
-| `pos.ground_kob` | 2 | 2 |
+| `pos.ground_side_kob` [REVIEW: was `pos.ground_kob`] | 2 | 2 |
 | guard pass → `pos.ground_side_*`, `pos.ground_north_south`, kesa | 3 | 3 (≥ 75 % of back on mat) |
 | `pos.ground_mount_*` (both knees, below shoulder line) | 4 | 2 |
 | `pos.ground_back_hooks` / body triangle | 4 | 3 |
@@ -971,6 +974,11 @@ target, detail, text}`; `actor = -1` for officials. `templateId` is the §09 com
 
 `BoutResult.method` (existing) is extended to the `WinCondition` union plus `'no_contest' | 'draw_unanimous' |
 'draw_majority' | 'draw_split' | 'technical_draw' | 'all_opponents_stopped' | 'street_*'`.
+
+[REVIEW: the event kinds above are this section's vocabulary; §09 §1.4 carries the canonical `SimEvent` kind list
+and the mapping from these names (and from §04's `evt.*`, §07's `evt.*` and §08's `PresentationEvent` kinds) so
+that one recorder emits one union. Ruleset ids: the `Ruleset.id` values of §2.2 (`mma.unified.3r`, `boxing.pro`,
+…) are canonical; §09 §3.2 now lists the same ids.]
 
 ---
 
