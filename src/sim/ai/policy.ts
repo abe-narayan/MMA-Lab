@@ -4,12 +4,16 @@
  * `decide()` is called once per fighter per tick in phase P3, in ascending id
  * order, and the loop commits whatever comes back. Two contracts bind it:
  *
- *   1. **Fixed draw count.** Exactly `DRAWS_PER_DECIDE` uniforms are taken from
- *      the bout stream every call, in the §2.1 order, *before* any branch runs
- *      — including the branches that return early. That is what makes the
- *      stream position a pure function of (tick, fighterId), which is what
- *      makes a replay reproduce. Every sub-layer here takes its uniform as an
- *      argument; nothing below this file can reach the generator.
+ *   1. **Fixed draw count.** The P3 block of the §2.1 schedule is eight draws
+ *      per fighter (nine in multi-opponent modes). The *loop* takes the last
+ *      of them, `u_commit`, as the intra-tick commitment jitter, so a policy
+ *      takes `DRAWS_PER_DECIDE - 1` and the total is eight either way — the
+ *      same split `IdlePolicy` uses. Those uniforms are taken first and
+ *      unconditionally, before any branch runs, including the branches that
+ *      return early. That is what makes the stream position a pure function of
+ *      (tick, fighterId), which is what makes a replay reproduce. Every
+ *      sub-layer here takes its uniform as an argument; nothing below this
+ *      file can reach the generator.
  *   2. **Delayed information only.** The policy reads `ctx.observed`, the
  *      perception buffer's view from `lagTicks` ago, never `world.fighters`.
  *      Own state is read live — a fighter knows his own legs.
@@ -27,7 +31,7 @@ import type { World, FighterWorldState } from '../core/world';
 import type { ObservedFighter, ObservedState } from '../core/perception';
 import { distanceToWall } from '../rules/arenas/types';
 import type { PositionId } from '../core/ids';
-import { reachProfile, bandFor, isOpenStance, leadFootBattle } from '../striking/range';
+import { reachProfile, rangeFit, bandFor, isOpenStance, leadFootBattle } from '../striking/range';
 import { technique, hasTechnique } from '../striking/catalogue';
 import { ACTION_FAMILIES, type ActionFamily, type ModeId } from './contracts';
 import {
@@ -48,7 +52,7 @@ import {
 import { executionQuality, executionTierFor, type ExecutionQuality } from './execution';
 import {
   ExchangeLedger, OpponentModel, baseFeintBiteP, baseReadP, buildContext, counterOnRead,
-  feintBiteProbabilityFor, feintQuality, hurtCueP, readCues, readProbability,
+  feintBiteProbabilityFor, hurtCueP, readCues, readProbability,
   COUNTER_ON_READ_MULT, type Cues,
 } from './perceive';
 import {
@@ -131,6 +135,15 @@ export const STYLE_JITTER_SD = 0.10;
 export const STYLE_WEIGHT_MIN = 0.5;
 export const STYLE_WEIGHT_MAX = 2.0;
 
+/**
+ * How long a perceived hurt opponent is *believed* to still be hurt. The cue
+ * is rolled per tick (§2.4.2) and often misses; without a belief window the
+ * finish emergency would flicker off on the first failed roll, which is not
+ * what "he smells blood" looks like. 05's rocked state decays over a similar
+ * horizon.
+ */
+export const OPP_HURT_BELIEF_MS = 4000;
+
 /** `ai.pace.finish_budget` (R1/R2/R3) and the final-round intent bump. */
 export const FINISH_BUDGET: readonly number[] = [0.53, 0.30, 0.15];
 export const FINAL_ROUND_INTENT = 1.10;
@@ -161,6 +174,14 @@ export interface AiState {
   hurtUntilMs: number;
   hurtBehaviourId: HurtBehaviourId | null;
   finisher: FinisherProfile | null;
+  /** ms until which the opponent is still believed to be hurt (§2.6.5). */
+  oppHurtUntilMs: number;
+  /**
+   * How many resolved outcomes the ledger has seen. The measured finisher's
+   * stop rule is a hit-rate test, and a hit rate over zero landings is not a
+   * hit rate — it is a module that has not been wired yet.
+   */
+  outcomesSeen: number;
   /** Running read tallies for the panel. */
   reads: { attempts: number; successes: number; counters: number; feintBites: number };
   cornerCues: { text: string; correct: boolean; accepted: boolean }[];
@@ -183,13 +204,19 @@ export class MmaPolicy implements DecisionPolicy {
   private readonly states = new Map<number, AiState>();
 
   /**
-   * Draws per fighter per tick: 9 once more than two fighters are live. The
-   * predicate is the loop's own (`world.live().length > 2`, 09 §2.7), because a
-   * policy that disagreed with the loop about the draw count would desynchronise
-   * the stream the moment a fighter was stopped.
+   * The whole P3 budget for one fighter on one tick: 8, or 9 once more than
+   * two fighters are live. The predicate is the loop's own
+   * (`world.live().length > 2`, 09 §2.7) — a policy that disagreed with the
+   * loop about the count would desynchronise the stream the moment a fighter
+   * was stopped.
    */
   static drawsPerDecide(world: World): number {
     return world.live().length > 2 ? DRAWS_PER_DECIDE_MULTI : DRAWS_PER_DECIDE;
+  }
+
+  /** What `decide()` itself takes: the budget less the loop's commit jitter. */
+  static drawsInPolicy(world: World): number {
+    return MmaPolicy.drawsPerDecide(world) - 1;
   }
 
   // -------------------------------------------------------------------------
@@ -285,6 +312,8 @@ export class MmaPolicy implements DecisionPolicy {
       hurtUntilMs: -Infinity,
       hurtBehaviourId: null,
       finisher: null,
+      oppHurtUntilMs: -Infinity,
+      outcomesSeen: 0,
       reads: { attempts: 0, successes: 0, counters: 0, feintBites: 0 },
       cornerCues: [],
       lastKnockdownMs: -Infinity,
@@ -313,9 +342,11 @@ export class MmaPolicy implements DecisionPolicy {
   // -------------------------------------------------------------------------
 
   /**
-   * The draws, in the §2.1 order, are taken first and unconditionally. Only
-   * then does anything branch, and the whole of the rest is wrapped so that a
-   * fault in a sub-layer costs this fighter a tick of action rather than the
+   * Draws 1-7 of the §2.1 order (`u_pattern`, `u_read`, `u_feint`, `u_eval`,
+   * `u_select`, `u_timing`, `u_target`), plus `u_switch` in multi-opponent
+   * modes. Draw 8, `u_commit`, is the loop's. They are taken first and
+   * unconditionally; only then does anything branch, and the rest is wrapped so
+   * a fault in a sub-layer costs this fighter a tick of action rather than the
    * bout's reproducibility.
    */
   decide(ctx: DecisionContext): Decision {
@@ -329,15 +360,14 @@ export class MmaPolicy implements DecisionPolicy {
     const uSelect = rng.next();
     const uTiming = rng.next();
     const uTarget = rng.next();
-    const uCommit = rng.next();
     const uSwitch = multi ? rng.next() : 0;
 
     try {
       return this.think(ctx, {
-        uPattern, uRead, uFeint, uEval, uSelect, uTiming, uTarget, uCommit, uSwitch, multi,
+        uPattern, uRead, uFeint, uEval, uSelect, uTiming, uTarget, uSwitch, multi,
       });
     } catch {
-      return waitDecision(uCommit);
+      return waitDecision();
     }
   }
 
@@ -357,7 +387,7 @@ export class MmaPolicy implements DecisionPolicy {
       : nearestChoice(world, self, st.targetId);
     if (choice.targetId !== st.targetId && st.targetId !== null && choice.targetId !== null) {
       world.emit({
-        tick: world.tick, subMs: Math.floor(u.uCommit * 100), round: world.round,
+        tick: world.tick, subMs: 0, round: world.round,
         kind: 'targetSwitch', actor: self.id, target: choice.targetId,
         text: `${rt.name} turns to ${choice.targetId}`,
         detail: { from: String(st.targetId), to: String(choice.targetId) },
@@ -367,7 +397,7 @@ export class MmaPolicy implements DecisionPolicy {
     st.targetChoice = choice;
 
     const opp = observedOf(ctx.observed, choice.targetId);
-    if (!opp) return waitDecision(u.uCommit);
+    if (!opp) return waitDecision();
 
     // --- perception (draws 1-3) -------------------------------------------
     const distanceM = Math.hypot(self.x - opp.x, self.z - opp.z);
@@ -389,7 +419,7 @@ export class MmaPolicy implements DecisionPolicy {
 
     const enumeration = this.buildEnumeration(st, self, world, opp, distanceM);
     const candidates = enumerateActions(enumeration, opp.x - self.x, opp.z - self.z);
-    if (candidates.length === 0) return waitDecision(u.uCommit);
+    if (candidates.length === 0) return waitDecision();
 
     const inputs = this.considerations(st, self, world, opp, distanceM, cues);
     const phaseTier = phaseTierFor(rt, self.posture, distanceM);
@@ -702,7 +732,8 @@ export class MmaPolicy implements DecisionPolicy {
       st.hurtBehaviourId = null;
     }
 
-    if (cues.oppHurt) {
+    if (cues.oppHurt) st.oppHurtUntilMs = world.nowMs + OPP_HURT_BELIEF_MS;
+    if (world.nowMs < st.oppHurtUntilMs) {
       if (st.finisher === null) {
         st.finisher = finisherProfile(
           st.intent.effectiveIqTier,
@@ -717,9 +748,11 @@ export class MmaPolicy implements DecisionPolicy {
           text: `${rt.name} smells the finish (${st.finisher})`,
           detail: { intent: st.finisher },
         });
-      } else if (shouldStopFinishing(st.finisher, st.ledger)) {
+      } else if (st.outcomesSeen > 0 && shouldStopFinishing(st.finisher, st.ledger)) {
+        // The measured finisher returns to the plan when it stops working.
         st.finisher = null;
         st.intent.emergency = null;
+        st.oppHurtUntilMs = -Infinity;
       }
     } else if (st.intent.emergency === 'finish') {
       st.finisher = null;
@@ -877,7 +910,12 @@ export class MmaPolicy implements DecisionPolicy {
     const reason = abortReason(st.macro, self.runtime.strikingTier, {
       oppHurt: cues.oppHurt,
       wasHit: self.lastStruckTick >= tick - 5,
-      rangeLost: distanceM > 2.5,
+      // §2.2.5: the step is re-scored against abort each tick, and "the
+      // opponent's changed range" is the common case — a combination whose next
+      // beat cannot reach is not a combination any more. This is also what
+      // keeps a macro from emitting an out-of-range technique, which the
+      // resolver would have to reject.
+      rangeLost: !this.macroStepInRange(st, self, distanceM),
       free: self.action === null,
     });
     if (reason !== 'none') {
@@ -903,6 +941,22 @@ export class MmaPolicy implements DecisionPolicy {
     };
   }
 
+  /** Can the macro's next step still reach from here? */
+  private macroStepInRange(st: AiState, self: FighterWorldState, distanceM: number): boolean {
+    const macro = st.macro.macro;
+    if (!macro) return false;
+    const next = macro.steps[st.macro.step];
+    if (!next) return false;
+    if (next.kind !== 'strike' || !hasTechnique(next.id)) {
+      // Movement, feints and grappling entries have no band of their own; the
+      // coarse limit is the awareness radius.
+      return distanceM <= 2.5;
+    }
+    const rt = self.runtime;
+    const profile = reachProfile(rt.effectiveReachM, rt.effectiveKickReachM);
+    return rangeFit(technique(next.id), distanceM, profile, rt.strikingMean).available;
+  }
+
   private maybeBeginMacro(
     st: AiState,
     self: FighterWorldState,
@@ -918,7 +972,7 @@ export class MmaPolicy implements DecisionPolicy {
       wrestlerEdgeTiers: 0,
       atLevelChangeRange: distanceM < 1.2,
       fenceBonus: false,
-      planCap: st.plan?.comboCapMax,
+      planCap: st.plan?.comboCapMax ?? undefined,
     });
     if (cap <= 1) return;
     const options: Macro[] = availableMacros(rt.strikingTier, cap)
@@ -955,13 +1009,30 @@ export class MmaPolicy implements DecisionPolicy {
       moveX: c.moveX,
       moveZ: c.moveZ,
       intentTag: c.intentTag,
-      payload: {
-        exec,
-        family: c.family,
-        // §09 §2.2: the intra-tick commitment jitter, U{0..99} ms.
-        commitJitterMs: Math.floor(clamp01(u.uCommit) * 100),
-      },
+      payload: { exec, family: c.family },
     };
+  }
+
+  /**
+   * The loop's hook for resolved outcomes. §2.6.1's signals are hit rates,
+   * stuffed shots and takedowns conceded, and none of those are visible from
+   * inside `decide()` — P4 knows them. Until the loop calls this, the ledger
+   * holds attempts only and the rules that need landings stay quiet rather than
+   * firing on a spurious zero hit rate.
+   *
+   * TODO(chapter 09): call this from the P4 resolution step.
+   */
+  noteOutcome(
+    fighterId: number,
+    kind: 'landed' | 'absorbed' | 'absorbedHeavy' | 'knockdown'
+    | 'tdLanded' | 'tdStuffed' | 'takenDown' | 'counterEaten' | 'cageExchange',
+    family: ActionFamily | null = null,
+  ): void {
+    const st = this.states.get(fighterId);
+    if (!st) return;
+    st.ledger.note(kind, family);
+    st.outcomesSeen += 1;
+    if (kind === 'knockdown') st.lastKnockdownMs = -Infinity;
   }
 
   // -------------------------------------------------------------------------
@@ -1097,16 +1168,14 @@ interface Draws {
   uSelect: number;
   uTiming: number;
   uTarget: number;
-  uCommit: number;
   uSwitch: number;
   multi: boolean;
 }
 
-function waitDecision(uCommit: number): Decision {
+function waitDecision(): Decision {
   return {
     kind: 'wait', what: null, targetId: null, defence: 'def.neutral',
     moveX: 0, moveZ: 0, intentTag: 'wait',
-    payload: { commitJitterMs: Math.floor(clamp01(uCommit) * 100) },
   };
 }
 

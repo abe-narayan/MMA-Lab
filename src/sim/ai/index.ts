@@ -17,8 +17,14 @@
  *   policy.ts     `MmaPolicy` — all of the above wired to the tick loop under
  *                 the fixed-draw contract
  *
- * The other half of chapter 07 (§2.5 plan generation, §2.7 multi-opponent)
- * registers itself through `planview.ts` rather than being imported here.
+ *   plan.ts / scout.ts / plans/  §2.5 the pre-fight game-plan generator
+ *   multi.ts                     §2.7 threat assessment and targeting
+ *   bindings.ts   registers those two with `planview.ts`, so importing this
+ *                 barrel gives a policy that actually plans
+ *
+ * The two halves are coupled only through `planview.ts`: the decision core
+ * never imports `plan.ts` or `multi.ts` directly, so it compiles, tests and
+ * runs without them (as the T0 fighter of §2.5.8 does).
  */
 export * from './contracts';
 export * from './families';
@@ -30,3 +36,8 @@ export * from './execution';
 export * from './perceive';
 export * from './adapt';
 export * from './policy';
+export * from './scout';
+export * from './plan';
+export * from './multi';
+// Last: registers the plan generator with `planview.ts` (side effect on load).
+export * from './bindings';

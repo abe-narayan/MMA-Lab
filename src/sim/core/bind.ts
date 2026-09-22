@@ -22,7 +22,8 @@
  */
 import type { FighterWorldState, World } from './world';
 import type { Decision, DecisionPolicy } from './policy';
-import { IdlePolicy } from './policy';
+
+import { MmaPolicy, familyForTechnique } from '../ai';
 import type { LoopModules } from './loop';
 import type { ContactKind, ScheduledContact } from './scheduler';
 import type { PositionId, SubmissionId, TechniqueId } from './ids';
@@ -31,7 +32,7 @@ import { refereeRuntime, judgeRuntime, matchClock } from './build';
 import {
   BAND_ORDER, DRAWS_PER_STRIKE, arrivalLogit, bandFor, baseDefenceSuccess, defence, guard,
   guardLogit, hasDefence, hasTechnique, passiveBlockP, reachProfile, resolveStrike, skillGapK,
-  strikeClasses, technique, totalMs as techniqueTotalMs,
+  strikeClasses, technique, TECHNIQUES, totalMs as techniqueTotalMs,
   type ForceContext, type GuardSpec, type ImpactPosture, type RangeBand, type ResolvedDefence,
   type StrikeResolveInput, type TargetRegion, type TechniqueSpec,
 } from '../striking';
@@ -310,15 +311,44 @@ function subFighterOf(f: FighterWorldState): SubFighter {
 
 export interface BindOptions {
   /**
-   * The decision policy. `IdlePolicy` is the placeholder until chapter 07's
-   * planner lands — swapping it is this one argument.
-   * TODO(chapter 07): default to `new AiPolicy(world)`.
+   * The decision policy. Defaults to chapter 07's `MmaPolicy`, which scouts,
+   * plans, reads and adapts. `IdlePolicy` remains exported for tests that want
+   * to exercise the loop without any decision-making.
    */
   policy?: DecisionPolicy;
 }
 
+/**
+ * A landed strike above this force is "heavy" for the opponent model, which
+ * distinguishes being touched from being hurt when it decides whether the plan
+ * is failing. 1.5 kN is roughly the 88th percentile of the in-ring force
+ * distribution `[S: LIT_A, Pierce 2006]`.
+ */
+const HEAVY_IMPACT_N = 1500;
+
+/** Technique lookup for the outcome feedback below. */
+const TECHNIQUE_BY_ID = new Map<string, TechniqueSpec>(TECHNIQUES.map((t) => [t.id, t]));
+
 export function createModules(world: World, opts: BindOptions = {}): BoundModules {
-  const policy = opts.policy ?? new IdlePolicy();
+  const policy = opts.policy ?? new MmaPolicy();
+  /**
+   * Chapter 07 exposes `noteOutcome` for outcome feedback; a policy that does
+   * not implement it (the idle policy, test doubles) simply does not learn.
+   */
+  const noteOutcome = (
+    fighterId: number,
+    kind: 'landed' | 'absorbed' | 'absorbedHeavy' | 'knockdown'
+      | 'tdLanded' | 'tdStuffed' | 'takenDown' | 'counterEaten' | 'cageExchange' | null,
+    what: string | null,
+  ): void => {
+    if (kind === null) return;
+    const p = policy as { noteOutcome?: (id: number, k: string, f: string | null) => void };
+    const spec = what && TECHNIQUE_BY_ID.has(what) ? TECHNIQUE_BY_ID.get(what)! : undefined;
+    const family = spec
+      ? familyForTechnique(spec.family, spec.limb, spec.targets[0])
+      : null;
+    p.noteOutcome?.(fighterId, kind, family);
+  };
   const clock = matchClock(world.config, world.ruleset);
   const dtMs = world.params.get('core.dtMs');
   /** Guards the once-per-tick work that `upkeep` is the only hook for. */
@@ -830,11 +860,22 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       target.lastStruckTick = w.tick;
       target.unansweredStrikes++;
       actor.unansweredStrikes = 0;
+      if (target.downTicks > 0) noteOutcome(target.id, 'knockdown', spec.id);
     }
 
     if (res.statLanded) {
       actor.totalLanded++;
       if (isSignificant(spec, posture)) actor.sigLanded++;
+    }
+
+    // Feed the outcome back to chapter 07's ledger. Only P4 knows whether a
+    // committed action actually landed, and the opponent model is what turns
+    // "this keeps hitting me" into an adjustment, so without this the ledger
+    // would hold attempts only and adaptation would never fire.
+    noteOutcome(actor.id, res.result === 'landed' ? 'landed' : null, spec.id);
+    if (res.result === 'landed') {
+      const heavy = (res.forceN ?? 0) >= HEAVY_IMPACT_N;
+      noteOutcome(target.id, heavy ? 'absorbedHeavy' : 'absorbed', spec.id);
     }
 
     const e: StrikeEvent = {

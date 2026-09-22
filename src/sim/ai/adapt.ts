@@ -19,11 +19,11 @@
  *   - the hurt (§2.6.4), finisher (§2.6.5) and corner (§2.6.6) blocks.
  */
 import type { ActionFamily, ModeId } from './contracts';
+import type { PlanView } from './planview';
+import type { ExchangeLedger } from './perceive';
 
 /** `intent.riskAppetite` (§2.6): -2 gun-shy .. +2 all-in. */
 export type RiskLevel = -2 | -1 | 0 | 1 | 2;
-import type { PlanView } from './planview';
-import type { ExchangeLedger } from './perceive';
 
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 const clamp01 = (v: number): number => clamp(v, 0, 1);

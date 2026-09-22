@@ -9,11 +9,14 @@
  * also means the decision core compiles and its tests run before those modules
  * exist.
  *
- * TODO(agent B): `./plan` should export a `GamePlan` matching §2.5.2 and call
- * `setPlanProvider({ drawsPerFighter, generate })` at module load; `./multi`
- * should call `setMultiTargetProvider({ select })`. `PlanView` is intentionally
- * all-optional so any superset of §2.5.2's field names is structurally
- * assignable to it — adding fields to `GamePlan` can never break this side.
+ * `bindings.ts` performs the registration for the in-tree implementations, so
+ * importing the `ai` barrel gives a policy that plans. `PlanView` is
+ * deliberately all-optional, so any superset of §2.5.2's field names is
+ * structurally assignable to it: adding a field to `GamePlan` can never break
+ * this side, and a partially-built plan is usable rather than a crash mid-bout.
+ *
+ * TODO(§2.7): `multi.ts` does not yet expose a `MultiTargetProvider`. Until it
+ * does, targeting falls back to `tgt.nearest` — the documented T0-T1 policy.
  */
 import type { World, FighterWorldState } from '../core/world';
 import type { ObservedState } from '../core/perception';
@@ -74,12 +77,14 @@ export interface PlanView {
   triggers?: readonly PlanTrigger[];
   cornerScript?: readonly PlanCornerCue[];
   quality?: number;
-  /** Optional: seconds the plan allows in the pocket before exiting (V-2). */
-  pocketDwellS?: number;
-  /** Optional: seconds the plan allows in the clinch before breaking (F-2). */
-  clinchDwellS?: number;
-  /** Optional: selection-time combination cap the plan imposes (S-4, P-V). */
-  comboCapMax?: number;
+  /**
+   * Optional limits. `null` means "the plan set no limit", which a generator
+   * expresses differently from "the field is absent"; both are accepted so a
+   * `GamePlan` from §2.5 assigns structurally without a translation step.
+   */
+  pocketDwellS?: number | null;
+  clinchDwellS?: number | null;
+  comboCapMax?: number | null;
 }
 
 /** `w_plan(a)`: the plan's multiplier for one family, 1.0 when it has none. */
