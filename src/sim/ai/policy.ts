@@ -35,7 +35,7 @@ import {
   reachProfile, rangeFit, bandFor, bandLimits, isOpenStance, leadFootBattle,
   BAND_BOUNDS,
 } from '../striking/range';
-import { technique, hasTechnique } from '../striking/catalogue';
+import { technique, hasTechnique, type TechniqueSpec } from '../striking/catalogue';
 import { reactionLatencyMs as defenceLatencyMs } from '../striking/defence';
 import { ACTION_FAMILIES, type ActionFamily, type ModeId } from './contracts';
 import {
@@ -46,7 +46,8 @@ import {
   enumerateActions, type Candidate, type EnumerationContext,
 } from './actions';
 import {
-  behaviourWeights, eyesCloseP, reactiveDefence, tierBehaviourFor, turnAwayP,
+  behaviourWeights, eyesCloseP, patternReadShare, reactiveDefence, tierBehaviourFor, turnAwayP,
+  PATTERN_HABIT_P,
   type BehaviourWeights, type TierBehaviour,
 } from './behaviour';
 import {
@@ -63,6 +64,8 @@ import {
   feintBiteProbabilityFor, hurtCueP, readCues, readProbability,
   COUNTER_ON_READ_MULT, type Cues,
 } from './perceive';
+import { patternReadP } from '../striking/defence';
+import type { OppFamily } from './families';
 import {
   adaptWeight, applyAdjustment, beliefToConfidence, buildAdjustment, candidateAdjustments,
   cornerCue, cornerUptakeP, defaultCornerTier, effectiveIqTier, evaluationDue,
@@ -210,6 +213,10 @@ export interface AiState {
   firedRules: string[];
   /** The reactive defence a successful read bought this tick (§2.4.2). */
   pendingDefence: DefenceId | null;
+  /** `attackerRepeated` for 02's pattern read: the opponent's last family ... */
+  lastOppFamily: OppFamily | null;
+  /** ... and how many ticks running they have shown it. */
+  oppFamilyRepeats: number;
   /**
    * Tick of the last strike or level change this fighter committed. `c.setup`
    * and §03's `grap.setupBonus` both ask "was there a setup just now?", and
@@ -350,6 +357,8 @@ export class MmaPolicy implements DecisionPolicy {
       tierWeights: null,
       firedRules: [],
       pendingDefence: null,
+      lastOppFamily: null,
+      oppFamilyRepeats: 0,
       lastSetupTick: -Infinity,
     };
   }
@@ -443,6 +452,14 @@ export class MmaPolicy implements DecisionPolicy {
     // --- tactical layer (draw 4) ------------------------------------------
     this.evaluate(st, self, world, nowS, cues, u.uEval);
     this.updateEmergency(st, self, world, cues, u.uEval);
+
+    // A fighter mid-commitment has already spent the action half of this tick.
+    // Everything above still ran — the opponent model, the read, the defence —
+    // and the defence is the half the loop will keep (`holdDefence`).
+    if (!ctx.canAct) {
+      self.tells.rules = st.firedRules;
+      return { ...waitDecision(), defence: st.pendingDefence ?? 'def.neutral' };
+    }
 
     // --- action layer (draws 5-8) -----------------------------------------
     const macroStep = this.continueMacro(st, self, cues, distanceM, world.tick);
@@ -578,23 +595,33 @@ export class MmaPolicy implements DecisionPolicy {
   }
 
   /**
-   * Draw 2, partitioned three ways, in this order:
+   * Draw 2, partitioned four ways, in this order:
    *
-   *   `[0, pEyes)`                       `beh.gen.eyes_close` — the eyes shut
-   *                                      and "readP = 0 for the exchange"
-   *   `[pEyes, pEyes + (1-pEyes) pRead)` the cue read succeeds
-   *   the rest                           nothing was seen
+   *   `[0, pEyes)`            `beh.gen.eyes_close` — the eyes shut and
+   *                           "readP = 0 for the exchange"
+   *   next `s x pPattern`     02 §2.4.3 read 1: the pattern was recognised
+   *                           *before launch*, so the defender pre-commits
+   *   next `s(1-pPattern)pRead`  read 2: the cue read at launch + telegraph
+   *   the rest                nothing was seen
    *
-   * and, *inside* the read band, the counter-on-read of §2.4.4 below
-   * `p_counter` and the reactive-defence choice above it. Nesting rather than
-   * reusing keeps every marginal exact — P(eyes) = pEyes, P(read) =
-   * (1-pEyes) x pRead, which is what "readP = 0 when the eyes are shut" means —
-   * and the draw budget stays at eight.
+   * with `s = 1 - pEyes`, and, *inside* either read band, the counter-on-read
+   * of §2.4.4 below `p_counter` and the reactive-defence choice above it.
+   * Nesting rather than reusing keeps every marginal exact and the draw budget
+   * stays at eight.
+   *
+   * Two things this fixes at once.
    *
    * The read is what buys a *defence*, not only a counter: `beh.gen.read` says
    * "read → reactive defence / counter allowed; no read → positional defence
    * only", and until Phase 5 nothing in 07 ever set one, so chapter 02's whole
    * defence layer was dead and skill converted into offence alone.
+   *
+   * And the pattern read is the only way anything short of a telegraphed power
+   * strike is ever defended: a jab's 130 ms startup is under every human
+   * reaction, so the *reactive* window against it is negative at any tier. In a
+   * mirror match the arrival logit's skill term cancels, so with no pattern
+   * read two champions were exactly as hittable as two novices — which is why
+   * the Phase 4 matrix had T5 vs T5 finishing 93 % of the time in 3.6 minutes.
    */
   private readAndCounter(
     st: AiState,
@@ -625,36 +652,82 @@ export class MmaPolicy implements DecisionPolicy {
       suppressed: !incoming,
     });
 
-    if (!incoming || spec === null) return;
-
     // `beh.gen.eyes_close` (T0, P 0.70) / `beh.gen.eyes_close_t1` (T1, P 0.30),
     // on an incoming power strike only — a jab does not make anyone blink.
-    const powerIn = spec.commitment.balance > 8;
+    const powerIn = spec !== null && spec.commitment.balance > 8;
     const pEyes = powerIn ? eyesCloseP(st.behaviour) : 0;
-    if (u.uRead < pEyes) {
+    if (spec !== null && u.uRead < pEyes) {
       self.tells.eyesShutUntilMs = nowMs + spec.startupMs + spec.activeMs;
       st.firedRules.push(rt.strikingTier <= 0 ? 'beh.gen.eyes_close' : 'beh.gen.eyes_close_t1');
       return;
     }
 
     const span = 1 - pEyes;
-    if (span <= 0 || u.uRead >= pEyes + span * pRead) return;
-    st.reads.successes += 1;
+    if (span <= 0) return;
 
-    // A fresh uniform, conditional on the read: the counter sits in its lower
-    // tail and the defence choice takes the whole of it.
-    const v = clamp01((u.uRead - pEyes) / Math.max(1e-9, span * pRead));
+    // Read 1 (before launch). This is the read that matters, because read 2
+    // arrives too late for most of the catalogue: perception is delayed by
+    // `lagTicks` (two at a pro's reaction time) and a jab's whole flight is one
+    // or two ticks, so by the time a fighter *sees* a jab it has already
+    // landed. Only a fighter who predicts the family from his own model ever
+    // defends one — which is `beh.box.reads_adapt`'s ladder from "T0 none" to
+    // "T5 adapts within exchanges", and why the model is consulted here even
+    // when nothing is visibly in flight.
+    const predicted = st.model.active ? st.model.mostLikely(st.lastContext) : null;
+    const observedFamily = spec === null ? null : oppFamilyForSpec(spec.family);
+    if (observedFamily !== null) {
+      if (observedFamily === st.lastOppFamily) st.oppFamilyRepeats += 1;
+      else { st.lastOppFamily = observedFamily; st.oppFamilyRepeats = 1; }
+    }
+    const readFamily = observedFamily ?? predicted;
+    const repeated = st.lastOppFamily === readFamily && st.oppFamilyRepeats >= 3;
+    const habitual = predicted !== null && predicted === readFamily
+      && st.model.p(st.lastContext, predicted) >= PATTERN_HABIT_P;
+    const patternSpec = readFamily === null ? null
+      : (spec ?? representativeTechnique(readFamily));
+    const pPattern = patternSpec === null ? 0 : patternReadP({
+      readP: baseReadP(rt, 'striking'),
+      attackerRepeated: repeated,
+      habitualEntry: habitual,
+    }) * patternReadShare(rt.iqTier, repeated || habitual);
+
+    const patternBand = span * pPattern;
+    const cueBand = incoming ? span * (1 - pPattern) * pRead : 0;
+    const patternRead = u.uRead < pEyes + patternBand;
+    if (!patternRead && u.uRead >= pEyes + patternBand + cueBand) return;
+    const readSpec = patternRead ? patternSpec : spec;
+    if (readSpec === null) return;
+    st.reads.successes += 1;
+    // `beh.gen.read`: seeing it coming is worth something even when no reactive
+    // defence fits the window — the fighter is set, not caught cold. 05 reads
+    // this as the braced absorb, and `beh.gen.eyes_close`'s "absorb -0.15" is
+    // the same coupling written from the other end.
+    self.tells.readUntilMs = nowMs + readSpec.startupMs + readSpec.activeMs;
+
+    // A fresh uniform, conditional on whichever read fired: the counter sits in
+    // its lower tail and the defence choice takes the whole of it.
+    const v = patternRead
+      ? clamp01((u.uRead - pEyes) / Math.max(1e-9, patternBand))
+      : clamp01((u.uRead - pEyes - patternBand) / Math.max(1e-9, cueBand));
+    if (patternRead) st.firedRules.push('beh.box.reads_adapt');
+    // §2.4.4: the counter rides *on* the defence rather than replacing it —
+    // every row of 02's defence table carries its own `counter.bonus`, so the
+    // pull that beat the cross is also what makes the counter available.
+    // `beh.gen.reflex_counter` (T4-T5, ~0.45-0.53) against
+    // `beh.gen.reflex_defensive` (T0-T1, ~0.05) is the tier ladder on which of
+    // the two a read is worth.
     const pCounter = counterOnRead(rt);
     if (v < pCounter) {
       st.reads.counters += 1;
       st.counterWindowUntilMs = nowMs + 100;
+      st.firedRules.push(rt.strikingTier >= 4 ? 'beh.gen.reflex_counter' : 'beh.box.block_counter');
     }
 
     // The defence the read buys. Latency is 02's, which is deliberately not
     // tier-scaled (`beh.gen.simple_rt_untiered`); everything tiered lives in
     // the window and in the repertoire.
     const chosen = reactiveDefence(st.behaviour, {
-      spec,
+      spec: readSpec,
       latencyMs: defenceLatencyMs({
         reactionTimeMs: rt.reactionTimeMs,
         tier: rt.strikingTier,
@@ -663,6 +736,7 @@ export class MmaPolicy implements DecisionPolicy {
         stanceUnfamiliar: familiarityOf(rt, opp.stance) < 0.5,
       }),
       u: v,
+      preCommitted: patternRead,
       // `def.shoulder_roll` needs the Philly shell; `def.step_back` and
       // `def.step_off` need room, and there is none on the fence.
       unavailable: [
@@ -1281,6 +1355,7 @@ export class MmaPolicy implements DecisionPolicy {
         return {
           fighterId: f.id, mode: 'idle', phase: 'mid' as const, planLines: [],
           adjustments: [], scoreBelief: 0.5, emergency: false,
+          tierRules: [], animationTags: [],
         };
       }
       return {
@@ -1295,6 +1370,10 @@ export class MmaPolicy implements DecisionPolicy {
         })),
         scoreBelief: beliefToConfidence(st.intent.perceivedScore.roundsUp),
         emergency: st.intent.emergency !== null,
+        // 01 §3: which catalogue rows are driving this fighter right now, and
+        // the clips they ask for. `rulesFor` is no longer dead data.
+        tierRules: [...st.firedRules],
+        animationTags: st.behaviour.animationTags,
       };
     });
   }
@@ -1442,6 +1521,24 @@ function familiarityOf(
 function isCounterFamily(f: ActionFamily): boolean {
   return f === 'counterWindow' || f === 'parryCross' || f === 'baitCross'
     || f === 'cross' || f === 'overhand' || f === 'check' || f === 'sprawl';
+}
+
+/**
+ * The technique a predicted *family* stands for, so a pattern read can pick a
+ * defence before anything has been thrown. 02's defence table is keyed on
+ * strike classes, and a class is what the opponent model predicts; these are
+ * the plainest member of each class.
+ */
+function representativeTechnique(family: OppFamily): TechniqueSpec | null {
+  switch (family) {
+    case 'jab': return technique('tech.jab');
+    case 'power': return technique('tech.cross');
+    case 'kick': return technique('tech.kick_low_rear');
+    case 'knee': return technique('tech.knee_straight');
+    case 'elbow': return technique('tech.elbow_horizontal');
+    // A level change, a takedown or a clinch entry is 03's to defend, not 02's.
+    default: return null;
+  }
 }
 
 function oppFamilyForSpec(family: string):

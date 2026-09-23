@@ -631,6 +631,16 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     return w.nearestOpponent(f);
   }
 
+  /**
+   * 02 §2.4: the guard and the reactive defence are chosen per incoming strike,
+   * so a fighter who cannot start a new action can still change what he is
+   * doing with his hands. Only the defence is taken; the movement intent and
+   * the action are the parts a commitment locks out.
+   */
+  function holdDefence(_w: World, f: FighterWorldState, d: Decision): void {
+    f.defence = d.defence;
+  }
+
   function commitDecision(w: World, f: FighterWorldState, d: Decision, jitter: number): void {
     f.defence = d.defence;
     f.intentTag = d.intentTag;
@@ -713,6 +723,25 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     openSetupWindow(w, f, contact.commitMs + contactMs);
   }
 
+  /**
+   * 03 §2.1.1 allows one contested edge per engagement at a time. The fighter
+   * who lost the race for it made the attempt all the same: it goes on the
+   * books as a stuffed edge rather than vanishing, which would otherwise
+   * flatter takedown accuracy and hide the exchange from the judges.
+   */
+  function beatenToIt(
+    w: World, loser: FighterWorldState, winner: FighterWorldState | undefined,
+    edge: GrapplingEdge,
+  ): void {
+    loser.damage.spendAction('takedownAttempt');
+    emit(w, {
+      ...base(w, edgeEventKind(edge), loser.id, winner?.id ?? -1,
+        `${loser.runtime.def.short} is beaten to the ${edge.name}`),
+      kind: edgeEventKind(edge),
+      detail: { edge: edge.id, from: loser.position, result: 'stuffed', reason: 'contested' },
+    } as GrappleEvent);
+  }
+
   function commitGrapple(
     w: World, f: FighterWorldState, target: FighterWorldState, d: Decision, jitter: number,
   ): void {
@@ -730,26 +759,23 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const offset = (Math.round(f.decisionOffsetMs) + jitter) % dtMs;
     if (e) {
       const contest = w.engagements.contestInflight(e.id, w.tick, offset);
-      if (contest.verdict === 'blocked') return;
+      // Whoever loses the contest pays the same price, whichever side of it he
+      // is on: the attempt was made, the energy went out of the tank and 06 has
+      // to see the failure. Charging only the displaced fighter would put the
+      // whole cost on the lower id, because P3 asks him first and he is
+      // therefore the only one who can ever be displaced — a ~3 pp win-rate
+      // edge to the higher id in a mirror match.
+      if (contest.verdict === 'blocked') {
+        if (contest.edge !== null) beatenToIt(w, f, w.fighters[contest.incumbentId], edge);
+        return;
+      }
       if (contest.verdict === 'displace' && contest.edge !== null) {
-        // The incumbent committed later in the same tick: his attempt is beaten
-        // to the position and never becomes a contact. It stays on the books as
-        // a stuffed attempt — he spent the energy and 06 must see the failure —
-        // rather than vanishing, which would flatter takedown accuracy.
-        w.scheduler.queue.cancelFor(contest.incumbentId, 'engagement.contested');
         const loser = w.fighters[contest.incumbentId];
-        const heldEdge = grapplingEdge(contest.edge);
+        w.scheduler.queue.cancelFor(contest.incumbentId, 'engagement.contested');
         if (loser) {
           loser.action = null;
           loser.actionResult = 'stuffed';
-          emit(w, {
-            ...base(w, edgeEventKind(heldEdge), loser.id, f.id,
-              `${loser.runtime.def.short} is beaten to the ${heldEdge.name}`),
-            kind: edgeEventKind(heldEdge),
-            detail: {
-              edge: heldEdge.id, from: loser.position, result: 'stuffed', reason: 'contested',
-            },
-          } as GrappleEvent);
+          beatenToIt(w, loser, f, grapplingEdge(contest.edge));
         }
         w.engagements.clearInflight(e.id);
       }
@@ -910,6 +936,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const attackerSkill = actor.runtime.strikingMean;
     const defenderSkill = target.runtime.strikingMean;
     const g = guardOf(target, w.nowMs);
+    const targetMidAction = target.action !== null
+      && w.nowMs < target.actionCommitMs + target.actionTotalMs;
     // A spinning technique arrives with the attacker's back turned: 02 §2.2.4.
     const seen = !spec.flags.includes('spinning');
     const input: StrikeResolveInput = {
@@ -929,11 +957,30 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       // the braced absorb. Leaving it unset handed 05 the all-false default on
       // every impact, so ground-and-pound was scored as if the defender were
       // standing and `kRelaxed` never fired.
+      // it holds the last technique id long after the commitment ended — so
+      // the unqualified test made every fighter permanently relaxed from his
+      // first punch onward, and most of all the busy ones (the better
+      // strikers). The commitment window is what 05 means.
       targetState: {
-        midAction: target.action !== null,
+        midAction: targetMidAction,
         mouthOpen: refereeRuntime(w).obs[target.id]?.mouthOpen ?? false,
         guardHand: g.id === 'guard.low_hands' ? 'away' : 'up',
-        braced: false,
+        // 01 `beh.gen.read`: a fighter who read the strike, is not himself
+        // committed to something, and had no reactive answer that fitted the
+        // window still has time for the one thing left — setting his neck and
+        // shoulders behind it. A fighter who *did* commit to a slip or a parry
+        // and had it beaten is caught mid-movement, which is the opposite of
+        // braced; a fighter mid-punch is the case 05 already states from the
+        // other side with `kRelaxed`.
+        //
+        // The broader reading (brace on any read that is not mid-punch) was
+        // measured too: it moves the headline batch to 12.8 min at 0.21
+        // knockdowns per 15 min, which trades the duration and knockdown
+        // targets for a finish share closer to 09's. See PHASE4_FINDINGS
+        // "Phase 5".
+        braced: !targetMidAction
+          && target.defence === 'def.neutral'
+          && w.nowMs < target.tells.readUntilMs,
         grounded: onFloor,
       },
       guard: g,
@@ -1612,6 +1659,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     upkeep,
     canAct,
     commitDecision,
+    holdDefence,
     resolveContact,
     referee: refereePhase,
     judges,

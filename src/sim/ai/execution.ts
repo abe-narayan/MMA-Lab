@@ -99,6 +99,13 @@ export interface ExecutionQuality {
   feetCrossed: boolean;
   /** P(eyes shut) per incoming power strike — a *state*, not a roll made here. */
   eyesClosedP: number;
+  /**
+   * The 01 §3 rows that shaped this commitment, in the order they applied.
+   * The debug overlay lists them and Phase 8 pairs them with `animationTagsFor`
+   * to pick the clip — `beh.box.fist_drop_telegraph` is a wind-up animation as
+   * much as it is a +0.25 on the defender's read.
+   */
+  rulesFired: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +205,20 @@ export function executionQuality(
     ? ADJACENT_TARGET[input.requestedTarget]
     : input.requestedTarget;
 
+  // Which catalogue rows this commitment is an instance of. Every id here is a
+  // real row of 01 §3 whose magnitude is already in the tables above; naming
+  // them is what lets 08 and the overlay say *why* a punch looked the way it did.
+  const rulesFired: string[] = [];
+  if (tier <= 1) rulesFired.push('beh.box.fist_drop_telegraph');
+  if (tier <= 0) rulesFired.push('beh.box.arm_punch');
+  if (input.spec !== null && isKick(input.spec)) {
+    rulesFired.push('beh.mt.kick_exec_time', 'beh.mt.kick_telegraph');
+    if (tier <= 1) rulesFired.push('beh.mt.no_return_to_stance');
+  }
+  if (targetErrored) rulesFired.push('beh.box.accuracy_reference');
+  if (feetCrossed) rulesFired.push('beh.box.cross_feet');
+  if (overcommitted) rulesFired.push('beh.box.overcommit');
+
   return {
     telegraphMs: telegraphMs(input),
     timingOffsetTicks: offset,
@@ -208,7 +229,14 @@ export function executionQuality(
     balanceDelta: overcommitted ? OVERCOMMIT_BALANCE : 0,
     feetCrossed,
     eyesClosedP: eyesClosedP(tier),
+    rulesFired,
   };
+}
+
+/** `beh.mt.*` rows key on the kick families rather than on the weapon. */
+function isKick(spec: TechniqueSpec): boolean {
+  return spec.family === 'lowKick' || spec.family === 'bodyKick'
+    || spec.family === 'headKick' || spec.family === 'teep';
 }
 
 /**

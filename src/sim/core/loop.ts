@@ -44,6 +44,11 @@ export interface LoopModules {
   breakRecovery(world: World, f: FighterWorldState, dtMs: number): void;
   /** Commit a decision: look up timings, enqueue the contact, spend energy. */
   commitDecision(world: World, f: FighterWorldState, d: Decision, jitter: number): void;
+  /**
+   * The defence half of a decision taken while the fighter is mid-commitment.
+   * Nothing else of the decision is applied — no movement, no new action.
+   */
+  holdDefence(world: World, f: FighterWorldState, d: Decision): void;
   /** True when this fighter may act (not downed, not mid-commitment). */
   canAct(world: World, f: FighterWorldState): boolean;
 }
@@ -122,22 +127,29 @@ export class BoutLoop {
     for (const f of w.fighters) {
       if (f.out) continue;
       const before = w.rng.draws;
-      if (this.modules.canAct(w, f)) {
-        const lag = Math.round(f.reactionLatencyMs / this.cfg.dtMs);
-        const decision = this.modules.policy.decide({
-          world: w, self: f, observed: f.perception.delayed(lag),
-          rng: w.rng, tick: w.tick, nowMs: w.nowMs,
-        });
-        const taken = w.rng.draws - before;
-        // The jitter is the last mandated draw; a policy that consumed fewer
-        // draws than promised has its remainder taken here so the stream stays
-        // aligned. A policy that overdraws is a bug and is caught in tests.
-        for (let i = taken; i < drawsPerFighter - 1; i++) w.rng.next();
-        const jitter = w.rng.int(this.cfg.dtMs);
+      // Every live fighter decides every tick, free or not. A fighter mid-punch
+      // cannot start a new action, but he is still watching, still reading and
+      // still choosing what to do with his guard — 02 §2.4 treats the defence
+      // as a response to the incoming strike, not as an action of its own. The
+      // draw count is identical either way, so the §2.7 schedule is unchanged:
+      // `drawsPerFighter - 1` inside the policy plus the commit jitter here.
+      const canAct = this.modules.canAct(w, f);
+      const lag = Math.round(f.reactionLatencyMs / this.cfg.dtMs);
+      const decision = this.modules.policy.decide({
+        world: w, self: f, observed: f.perception.delayed(lag),
+        rng: w.rng, tick: w.tick, nowMs: w.nowMs, canAct,
+      });
+      const taken = w.rng.draws - before;
+      // The jitter is the last mandated draw; a policy that consumed fewer
+      // draws than promised has its remainder taken here so the stream stays
+      // aligned. A policy that overdraws is a bug and is caught in tests.
+      for (let i = taken; i < drawsPerFighter - 1; i++) w.rng.next();
+      const jitter = w.rng.int(this.cfg.dtMs);
+      if (canAct) {
         f.intentTag = decision.intentTag;
         this.modules.commitDecision(w, f, decision, jitter);
       } else {
-        for (let i = 0; i < drawsPerFighter; i++) w.rng.next();
+        this.modules.holdDefence(w, f, decision);
       }
     }
 

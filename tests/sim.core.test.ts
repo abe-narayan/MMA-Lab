@@ -75,6 +75,7 @@ class SparringPolicy implements DecisionPolicy {
     return world.fighters.map((f) => ({
       fighterId: f.id, mode: 'spar', phase: 'mid' as const, planLines: [],
       adjustments: [], scoreBelief: 0.5, emergency: false,
+      tierRules: [], animationTags: [],
     }));
   }
 }

@@ -63,6 +63,7 @@ export interface BehaviourTiers {
 
 export interface TierBehaviour {
   readonly tiers: BehaviourTiers;
+  readonly skills: BehaviourSkills;
   /** Every catalogue row active for this fighter, for the Model tab. */
   readonly rules: readonly TierBehaviourRule[];
   readonly ruleIds: ReadonlySet<string>;
@@ -81,6 +82,22 @@ export interface TierBehaviour {
 }
 
 const CACHE = new WeakMap<FighterRuntime, TierBehaviour>();
+
+/** Sub-skills the catalogue gates a defence on, read once per bout. */
+export interface BehaviourSkills {
+  /** `beh.box.pull_counter`: "Available if headMovement >= 55". */
+  headMovement: number;
+  /** `beh.box.guard_style_gate`: the shoulder roll needs guard >= 55 too. */
+  guard: number;
+}
+
+function skillsOf(rt: FighterRuntime): BehaviourSkills {
+  const box = rt.disciplines.boxing?.effective ?? {};
+  return {
+    headMovement: box.headMovement ?? rt.strikingMean,
+    guard: box.guard ?? rt.strikingMean,
+  };
+}
 
 function tiersOf(rt: FighterRuntime): BehaviourTiers {
   const t = rt.tiers as Partial<Record<string, number>>;
@@ -188,6 +205,7 @@ export function tierBehaviourFor(rt: FighterRuntime): TierBehaviour {
 
   const behaviour: TierBehaviour = {
     tiers: t,
+    skills: skillsOf(rt),
     rules,
     ruleIds,
     animationTags: animationTagsFor(rt),
@@ -261,6 +279,9 @@ const SWING_FAMILY: readonly ActionFamily[] =
   ['hook', 'leadHook', 'overhand', 'uppercut', 'spinning'];
 const COVER_FAMILY: readonly ActionFamily[] = ['block', 'longGuard', 'check'];
 
+/** `beh.mt.check_rate`: P(attempt a check) by Muay Thai tier. */
+export const CHECK_RATE_BY_TIER: readonly number[] = [0.08, 0.10, 0.25, 0.50, 0.60, 0.70];
+
 /**
  * The trigger-gated half of the catalogue, evaluated once per fighter per tick.
  * The static half is folded in first so a caller only has to consult one map.
@@ -319,6 +340,12 @@ export function behaviourWeights(b: TierBehaviour, ctx: BehaviourContext): Behav
     mult('counterWindow', 0.2, 'beh.gen.reflex_defensive');
     mult('parryCross', 0.2, 'beh.gen.reflex_defensive');
   }
+
+  // `beh.mt.check_rate`: P(attempt check) T0 < 0.10, T1 0.10, T2 0.25, T3 0.50,
+  // T4 0.60, T5 0.70. Expressed against the T3 reference so the family prior
+  // keeps its meaning.
+  mult('check', CHECK_RATE_BY_TIER[Math.max(0, Math.min(5, Math.round(t.muayThai)))] / 0.50,
+    'beh.mt.check_rate');
 
   // `beh.mt.teep_usage` [2-5, opponentAdvancing]: w(teep) x (1 + teep/100).
   if (ctx.oppAdvancing && t.muayThai >= 2) {
@@ -442,6 +469,14 @@ export interface ReactiveDefenceInput {
   latencyMs: number;
   /** Uniform in [0,1), already conditioned on the read having succeeded. */
   u: number;
+  /**
+   * 02 §2.4.3 read 1: the pattern was recognised *before launch*, so the
+   * defender pre-commits and pays no latency at all. This is the only way a
+   * jab is ever defended — its 130 ms startup is below every human reaction —
+   * and it is the mechanism behind `beh.box.reads_adapt`'s T5 "adapts within
+   * exchanges" as against T0's "none".
+   */
+  preCommitted?: boolean;
   /** Ids unavailable right now (fence, guard requirement, plan). */
   unavailable?: readonly DefenceId[];
 }
@@ -480,11 +515,23 @@ export function reactiveDefence(b: TierBehaviour, x: ReactiveDefenceInput): Reac
   // `beh.gen.cue_lead` [2-5]: the lead on a telegraphed attack is a *trained*
   // read of the wind-up. A novice has none, so his window is the raw one.
   const leadMs = tier >= 2 ? anticipationLeadMs(x.spec.telegraph) : 0;
-  const windowMs = defenceWindowMs(x.spec, x.latencyMs, leadMs);
+  const windowMs = x.preCommitted
+    // "Success lets the defender pre-commit (no latency)" — the whole window
+    // is the technique's own flight time.
+    ? x.spec.startupMs + x.spec.activeMs / 2 + x.spec.telegraph
+    : defenceWindowMs(x.spec, x.latencyMs, leadMs);
   if (windowMs <= 0) return NO_DEFENCE;
 
+  // `beh.box.pull_counter`: "Available if headMovement >= 55"; the same row
+  // gates `def.shoulder_roll` through `beh.box.guard_style_gate`. Without them
+  // the pull — highest success x counter value in 02's table — was simply the
+  // best answer to every punch and elites did nothing else.
+  const gated: DefenceId[] = [...(x.unavailable ?? [])];
+  if (b.skills.headMovement < 55) gated.push('def.pull', 'def.shoulder_roll', 'def.roll');
+  if (b.skills.guard < 55) gated.push('def.shoulder_roll');
+
   const options = availableDefences({
-    spec: x.spec, windowMs, tier, unavailable: x.unavailable,
+    spec: x.spec, windowMs, tier, unavailable: gated,
   });
   if (options.length === 0) return NO_DEFENCE;
 
@@ -503,16 +550,53 @@ export function reactiveDefence(b: TierBehaviour, x: ReactiveDefenceInput): Reac
     return { defence: other.id, fired: ['beh.box.high_guard_only'] };
   }
 
-  const ranked = rankDefences(options, x.spec);
-  // T2 slips to one side only and holds one answer per line
-  // (`beh.box.one_direction_slip`); T3+ pick from the top of the ranking.
-  const depth = tier >= 4 ? Math.min(3, ranked.length)
-    : tier === 3 ? Math.min(2, ranked.length) : 1;
-  const pick: DefenceSpec = ranked[Math.min(depth - 1, Math.floor(x.u * depth))];
+  // `def.flinch` is the reflex for "no read, no choice"; a fighter who read the
+  // strike has a choice, so it only survives as the last resort.
+  const chosen = options.length > 1 ? options.filter((d) => d.id !== 'def.flinch') : options;
+  const ranked = rankDefences(chosen.length > 0 ? chosen : options, x.spec);
+  // `beh.box.repertoire_t2` gives one answer per line ("one direction well");
+  // T3 adds set-up chains and the pull; T4-T5 "adapt per round / within the
+  // exchange", which here is picking the best answer almost every time.
+  const second = tier >= 4 ? 0.15 : tier === 3 ? 0.30 : 0;
+  const pick: DefenceSpec = (x.u < second && ranked.length > 1) ? ranked[1] : ranked[0];
   const ruleId = tier >= 4 ? 'beh.box.repertoire_t4'
     : tier === 3 ? 'beh.box.repertoire_t3' : 'beh.box.repertoire_t2';
   return { defence: pick.id, fired: [ruleId] };
 }
+
+/**
+ * How much of 02's *pattern* read (read 1, before launch) this fighter owns.
+ *
+ * `beh.box.reads_adapt` is the ladder: "T0 none; T1 responds only to being hit;
+ * T2 sticks to plan; T3 corner-driven; T4 self-adjusts per round; T5 within
+ * exchanges", and `beh.mma.plan_quality` puts the same thing as a scouting
+ * sigma of 30/20/12/8/5 % by iqTier. Reading a pattern before it launches is
+ * the top of that ladder, so it is gated on iqTier and on how far the
+ * fighter's own model has an actual pattern to read: no repeat, no habitual
+ * entry, no pre-launch read.
+ *
+ * This is what separates two equal-tier fighters' *defence*: the arrival logit's
+ * skill term cancels in a mirror, so without a pattern read a T5 mirror is as
+ * hittable as a T2 mirror — which is exactly what the Phase 4 matrix showed
+ * (two champions finishing each other 93 % of the time in 3.6 minutes).
+ */
+export function patternReadShare(iqTier: number, hasPattern: boolean): number {
+  if (!hasPattern) return 0;
+  return clamp01((iqTier - 1) / 4);
+}
+
+/**
+ * How skewed the opponent model has to be before its argmax counts as a
+ * *habit* rather than the least-bad guess among twelve families. 02's
+ * `patternReadP` takes `habitualEntry` as a boolean and the model is always
+ * willing to name a favourite, so without a threshold every fighter reads a
+ * pattern on every tick and the whole of 05's braced absorb switches on
+ * permanently — the headline batch went from 10.8-minute bouts to 15.7.
+ *
+ * Uniform over the twelve `OPP_FAMILIES` is 0.083; a family the opponent
+ * actually leans on sits far above that.
+ */
+export const PATTERN_HABIT_P = 0.42;
 
 /**
  * `beh.gen.eyes_close` (T0, P = 0.70) and `beh.gen.eyes_close_t1` (T1, P = 0.30):

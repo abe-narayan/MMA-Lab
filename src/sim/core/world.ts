@@ -94,6 +94,12 @@ export interface FighterWorldState {
     backTurnedUntilMs: number;
     /** `beh.gen.eyes_close` (T0/T1): ms until which the eyes are shut. */
     eyesShutUntilMs: number;
+    /**
+     * `beh.gen.read`: ms until which this fighter has *seen it coming*. 05's
+     * braced absorb is the chin half of a read, the mirror of the T0 rule that
+     * docks absorb when the eyes shut.
+     */
+    readUntilMs: number;
     /** Catalogue rule ids that fired for this fighter on the last decision. */
     rules: readonly string[];
   };

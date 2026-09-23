@@ -57,6 +57,21 @@ export interface DecisionContext {
   rng: RNG;
   tick: number;
   nowMs: number;
+  /**
+   * False while the fighter is mid-commitment. The decision is still taken —
+   * perception, the opponent model and the *defence* run every tick, because
+   * 02 §2.4 makes the guard and the reactive defence a per-incoming-strike
+   * choice, not an action: a fighter halfway through a jab can still slip,
+   * parry or roll. Only the action half of the decision is discarded, by the
+   * loop, which calls `holdDefence` instead of `commitDecision`.
+   *
+   * Skipping the call entirely — which is what the loop used to do — meant a
+   * busy fighter carried whatever `defence` his own last attack set (almost
+   * always `def.neutral`) through the whole exchange, and since an elite
+   * throws more than a novice, the better fighter was undefended *more* of the
+   * time. That is a large part of why skill converted into offence only.
+   */
+  canAct: boolean;
 }
 
 export interface DecisionPolicy {
@@ -85,6 +100,13 @@ export interface FighterIntent {
   scoreBelief: number;
   /** True when hurt or badly behind and acting accordingly. */
   emergency: boolean;
+  /**
+   * 01 §3 catalogue rows that fired on this fighter's last decision, and the
+   * animation tags they ask 08 for (`animationTagsFor`). The debug overlay
+   * reads the first; the presentation layer reads the second.
+   */
+  tierRules: readonly string[];
+  animationTags: readonly string[];
 }
 
 /**
@@ -115,6 +137,7 @@ export class IdlePolicy implements DecisionPolicy {
     return world.fighters.map((f) => ({
       fighterId: f.id, mode: 'idle', phase: 'mid' as const, planLines: [],
       adjustments: [], scoreBelief: 0.5, emergency: false,
+      tierRules: [], animationTags: [],
     }));
   }
 }

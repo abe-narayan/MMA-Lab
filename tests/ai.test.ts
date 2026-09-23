@@ -153,6 +153,7 @@ function ctxFor(world: World, f: FighterWorldState): DecisionContext {
     rng: world.rng,
     tick: world.tick,
     nowMs: world.nowMs,
+    canAct: true,
   };
 }
 
@@ -194,7 +195,7 @@ describe('§2.1 determinism contract', () => {
     policy.prepare(world);
     for (const f of world.fighters) {
       const ctx: DecisionContext = {
-        world, self: f, observed: null, rng: world.rng, tick: 0, nowMs: 0,
+        world, self: f, observed: null, rng: world.rng, tick: 0, nowMs: 0, canAct: true,
       };
       const before = world.rng.draws;
       policy.decide(ctx);

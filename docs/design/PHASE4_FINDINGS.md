@@ -408,3 +408,226 @@ effect on the bout. The plan generator (07 §2.5) is the right consumer: its
 weapon-selection step should seed from these lists before falling back to
 discipline means. Until then the creator over-promises, and that is worth saying
 plainly rather than leaving a user to discover it.
+
+---
+
+# Phase 5 — making tier change *how* a fighter fights
+
+Phase 5's brief was that `rulesFor()` — chapter 01 §3's ~200-row tier behaviour
+catalogue — was never called anywhere in `src/sim/ai/`. Tier reached behaviour
+only through scalar composites (softmax temperature, skill gaps, telegraph), so
+a white belt was a weaker black belt rather than a different fighter. Three
+measured symptoms came with it. This section records what caused each, what was
+done, and what is deliberately left measured rather than patched.
+
+All numbers below are seeded batches from `scripts/dev/tiers.ts` and
+`scripts/dev/probe.ts`; the executable form of the §7.3 checks is
+`tests/tiers.test.ts`.
+
+## 1. Identical fighters won 70/30 by fighter id — **fixed**
+
+`arch.regional_pro_allrounder` against itself: **70 % / 30 %** for the lower id.
+
+The striking was even (16.8 vs 16.9 significant landed per bout, 41.6 % vs
+39.9 % accuracy, 48 vs 45 knockdowns). The grappling was not:
+
+| per 200 mirror bouts | fighter 0 | fighter 1 |
+| --- | --- | --- |
+| takedowns landed | 448 | 212 |
+| control seconds | 58,060 | 30,023 |
+| reversals | 226 | 62 |
+| judge rounds won | 736 | 418 |
+
+**Cause.** 03 §2.1.1 allows one contested edge per engagement at a time, and
+`commitGrapple` enforced it first-come: `if (e && e.inflight) return`. P3 decides
+in ascending fighter id, so the lower id asked first on every tick and took the
+slot whenever he wanted it; the higher id was locked out for the whole duration
+of that edge, and locked out again on the next tick. Inside an engagement the
+higher id could essentially never initiate — hence 2x the takedowns, 2x the
+control and 3.6x the reversals. Reversing the P3 iteration order flipped the
+bias exactly (30 % / 64 %), which is the proof.
+
+**Fix.** The slot is now contested by the *intra-tick commit offset* —
+`(decisionOffsetMs + jitter) mod dtMs`, the same number the scheduler already
+turns into `commitMs` and which the loop already draws for exactly this purpose
+(09 §2.2). `EngagementSet.contestInflight` returns free / blocked / displace; a
+challenger with the earlier offset displaces the incumbent, whose commitment is
+cancelled. Both sides of a lost contest pay the same price — the action energy
+plus a `stuffed` edge event with `reason: 'contested'` — because charging only
+the displaced fighter put the whole cost on the lower id (he is the only one who
+*can* be displaced) and was worth a further ~3 pp.
+
+Iteration order is unchanged, the draw schedule is unchanged (8 per fighter in
+P3), and the advantage the order used to confer is now symmetric.
+
+**After.** Mirror over 400 bouts: 51.0 % / 45.3 % / 3.8 % draws.
+
+## 2. A brand-new fighter beat a regional pro 30 % of the time — **fixed**
+
+`arch.brand_new_brawler` vs `arch.regional_pro_allrounder`: **30 % → 3-8 %**
+(the §7.3 target is well under 5 %; pooled over three trained opponents it is
+1.7 %). Two thirds of the original figure was the id-0 grappling monopoly above
+— the T0 was fighter 0 in that matchup — and the rest was that nothing made him
+*incompetent*, only weaker.
+
+Now wired from the catalogue, each traceable by rule id through
+`FighterIntent.tierRules` and `FighterWorldState.tells.rules`:
+
+- **Repertoire gates** (`ai/actions.ts`): `beh.mt.kick_selection` (T0-T1 own the
+  rear round kicks and nothing else), `beh.mt.elbow_availability`,
+  `beh.mt.lean_back_t0`, `beh.mt.spinning_gate`, `beh.wr.sprawl_late` (a T0 has
+  no sprawl at all), `beh.wr.timing_shots`, `beh.wr.cage_use`, `beh.bjj.top_t0`
+  (no guard pass), `beh.bjj.sweep_repertoire` (no sweep), `beh.bjj.cage_use`,
+  `beh.box.repertoire_t0` (no counter game).
+- **Posture** (`core/bind.guardOf`): `beh.box.hands_at_chest` puts a T0 in
+  `guard.low_hands` permanently, `beh.gen.hands_drop_tired` drops the guard at
+  f > 0.45 for T0-T1 against f > 0.75 for T3+, and `beh.gen.turn_away` /
+  `beh.gen.hurt_t0` put him in `guard.cover_turtle` with his back exposed
+  (`defenderBackTurned` in 02's arrival logit).
+- **Perception**: `beh.gen.eyes_close` (0.70 at T0, 0.30 at T1) now suppresses
+  the read for the exchange and feeds `defenderVisionBlocked`.
+- **Weights**: `beh.gen.t0_grab_push`, `beh.gen.panic_flurry`,
+  `beh.box.backs_straight_up`, `beh.box.ring_cutting`, `beh.mma.getup_t1`,
+  `beh.mt.fatigue_kicking`, `beh.mt.check_rate`, `beh.box.lead_hand_use`,
+  `beh.box.body_work`, `beh.wr.underhook_pummel`, `beh.bjj.mma_bottom_priority`.
+
+Equal-tier connect % is now monotone in tier — T0 69 %, T2 41 %, T3 38 %,
+T4 35 %, T5 36 % — against 01 §3's `beh.box.defence_reference` ladder of
+45-55 / 33 / 29 / 20-25 / <20. The direction is right; the top of the ladder is
+still flat, which is finding 3.
+
+The whole win matrix is now monotone in both directions (40 bouts per cell, row
+fighter's win %):
+
+|    | T0 | T1 | T2 | T3 | T4 | T5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| T0 | 55 | 25 | 3 | 3 | 5 | 0 |
+| T1 | 80 | 58 | 10 | 15 | 0 | 0 |
+| T2 | 100 | 90 | 35 | 58 | 8 | 5 |
+| T3 | 95 | 88 | 48 | 45 | 30 | 0 |
+| T4 | 95 | 93 | 88 | 80 | 43 | 10 |
+| T5 | 100 | 100 | 93 | 100 | 98 | 55 |
+
+## 3. Higher skill still makes fights shorter — **improved, not solved**
+
+Two champions finished each other **93 % of the time in 3.6 minutes**. After
+Phase 5 the T5 mirror is 5.4-7.3 minutes at 80-90 % finishes, with knockdowns
+per 15 minutes down from 2.21 to 0.9-1.5 and connect % down from 49-51 % to
+36-37 %. It is still **shorter** than the T2 and T3 mirrors, and the executable
+check for that ordering is `it.skip`ped in `tests/tiers.test.ts` with a pointer
+here rather than weakened until it passes.
+
+### What was wrong on the AI side, and is now fixed
+
+**02's entire reactive-defence layer was dead.** Every `Candidate` carried
+`defence: 'def.neutral'`, which is not an id in the defence catalogue, so
+`resolvedDefenceOf` returned `null` on every strike of every bout ever
+simulated. `availableDefences`, `defenceWindowMs`, `rankDefences` and
+`patternReadP` existed and were never called; the only defence in the engine was
+the passive guard roll. A successful read bought a counter-weight multiplier and
+nothing else, which is precisely "skill converts into offence".
+
+Four changes:
+
+1. A successful read now selects a reactive defence from the tier's repertoire
+   (`beh.gen.read`, `beh.box.high_guard_only`, `beh.box.repertoire_t2/t3/t4`,
+   `beh.box.pull_counter`'s headMovement >= 55 gate), and it rides on the
+   `Decision` ahead of the candidate's neutral posture.
+2. **02's read 1 (pattern read, before launch) is wired.** Perception is delayed
+   by `lagTicks` — two at a pro's reaction time — and a jab's whole flight is one
+   or two ticks, so a fighter never *sees* a jab before it lands and the reactive
+   window against it is negative at any tier. Only a fighter who predicts the
+   family from his own opponent model defends one. The share of that prediction
+   is gated on `beh.box.reads_adapt`'s iqTier ladder ("T0 none" … "T5 within
+   exchanges") and on the model actually holding a habit (`PATTERN_HABIT_P`).
+3. **A fighter mid-commitment now still decides.** The loop used to skip
+   `decide()` entirely for a busy fighter and burn his draws, so he carried
+   whatever `defence` his own last attack had set — `def.neutral` — through the
+   whole exchange. Since a better fighter throws more, the better fighter was
+   undefended *more* of the time. `DecisionContext.canAct` is now passed through
+   and `LoopModules.holdDefence` applies the defence half only. The draw count
+   per fighter in P3 is unchanged: `drawsPerFighter - 1` in the policy plus the
+   commit jitter in the loop, either way.
+4. 05's `targetState.midAction` read `target.action !== null`, and `f.action` is
+   sticky — it keeps the last technique id long after the commitment ends. Every
+   fighter was therefore permanently "relaxed" (`ko.kRelaxed`) from his first
+   punch onward, worst of all for the busiest. It is now the commitment window.
+   `targetState.braced`, never set by anything, is now the chin half of a read
+   (`beh.gen.read`; `beh.gen.eyes_close`'s "absorb -0.15" is the same coupling
+   from the other end).
+
+Resolved-defence coverage by tier, over 20 mirror bouts each, went from a flat
+~17 % to: T0 5 %, T2 31 %, T3 43 %, T4 53 %, T5 72 %.
+
+### What is left, and why it is chapter 05's
+
+Holding **every attribute fixed** and scaling only the sub-skills and training
+years of one archetype (sub-skill band midpoints 5/20/40/60/80/95, years
+0.1/0.6/2/6/10/14):
+
+| skill tier | duration | decisions | KD / 15 min | connect % | SLpM |
+| --- | --- | --- | --- | --- | --- |
+| T0 | 14.1 m | 80 % | 0.11 | 66 % | 3.42 |
+| T1 | 12.3 m | 62 % | 0.23 | 43 % | 3.65 |
+| T2 | 15.4 m | 78 % | 0.09 | 43 % | 2.55 |
+| T3 | 13.5 m | 67 % | 0.18 | 41 % | 1.49 |
+| T4 | 10.5 m | 40 % | 0.44 | 39 % | 1.76 |
+| T5 |  8.6 m | 18 % | 0.86 | 32 % | 2.47 |
+
+Connect % falls monotonically — the defensive ladder now works — and the bout
+still gets shorter, because **the tier ladder in the resolution chapters is
+offence-only**:
+
+- `FORCE.tierHook` spans **0.22 → 1.05** and `FORCE.tierStraight`
+  **0.50 → 1.05** across T0-T5, and 01's `hipRotationMult` adds another
+  0.50 → 1.10.
+- Nothing on the durability side is keyed on tier at all. `ko.chinSlope`
+  (0.02 logit per point) reads the `chin` **attribute**, which scaling skills
+  does not touch; `kBrace` reads the `neck` attribute; `alpha50` and
+  `alphaScale` are flat. In a controlled ladder the defender's chin is identical
+  at T0 and T5 while the attacker's hook carries 4.8x the force.
+
+So at equal attributes a higher tier is strictly more dangerous and exactly as
+fragile, and a ~1.4x force edge beats a ~1.3x accuracy reduction. Knockdowns per
+*landed* significant strike are 0.8 % at T3 and 2.3 % at T5, against chapter
+05's own ~1.1 per 100 head significant strikes.
+
+**Left for Phase 9** (chapter 05 / chapter 01 calibration, not AI):
+
+- a tier or skill term on the durability side — the obvious candidates are
+  `ko.chinSlope` (`[E]`, bounds 0-0.1, currently 0.02), a tier term in `kBrace`,
+  or capping the top of `FORCE.tierHook`;
+- or a re-fit of `dmg.rawScale` against a *high-volume* archetype rather than
+  `arch.regional_pro_allrounder`, whose SLpM of 1.4-1.6 is less than half the
+  3.9 target (the C-9 pace-controller item already open from Phase 4). The
+  duration ladder is dominated by that: `arch.thai_striker` at 5.5 SLpM finishes
+  in 2.6 minutes and `arch.champion_complete` at 3.1 in 7 minutes, while the
+  starved T2/T3 archetypes run 8-13 minutes at the same tier gap.
+
+### Also measured, also left
+
+- **`targetState.braced` is a live trade-off.** The conservative reading shipped
+  — braced only when the read produced *no* reactive answer that fitted the
+  window — holds the headline batch at 11.3 min / 0.38 KD per 15 min / 55 %
+  finishes, i.e. on the Phase 4 numbers. The broader reading (braced on any read
+  while not mid-punch) measures 12.8 min / 0.21 / 35 % finishes: it trades the
+  duration and knockdown targets for a finish share much closer to 09's ~32 %
+  KO-TKO / ~49 % decision. Which one is right is a calibration decision to take
+  together with `dmg.rawScale`, not separately from it.
+- **Mirror symmetry, at scale.** Pooled over 1,000 seeded mirror bouts across
+  five archetypes the lower id takes **47.7 %** of the decisive ones (460 of
+  965, sd 1.6 pp) — 1.4 sd from even, so no residual bias is detectable above
+  the noise, against the 70/30 it replaced. A 300-bout sample reads anywhere
+  between 43 % and 53 %, which is why `tests/tiers.test.ts` pools and bands for
+  its own sample size rather than asserting ±5 pp on 60 bouts per archetype.
+  Three tie-breaks remain that all favour the *lower* id and are worth revisiting
+  if a bias ever reappears: `(subMs, actorId, seq)` in P4, `perceived >= 0 ? 0 : 1`
+  in `tenPointScore`, and the incumbent-wins tie in `contestInflight`.
+- **Takedown accuracy is ~70-76 %** against a 38 % target — the Phase 4 item is
+  unchanged in kind. Contested edges that are now beaten to the position appear
+  as `stuffed` with `reason: 'contested'`, so the denominator is honest; the
+  completion path itself still overshoots.
+- **`beh.box.square_stance`'s "P(hit lands on chin/jaw) +0.15" and "takedown
+  vulnerability +20 %"** are not wired: the first needs 02's sub-location
+  weights to take a defender-side modifier, the second needs 03's takedown
+  defence to. Both are one-line hooks in chapters Phase 5 did not open.
