@@ -31,7 +31,7 @@ import {
 } from '../src/sim/fighter';
 import { resolveSubmissionFamily } from '../src/sim/submissions/catalogue';
 import { buildWorld } from '../src/sim/core/build';
-import { DRAWS_PER_DECIDE, type DecisionContext } from '../src/sim/core/policy';
+import { DRAWS_PER_DECIDE, DRAWS_PER_MOVE, type DecisionContext } from '../src/sim/core/policy';
 import type { World, FighterWorldState } from '../src/sim/core/world';
 import type { ObservedFighter, ObservedState } from '../src/sim/core/perception';
 import { MmaPolicy } from '../src/sim/ai/policy';
@@ -616,15 +616,23 @@ describe('09 §2.7 the draw schedule is unchanged by preferences', () => {
     expect(counts[0]).toBe(counts[1]);
   });
 
-  it('a whole bout consumes the same number of draws either way', () => {
-    // The draw *schedule* is fixed per tick, so two bouts of the same length
-    // cost the same stream; a bout that ends earlier because the preferences
-    // changed the fight costs fewer ticks, which is the schedule working, not
-    // breaking. The per-tick assertion above is the strict one.
+  it('a whole bout pays the same fixed per-tick floor either way', () => {
+    // 09 §2.7 fixes the draws per tick (P3 decide + P5 steering, always taken)
+    // and a fixed layout *per contact*. Preferences legitimately change which
+    // strikes and edges resolve, so two bouts may differ in contact draws; what
+    // must hold is that neither bout ever skips the per-tick floor, which is
+    // what keeps the stream position a pure function of state. The per-tick
+    // assertion above is the strict one.
+    //
+    // (An earlier version asserted equal draws-per-tick across the two bouts.
+    // That only held while strikes could resolve from any distance, which made
+    // both variants throw the same out-of-range kicks on the same ticks.)
+    const floorPerTick = 2 * (DRAWS_PER_DECIDE + DRAWS_PER_MOVE);
     for (let i = 0; i < 4; i++) {
       const a = simulate(config(`style-stream-${i}`, [LOUD, FOE]));
       const b = simulate(config(`style-stream-${i}`, [QUIET, FOE]));
-      expect(a.rngDraws / Math.max(1, a.ticks)).toBeCloseTo(b.rngDraws / Math.max(1, b.ticks), 6);
+      expect(a.rngDraws).toBeGreaterThanOrEqual(floorPerTick * a.ticks);
+      expect(b.rngDraws).toBeGreaterThanOrEqual(floorPerTick * b.ticks);
     }
   });
 

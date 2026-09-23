@@ -32,7 +32,7 @@ export type {
 export {
   GEOM, BAND_BOUNDS, RANGE_FIT, BLADED, ANGLE, LEAD_FOOT, STANCE_MATCHUP, STANCE_FAMILIARITY,
   REACH, REACH_CLASS_SCALE, CAGE, CUTOFF, MOVEMENTS, FEET_CROSS_P, FEET_CROSS_MS,
-  reachProfile, bandLimits, bandFor, reachShellM, rangeFit, bladednessEffects, angleEffects,
+  reachProfile, bandLimits, bandFor, reachShellM, rangeFit, bandReachable, bladednessEffects, angleEffects,
   isOpenStance, leadFootBattle, stanceMatchupLogit, stanceRuleFor, stanceFamiliarity,
   familiarityPenalty, reachAccuracyLogit, cageZone, cageEffects, cutoffState,
 } from './range';

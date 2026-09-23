@@ -795,3 +795,38 @@ been mistaken for a regression.
   not — the Phase 4 item ("attempts are not converting") is untouched by this
   work. Preferences change which submission is attempted, not whether the finish
   path works.
+
+---
+
+## Phase 8 finding (sim correctness, surfaced by the animation work)
+
+**R-1 (fixed): strikes resolved from any distance.** Building the standing animator exposed that
+landed strikes were resolving at a 90th-percentile distance of 3.8 m and up to 4.6 m, when a jab's
+reach ends near 1.2 m. Chapter 02 §2.1.1 allows a technique one band outside its home band (with a
+-0.60 logit penalty) but states that at `range.out` "nothing lands without a step". Both the AI's
+candidate list (`rangeFit`) and the contact-time re-check (`bind.ts inRange`) treated bands as a
+symmetric ±1 window, and because `out` is the last band with no outer edge, every kick-band
+technique counted as "one band out" at any distance in the cage.
+
+Fix: one shared predicate, `bandReachable()` in `src/sim/striking/range.ts`, used by both paths, which
+excludes `out`. Landed strikes now resolve at a maximum of 1.48 m (median 0.57 m).
+`SIM_ENGINE_VERSION` bumped 4.0.0 -> 4.1.0, so any bout recorded before the fix reports an
+engine-version mismatch instead of silently replaying differently.
+
+**Effect on calibration (carried to Phase 9).** A share of what the sim counted as landed strikes and
+damage came from those impossible kicks, so the headline batch moved away from target:
+
+| Metric | before R-1 | after R-1 | target |
+| --- | --- | --- | --- |
+| Mean duration | 11.7 min | 13.7 min | 10.6 |
+| SLpM | 1.52 | 1.12 | 3.9 |
+| Knockdowns /15 min | 0.37 | 0.12 | 0.30 |
+| Method mix | ~50% finishes | 14 finishes / 26 decisions-draws of 40 | ~51% finishes |
+
+The physics is now right; output volume was already the weakest calibration number and is tied to the
+AI's bang-bang pace controller (C-9). Phase 9 owns it.
+
+A test in `tests/style.test.ts` had asserted equal draws-per-tick for two bouts with different style
+preferences; it only held because both variants threw the same out-of-range kicks on the same ticks.
+It now asserts what the 09 §2.7 schedule actually guarantees (the per-tick floor); the strict per-tick
+equality test beside it is unchanged.

@@ -172,11 +172,28 @@ export interface RangeFit {
  * comfort term is sourced (medallists' timing is distance-invariant, novices'
  * is not), the magnitude is ours.
  */
+/**
+ * Can this technique connect from this band at all? 02 §2.1.1: a technique may
+ * be thrown in its home band or one band either side (with a range-fit penalty),
+ * but never from `range.out` — "nothing lands without a step". `out` is the
+ * last band and has no outer edge, so without the explicit exclusion any
+ * kick-band technique would count as "one band out" at any distance in the
+ * cage. This is the single predicate the AI's candidate list and the contact
+ * re-check both use, so they cannot disagree about what is in range.
+ */
+export function bandReachable(spec: TechniqueSpec, band: RangeBand): boolean {
+  if (band === 'out') return false;
+  return bandDistance(band, spec.band) <= 1;
+}
+
 export function rangeFit(spec: TechniqueSpec, d: number, profile: ReachProfile, skill = 50): RangeFit {
   const band = bandFor(d, profile);
   const home = spec.band;
   const comfort = (1 - clamp01(skill / 100)) * RANGE_FIT.comfortK;
   const bandsOut = bandDistance(band, home);
+  if (!bandReachable(spec, band)) {
+    return { available: false, logit: RANGE_FIT.wrongBandLogit - comfort, forceMult: 0, bandsOut };
+  }
 
   if (bandsOut === 0) {
     // Inside the home band: only the outer 10 cm costs anything.

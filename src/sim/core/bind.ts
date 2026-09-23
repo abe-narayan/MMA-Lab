@@ -30,7 +30,7 @@ import type { PositionId, SubmissionId, TechniqueId } from './ids';
 import { refereeRuntime, judgeRuntime, matchClock } from './build';
 
 import {
-  BAND_ORDER, DRAWS_PER_STRIKE, arrivalLogit, bandFor, baseDefenceSuccess, defence, guard,
+  BAND_ORDER, DRAWS_PER_STRIKE, arrivalLogit, bandFor, bandReachable, baseDefenceSuccess, defence, guard,
   guardLogit, hasDefence, hasTechnique, passiveBlockP, reachProfile, resolveStrike, skillGapK,
   strikeClasses, technique, TECHNIQUES, totalMs as techniqueTotalMs,
   type ForceContext, type GuardId, type GuardSpec, type ImpactPosture, type RangeBand,
@@ -243,12 +243,9 @@ function refCues(obs: DamageObservables): RefFighterInput['obs'] {
 }
 
 /** True when `d` sits in a home band of the technique, or one band out (§2.1.1). */
+/** Contact-time range re-check (09 §2.3 rule 3); the same predicate the AI selects with. */
 function inRange(spec: TechniqueSpec, band: RangeBand): boolean {
-  const here = BAND_ORDER.indexOf(band);
-  for (const home of spec.band) {
-    if (Math.abs(BAND_ORDER.indexOf(home) - here) <= 1) return true;
-  }
-  return false;
+  return bandReachable(spec, band);
 }
 
 // ---------------------------------------------------------------------------
