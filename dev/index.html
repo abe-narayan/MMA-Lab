@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Bout Lab dev pages</title>
+<style>body{font:14px system-ui;background:#111;color:#ddd;padding:24px}a{color:#e8b24a}</style></head>
+<body>
+<h1>Phase 8 dev pages</h1>
+<p>Isolated harnesses for each presentation module. Capture with
+<code>node scripts/dev/heavy.mjs node scripts/dev/shot.mjs http://localhost:5180/dev/&lt;page&gt;.html out.png</code>.</p>
+<ul id="list"></ul>
+<script type="module">
+  const pages = ['stage','arena','character','anim','grapple','camera','assets'];
+  document.getElementById('list').innerHTML = pages.map(p => `<li><a href="./${p}.html">${p}</a></li>`).join('');
+</script>
+</body></html>
