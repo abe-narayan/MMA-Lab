@@ -653,10 +653,21 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       const max = 4;
       f.vx = clamp(d.moveX, -max, max);
       f.vz = clamp(d.moveZ, -max, max);
-      if (d.moveX !== 0 || d.moveZ !== 0) f.facing = Math.atan2(d.moveX, d.moveZ);
     }
 
     const target = targetOf(w, f, d);
+    // A fighter faces his opponent while moving in any direction — retreating,
+    // circling or cutting off the cage — and faces his direction of travel only
+    // when running away (street flight). Facing used to follow the movement
+    // heading, which recorded every retreating fighter as turned around and
+    // corrupted the two consumers that read it: the multi-opponent "is he
+    // facing me" threat test and the angle logic's lateral offset.
+    const fleeing = /flee|flight/.test(d.intentTag);
+    if (target && !fleeing) {
+      f.facing = Math.atan2(target.x - f.x, target.z - f.z);
+    } else if (d.moveX !== 0 || d.moveZ !== 0) {
+      f.facing = Math.atan2(d.moveX, d.moveZ);
+    }
     if (d.kind === 'wait' || d.kind === 'move' || d.kind === 'defend' || d.what === null) {
       f.action = null;
       f.actionResult = 'none';
@@ -1192,14 +1203,23 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       syncEngagement(w, actor);
       syncEngagement(w, target);
     } else {
-      // Opening a new engagement: the pair is pulled together so I4 holds.
+      // Opening a new engagement: the pair is pulled together so I4 holds —
+      // along the line they approached each other on. (It used to lay every
+      // new pair along the world X axis, so a clinch or takedown teleported
+      // both bodies sideways and flipped the interaction root by up to 90°.)
       const mx = (actor.x + target.x) / 2;
       const mz = (actor.z + target.z) / 2;
+      let ux = target.x - actor.x;
+      let uz = target.z - actor.z;
+      const len = Math.hypot(ux, uz);
+      if (len > 1e-6) { ux /= len; uz /= len; } else { ux = Math.sin(actor.facing); uz = Math.cos(actor.facing); }
       const gap = 0.15;
-      actor.x = mx - gap / 2;
-      actor.z = mz;
-      target.x = mx + gap / 2;
-      target.z = mz;
+      actor.x = mx - ux * gap / 2;
+      actor.z = mz - uz * gap / 2;
+      target.x = mx + ux * gap / 2;
+      target.z = mz + uz * gap / 2;
+      actor.facing = Math.atan2(ux, uz);
+      target.facing = Math.atan2(-ux, -uz);
       actor.vx = actor.vz = target.vx = target.vz = 0;
       const e = w.engagements.join(
         outcome.swap ? target.id : actor.id, outcome.swap ? actor.id : target.id, to, w.tick,
