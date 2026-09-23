@@ -12,8 +12,8 @@ be rolled back independently.
 | 2 Discipline research → design | 16 files in `research/`, `docs/DESIGN.md` + 9 chapters in `docs/design/` | **Done** (review pass in progress) | `1123ed5` … `b09241a` |
 | 3 Core sim architecture | `src/sim/**` | **Done** — six modules, tick loop, replay v4, public API | `18ba5e7` … `ef383c0` |
 | 4 Strategy & game plans | `src/sim/ai/**` | **Done** — scouting, plans, utility AI, adaptation, corners, multi-opponent | `bffe627` … `f0f2371` |
-| 5 Skill tiers | tier catalogue → behaviour/animation | Not started (design complete in ch. 01 §3) | |
-| 6 Fighter creator | `src/app/creator/**` | Not started (schema complete in ch. 01) | |
+| 5 Skill tiers | tier catalogue → behaviour/animation | **Done** — 196 rules wired into decisions, execution and defence | `b8215e6` |
+| 6 Fighter creator | `src/app/**` | **Done** — database, 7-section editor, live derived panel, import/export | `06c47ac` … `d26d5a3` |
 | 7 Match modes & features | rulesets, arenas, tournaments, commentary, replay | Not started (spec in ch. 06/09) | |
 | 8 Graphics & animation | `src/presentation/**`, `docs/ASSETS.md` | Not started (spec in ch. 08) | |
 | 9 Calibration & validation | `docs/CALIBRATION.md` | Not started (129-row target table in ch. 09 §7) | |
@@ -76,6 +76,43 @@ be rolled back independently.
 Duration, method mix and knockdown rate are on target. Output volume, takedown accuracy and
 submission conversion are not, and are carried into Phase 9 with evidence in
 `docs/design/PHASE4_FINDINGS.md`.
+
+## Phase 5 — summary
+- The 196-rule tier behaviour catalogue was dead data: `rulesFor()` was never called. It now gates
+  repertoire (a T0 has no teep, no sprawl, no guard pass), drives execution quality and the novice
+  tells, and every applied rule id is exposed on `FighterIntent` for the debug overlay and Phase 8.
+- Two defects that only a running bout could reveal:
+  - **Identical fighters won 70/30 by index.** The "one contested edge per engagement" slot was
+    claimed first-come, and P3 iterates ascending id, so fighter 0 took it every tick he wanted it
+    (448 vs 212 takedowns; striking was dead even). The slot is now contested by the intra-tick
+    commit offset. 400 mirror bouts: 51%; 1,000 bouts: 47.7%.
+  - **Chapter 02's entire reactive defence layer was dead.** Every candidate carried `def.neutral`
+    rather than a catalogue id, so the defence resolver returned null on *every strike ever
+    simulated*. Coverage now scales with tier: T0 5%, T3 43%, T5 72%, and connect rate falls
+    monotonically from 69% (T0) to 36% (T5).
+- Win matrix is now monotone in both directions; a brand-new fighter beats a regional pro 0–3% of
+  the time (was 30%).
+
+## Phase 6 — summary
+- Fighter database + 7-section editor (Body, Appearance, Physical, Disciplines, Record, Mental,
+  Style), 287 inputs, with per-field helper text explaining what each stat drives in the sim.
+- Live derived panel shows per-discipline tiers and `deriveRuntime`'s arithmetic verbatim, so the
+  numbers the simulation will actually use are visible while editing.
+- Validation with field-level paths; persistence that survives storage failure and quota
+  exhaustion; lossless JSON import/export preserving unknown fields.
+- Verified in a real browser, not just compiled: 15 archetypes listed, opening one loads the full
+  editor, no console errors.
+
+## Known gaps carried forward
+- **Style preferences do not affect a bout** (F-3). Favourite techniques, combos, go-to submissions
+  and takedown preferences are authored, validated and stored, but no AI code reads them. Phase 7.
+- **T2 and T3 are not separated** in the win matrix (~37-43% both directions). The tier *logic* is
+  monotone; these two archetypes are close in attributes. Phase 9.
+- **Nothing on the durability side is tier-keyed** while `tierForceMult` spans 0.22–1.05, so an
+  elite fighter hits much harder but is no harder to hurt. Documented with a controlled ladder in
+  `docs/design/PHASE4_FINDINGS.md`; the duration-ordering test is skipped with a pointer rather
+  than weakened. Phase 9.
+- Output volume (SLpM), takedown accuracy and submission conversion remain off target — Phase 9.
 
 ## Open decisions
 1. ~~**Engine path**~~ — approved 2026-09-22: stay on the upgraded web stack.
