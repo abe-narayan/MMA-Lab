@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset viewer: mocap, textures, HDRIs</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0d11; color: #ddd; font: 12px/1.4 system-ui, sans-serif; overflow: hidden; }
+    #view { position: absolute; inset: 0; }
+    #panel { position: absolute; top: 8px; left: 8px; background: rgba(10, 12, 16, 0.88); border: 1px solid #2a2f38;
+      border-radius: 6px; padding: 8px 10px; width: 320px; max-height: calc(100% - 16px); overflow: auto; }
+    #panel.hidden { display: none; }
+    #panel h1 { font-size: 13px; margin: 0 0 6px; }
+    #panel label { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+    #panel select, #panel button { font: inherit; background: #1b1f27; color: #ddd; border: 1px solid #333a46; border-radius: 3px; padding: 2px 4px; max-width: 230px; }
+    #panel input[type=range] { flex: 1; }
+    #timeline { width: 100%; height: 34px; display: block; margin-top: 4px; background: #12151b; border-radius: 3px; }
+    #info { font: 11px/1.35 ui-monospace, monospace; white-space: pre-wrap; margin-top: 6px; color: #9fb3c8; }
+    #title { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); font: 600 20px system-ui; color: #fff;
+      background: rgba(0,0,0,0.55); padding: 4px 14px; border-radius: 4px; pointer-events: none; white-space: nowrap; }
+    .tex-label { position: absolute; font: 600 13px/1.2 system-ui, sans-serif; color: #f0f0f0; background: rgba(0,0,0,0.55);
+      padding: 3px 7px; border-radius: 3px; pointer-events: none; transform: translate(-50%, 0); }
+  </style>
+</head>
+<body>
+  <div id="view"></div>
+  <div id="panel">
+    <h1>Asset viewer</h1>
+    <label>View <select id="viewSel"><option value="motion">mocap clip</option><option value="textures">textures × HDRI</option></select></label>
+    <div id="motionUi">
+      <label>Clip <select id="clip"></select></label>
+      <label>Time <input id="time" type="range" min="0" max="1" step="0.001" value="0"><button id="play" type="button">▶</button></label>
+      <label>Speed <select id="speed"><option>0.1</option><option>0.25</option><option>0.5</option><option selected>1</option></select>
+        <label><input id="mirror" type="checkbox"> mirror</label>
+        <label><input id="inplace" type="checkbox"> in place</label></label>
+      <label><input id="onion" type="checkbox"> onion skin (start / contact / end)</label>
+      <label>Camera <select id="cam"><option>side</option><option>iso</option><option>front</option><option>back</option><option>top</option><option>other-side</option></select></label>
+      <canvas id="timeline" width="600" height="68"></canvas>
+    </div>
+    <div id="texUi" hidden>
+      <label>HDRI <select id="hdri"><option>arena</option><option>street</option><option>gym</option></select></label>
+      <label>Exposure <input id="exposure" type="range" min="0.1" max="3" step="0.05" value="1"></label>
+    </div>
+    <div id="info"></div>
+  </div>
+  <div id="title"></div>
+  <script type="module" src="./assets.ts"></script>
+</body>
+</html>

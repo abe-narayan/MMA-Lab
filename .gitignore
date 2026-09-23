@@ -31,3 +31,6 @@ Thumbs.db
 *.log
 npm-debug.log*
 docs/DESIGN_FULL.md
+
+# raw third-party downloads for scripts/assets/* (only converted outputs are committed)
+.cache/

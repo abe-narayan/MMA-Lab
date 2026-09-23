@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stage pipeline test</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #050608; color: #ddd; font: 12px/1.4 system-ui, sans-serif; overflow: hidden; }
+    #view { position: absolute; inset: 0; }
+    #panel { position: absolute; top: 8px; left: 8px; background: rgba(10, 12, 16, 0.82); border: 1px solid #2a2f38;
+      border-radius: 6px; padding: 8px 10px; width: 230px; max-height: calc(100% - 16px); overflow: auto; }
+    #panel.hidden { display: none; }
+    #panel h1 { font-size: 13px; margin: 0 0 6px; }
+    #panel label { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+    #panel select, #panel button { font: inherit; background: #1b1f27; color: #ddd; border: 1px solid #333a46; border-radius: 3px; padding: 2px 6px; }
+    #panel button { margin: 4px 4px 0 0; }
+    #stats { font: 11px/1.35 ui-monospace, monospace; white-space: pre; margin-top: 6px; color: #9fb3c8; }
+  </style>
+</head>
+<body>
+  <div id="view"></div>
+  <div id="panel">
+    <h1>Stage pipeline</h1>
+    <label>Backend <select id="backend"><option value="auto">auto</option><option value="webgpu">webgpu</option><option value="webgl2">webgl2</option></select></label>
+    <label>Preset <select id="quality"><option>low</option><option>medium</option><option selected>high</option><option>ultra</option></select></label>
+    <label>Tone map <select id="tm"><option value="aces">ACES</option><option value="agx">AgX</option><option value="neutral">Neutral</option></select></label>
+    <label>AA <select id="aa"><option value="">preset</option><option>none</option><option>fxaa</option><option>smaa</option><option>traa</option><option>taau</option></select></label>
+    <div id="toggles"></div>
+    <button id="cut" type="button">Camera cut</button>
+    <button id="bench" type="button">Benchmark passes</button>
+    <div id="stats"></div>
+  </div>
+  <script type="module" src="./stage.ts"></script>
+</body>
+</html>

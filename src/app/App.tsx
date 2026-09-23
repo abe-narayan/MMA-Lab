@@ -134,7 +134,11 @@ export function bindStore(): FighterStoreApi {
 }
 
 export function App(): JSX.Element {
-  const [tab, setTab] = useState<TabId>('match');
+  // `?watchDemo=1` opens straight onto the Watch screen with the demonstration
+  // bout: the QA shortcut every Phase 8 capture script uses.
+  const [tab, setTab] = useState<TabId>(() => (
+    typeof location !== 'undefined' && new URLSearchParams(location.search).has('watchDemo') ? 'watch' : 'match'
+  ));
   const [opponents, setOpponents] = useState(1);
   const [boutIndex, setBoutIndex] = useState(1);
   const [theme, setTheme] = useState<ThemeChoice>(readStoredTheme);
