@@ -38,6 +38,9 @@ import {
 import { physicalRules } from './plans/physical';
 import { stanceRules } from './plans/stance';
 import { styleRules } from './plans/style';
+import {
+  phaseTargetOf, planShareOf, preferencesFor, rangeTargetOf, type StylePreferences,
+} from './preferences';
 
 // ---------------------------------------------------------------------------
 // The plan
@@ -113,6 +116,12 @@ export interface GamePlan {
   longGuard: boolean;
   weightBack: boolean;
   stanceSwitching: boolean;
+  /**
+   * 01 §2.6 `goToSubmissions`, expanded through chapter 04's families and
+   * filtered by what this fighter's tier and sub-skills can actually attempt.
+   * Strongest preference first; empty when the author named none.
+   */
+  submissionTargets: string[];
   /** = iqTier07 (§2.5.8 feature gating). */
   quality: 0 | 1 | 2 | 3 | 4 | 5;
   /** The corner's version, in the order it would be said. */
@@ -301,7 +310,12 @@ export function generateGamePlan(input: PlanInput): GamePlan | null {
   const fallbackMode = iqTier >= 2 ? pickFallback(primaryMode, available) : null;
 
   // ---- step 5: action weights --------------------------------------------
+  // 01 §2.6's authored preferences come first so that the scouted rules of
+  // §2.5.4-§2.5.6, which know something about *this* opponent, override the
+  // author on the policy fields. On the weights they simply multiply.
+  const prefs = preferencesFor(self);
   const hits: PlanRuleHit[] = [
+    ...preferenceRules(ctx, prefs),
     ...physicalRules(ctx),
     ...styleRules(ctx),
     ...stanceRules(ctx),
@@ -328,11 +342,22 @@ export function generateGamePlan(input: PlanInput): GamePlan | null {
   const triggers = buildTriggers(ctx).slice(0, MAX_TRIGGERS_BY_TIER[iqTier]);
 
   // ---- weapons ------------------------------------------------------------
+  // §2.5.3 step 5 produced the weights; the weapon *list* is what the corner
+  // would actually name, and a camp names the fighter's own shots before it
+  // names whatever the discipline means happened to rank highest. So the
+  // authored preferences seed the list and the weight ranking fills the rest
+  // (F-3). Ruleset-forbidden families are already 0 and drop out here.
+  // A preferred family still has to clear `WEAPON_THRESHOLD` after the matchup
+  // rules have had their say: if S-1 has just told him not to kick the
+  // wrestler, the corner does not then call the kick one of his weapons.
+  const seeded = prefs.weaponOrder
+    .filter((f) => WEAPON_FAMILIES.includes(f) && weights[f] > WEAPON_THRESHOLD);
   const ranked = WEAPON_FAMILIES
-    .filter((f) => weights[f] > WEAPON_THRESHOLD)
+    .filter((f) => weights[f] > WEAPON_THRESHOLD && !seeded.includes(f))
     .sort((a, b) => (weights[b] - weights[a]) || (a < b ? -1 : 1));
-  const primaryWeapons = ranked.slice(0, 3);
-  const secondaryWeapons = ranked.slice(3, 6);
+  const ordered = [...seeded, ...ranked];
+  const primaryWeapons = ordered.slice(0, 3);
+  const secondaryWeapons = ordered.slice(3, 6);
   const avoidList = ACTION_FAMILIES
     .filter((f) => weights[f] > 0 && weights[f] <= AVOID_THRESHOLD)
     .sort((a, b) => (weights[a] - weights[b]) || (a < b ? -1 : 1));
@@ -374,6 +399,7 @@ export function generateGamePlan(input: PlanInput): GamePlan | null {
     longGuard: policy.longGuard ?? false,
     weightBack: policy.weightBack ?? false,
     stanceSwitching: policy.stanceSwitching ?? false,
+    submissionTargets: facts.submissionsAllowed ? [...prefs.submissionTargets] : [],
     quality: iqTier,
     planLines: [],
     rationale,
@@ -385,6 +411,112 @@ export function generateGamePlan(input: PlanInput): GamePlan | null {
   applyTierGating(plan, iqTier);
 
   return override ? applyOverride(plan, override) : plan;
+}
+
+// ---------------------------------------------------------------------------
+// Authored style preferences (01 §2.6 -> §2.5.3 step 5)
+// ---------------------------------------------------------------------------
+
+/** How a `TakedownStyle.setup` shows up in the weights. `[E]`, from 01 §2.6. */
+const TD_SETUP_WEIGHTS: Readonly<Record<string, Partial<Record<ActionFamily, number>>>> = {
+  naked: { nakedShot: 1.15, shootOffStrikes: 0.95 },
+  offSingleStrike: { shootOffStrikes: 1.15, nakedShot: 0.85 },
+  offCombination: { shootOffStrikes: 1.15, nakedShot: 0.85 },
+  offFeint: { shootOffStrikes: 1.12, feint: 1.10, nakedShot: 0.85 },
+  reactive: { counterWindow: 1.10, sprawl: 1.10, nakedShot: 0.90 },
+  offClinch: { clinchEntry: 1.15, trip: 1.10, bodylockTd: 1.10 },
+};
+
+/**
+ * The rules 01 §2.6's Style tab is worth. Everything here is authored rather
+ * than scouted, which is why it is pushed onto the hit list *first*: on the
+ * weights it multiplies with everything else, and on the policy fields the
+ * later (opponent-aware) rules of §2.5.4-§2.5.6 win, which is the right
+ * precedence — the camp adapts the author's preference to the man in front of
+ * them, it does not ignore him.
+ *
+ * Exported for `tests/style.test.ts` and the game-plan panel.
+ */
+export function preferenceRules(ctx: PlanContext, prefs: StylePreferences): PlanRuleHit[] {
+  if (prefs.empty) return [];
+  const out: PlanRuleHit[] = [];
+
+  // The family channel carries a quarter of the opinion; the rest is applied
+  // per technique id by `utility.scoreAction` (`w_pref`), which is the only
+  // granularity that can tell a guillotine from an armbar. The two submission
+  // families are left out entirely for exactly that reason.
+  const weights: Partial<Record<ActionFamily, number>> = {};
+  for (const [family, w] of prefs.families) {
+    if (family === 'submission' || family === 'bottomSubmission') continue;
+    weights[family] = planShareOf(w);
+  }
+  if (Object.keys(weights).length > 0) {
+    const named = prefs.weaponOrder.slice(0, 3).join(', ');
+    out.push({
+      id: 'PR-1', kind: 'style',
+      label: named.length > 0
+        ? `These are his shots: ${named}. Fight the fight he trained for.`
+        : 'Fight the fight he trained for.',
+      weights, tag: '[S: 01 §2.6 style preferences]',
+    });
+  }
+
+  const setup = prefs.takedownSetup;
+  if (setup !== null && ctx.rules.takedownsAllowed && TD_SETUP_WEIGHTS[setup]) {
+    out.push({
+      id: 'PR-2', kind: 'style',
+      label: `Entries come off ${setup === 'naked' ? 'nothing but speed' : setup}.`,
+      weights: TD_SETUP_WEIGHTS[setup], tag: '[S: 01 §2.6 takedownPreferences.setup]',
+    });
+  }
+
+  // `preferredRange` is where the author says this fighter wants the fight. It
+  // sets the plan's range and phase targets unless a matchup rule later says
+  // otherwise (`mergePolicies` takes the last writer).
+  const rangeTarget = rangeTargetOf(prefs.preferredRange);
+  const phase = phaseTargetOf(prefs.preferredRange);
+  const phaseAllowed = phase === null
+    || (phase === 'clinch' ? ctx.rules.clinchAllowed : ctx.rules.groundFightingAllowed);
+  out.push({
+    id: 'PR-3', kind: 'style',
+    label: `He wants it at ${prefs.preferredRange} range.`,
+    weights: {},
+    policy: {
+      rangeTarget,
+      phaseTarget: phase !== null && phaseAllowed ? phase : undefined,
+    },
+    tag: '[S: 01 §2.6 preferredRange]',
+  });
+
+  // `takedownPreferences.cageBias`: a fighter who finishes on the fence cuts
+  // the cage to get there; one who does not is happy in the centre.
+  if (prefs.cageBias !== null && ctx.rules.takedownsAllowed) {
+    if (prefs.cageBias >= 0.65) {
+      out.push({
+        id: 'PR-4', kind: 'style',
+        label: 'He finishes on the fence: cut the cage to it.',
+        weights: { cagePin: 1.2 }, policy: { cagePolicy: 'cut' },
+        tag: '[S: 01 §2.6 takedownPreferences.cageBias]',
+      });
+    } else if (prefs.cageBias <= 0.35) {
+      out.push({
+        id: 'PR-4', kind: 'style',
+        label: 'He does not need the fence.',
+        weights: { cagePin: 0.85 }, policy: { cagePolicy: 'centre' },
+        tag: '[S: 01 §2.6 takedownPreferences.cageBias]',
+      });
+    }
+  }
+
+  if (prefs.submissionTargets.length > 0 && ctx.rules.submissionsAllowed) {
+    out.push({
+      id: 'PR-5', kind: 'style',
+      label: `His finishes: ${prefs.submissionTargets.slice(0, 3).join(', ')}.`,
+      weights: {}, tag: '[S: 01 §2.6 goToSubmissions]',
+    });
+  }
+
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -927,6 +1059,7 @@ function skeletonPlan(ruleset: Ruleset, rounds: number, iqTier: IqTier07): GameP
     longGuard: false,
     weightBack: false,
     stanceSwitching: false,
+    submissionTargets: [],
     quality: iqTier,
     planLines: [],
     rationale: [],

@@ -161,16 +161,186 @@ export const SUB_SKILLS: Readonly<Record<CoreDisciplineId, readonly string[]>> =
 
 export type CompetitionLevel = 'none' | 'local' | 'national' | 'international';
 
+/**
+ * Best result achieved in the discipline's own competition circuit (01 §8.2).
+ * A placing is evidence the years and the sub-skills may not carry on their
+ * own: an Olympic medallist's wrestling is not "eleven years of training", it
+ * is eleven years that survived the only test that sorts the top 0.1 %.
+ */
+export type PlacingId =
+  | 'none' | 'localPodium' | 'nationalPodium' | 'nationalTitle'
+  | 'continentalMedal' | 'worldMedal' | 'olympicMedal';
+
+export const PLACING_IDS = [
+  'none', 'localPodium', 'nationalPodium', 'nationalTitle',
+  'continentalMedal', 'worldMedal', 'olympicMedal',
+] as const;
+
 export interface DisciplineCompetition {
   bouts: number;
   wins: number;
   level: CompetitionLevel;
+
+  // --- 01 §8.2 additions (all optional, all default to "not recorded") ----
+  losses?: number;
+  draws?: number;
+  /** Bouts contested as an amateur in this art, of the `bouts` total. */
+  amateurBouts?: number;
+  amateurWins?: number;
+  /** Bouts contested professionally in this art, of the `bouts` total. */
+  proBouts?: number;
+  proWins?: number;
+  /** Best placing achieved; raises the art's prior on its own. */
+  bestPlacing?: PlacingId;
+  /** Medals or podiums collected at `level`. Diminishing, capped. */
+  medals?: number;
 }
 
 /**
- * One discipline's stored experience (01 §2.3). `years` is the chapter's
- * `yearsTrained`; `sub` is the chapter's `native` map. Nothing derived is
- * stored here — `effective`, `mean` and `tier` live on the runtime.
+ * The grading systems the modelled arts actually use (01 §8.1). A grade is not
+ * a skill — it is an *independent observation* of one, awarded by somebody who
+ * watched the fighter train for years. It therefore raises the art's prior
+ * rather than replacing the sub-skills the user authored.
+ */
+export type GradeSystem =
+  | 'none' | 'bjjBelt' | 'judoKyuDan' | 'wrestlingCredential'
+  | 'boxingAmateur' | 'thaiRecord' | 'karateDan' | 'taekwondoDan' | 'samboRank';
+
+export const GRADE_SYSTEMS = [
+  'none', 'bjjBelt', 'judoKyuDan', 'wrestlingCredential',
+  'boxingAmateur', 'thaiRecord', 'karateDan', 'taekwondoDan', 'samboRank',
+] as const;
+
+export interface DisciplineGrade {
+  system: GradeSystem;
+  /** Rank id inside the system; see {@link GRADE_RANKS}. */
+  rank: string;
+  /** BJJ stripes, 0-4. Ignored by the other systems. */
+  stripes?: number;
+}
+
+/** The ranks each system admits, lowest first. */
+export const GRADE_RANKS: Readonly<Record<GradeSystem, readonly string[]>> = Object.freeze({
+  none: ['none.unranked'],
+  bjjBelt: ['bjj.white', 'bjj.blue', 'bjj.purple', 'bjj.brown', 'bjj.black', 'bjj.black2', 'bjj.coral'],
+  judoKyuDan: ['judo.kyu5', 'judo.kyu3', 'judo.kyu1', 'judo.shodan', 'judo.nidan', 'judo.sandan', 'judo.yondan'],
+  wrestlingCredential: ['wr.club', 'wr.highSchool', 'wr.statePlacer', 'wr.ncaaD2', 'wr.ncaaD1', 'wr.allAmerican', 'wr.ncaaChampion', 'wr.worldTeam', 'wr.olympian'],
+  boxingAmateur: ['box.novice', 'box.open', 'box.regional', 'box.national', 'box.international', 'box.olympian'],
+  thaiRecord: ['mt.gymFighter', 'mt.provincial', 'mt.bangkokStadium', 'mt.stadiumChampion', 'mt.worldTitle'],
+  karateDan: ['kar.kyu', 'kar.shodan', 'kar.nidan', 'kar.sandan', 'kar.nationalSquad'],
+  taekwondoDan: ['tkd.kyu', 'tkd.il_dan', 'tkd.i_dan', 'tkd.sam_dan', 'tkd.nationalSquad'],
+  samboRank: ['sam.club', 'sam.candidateMaster', 'sam.master', 'sam.internationalMaster', 'sam.worldMedallist'],
+});
+
+/**
+ * Prior skill level each grade attests, on the 0-100 sub-skill scale
+ * (`CONV §3`). Calibrated against the tier bands rather than against time
+ * served: a BJJ black belt is a T4 grappler by definition of the band (70-90),
+ * an NCAA All-American is the same claim from a different sport, and a
+ * five-kyu judoka is a beginner however long he has held it. `[E]`, placed
+ * inside the `CONV §3` bands.
+ */
+export const GRADE_PRIORS: Readonly<Record<string, number>> = Object.freeze({
+  'none.unranked': 0,
+  'bjj.white': 12, 'bjj.blue': 33, 'bjj.purple': 50, 'bjj.brown': 64,
+  'bjj.black': 76, 'bjj.black2': 82, 'bjj.coral': 88,
+  'judo.kyu5': 12, 'judo.kyu3': 26, 'judo.kyu1': 38, 'judo.shodan': 54,
+  'judo.nidan': 64, 'judo.sandan': 72, 'judo.yondan': 78,
+  'wr.club': 15, 'wr.highSchool': 28, 'wr.statePlacer': 42, 'wr.ncaaD2': 54,
+  'wr.ncaaD1': 64, 'wr.allAmerican': 76, 'wr.ncaaChampion': 84, 'wr.worldTeam': 88, 'wr.olympian': 91,
+  'box.novice': 24, 'box.open': 40, 'box.regional': 52, 'box.national': 66,
+  'box.international': 78, 'box.olympian': 86,
+  'mt.gymFighter': 34, 'mt.provincial': 50, 'mt.bangkokStadium': 70,
+  'mt.stadiumChampion': 84, 'mt.worldTitle': 88,
+  'kar.kyu': 18, 'kar.shodan': 44, 'kar.nidan': 56, 'kar.sandan': 66, 'kar.nationalSquad': 78,
+  'tkd.kyu': 18, 'tkd.il_dan': 42, 'tkd.i_dan': 54, 'tkd.sam_dan': 64, 'tkd.nationalSquad': 78,
+  'sam.club': 20, 'sam.candidateMaster': 42, 'sam.master': 60,
+  'sam.internationalMaster': 74, 'sam.worldMedallist': 86,
+});
+
+/** Points each BJJ stripe adds to the belt's prior (four stripes per belt). */
+export const GRADE_STRIPE_POINTS = 2.5;
+
+/**
+ * A specialisation is the answer to "what does this fighter actually *do* in
+ * this art". It biases the art's effective sub-skills: the emphasised ones up,
+ * the traded ones down. Nobody is a leg-locker *and* a pressure passer to the
+ * same depth in the same number of mat hours, so the trade-off is part of the
+ * spec rather than an afterthought. `[E]`.
+ */
+export interface SpecialisationSpec {
+  id: string;
+  discipline: CoreDisciplineId;
+  label: string;
+  /** What this focus buys. */
+  emphasis: readonly string[];
+  /** What it quietly costs. */
+  tradeoff?: readonly string[];
+  note: string;
+}
+
+export const SPECIALISATIONS: readonly SpecialisationSpec[] = Object.freeze([
+  // boxing
+  { id: 'spec.box.inside', discipline: 'boxing', label: 'Inside fighting', emphasis: ['bodyWork', 'combinations', 'headMovement'], tradeoff: ['ringCraft'], note: 'Lives in the phone booth; gives up the outside game.' },
+  { id: 'spec.box.outside', discipline: 'boxing', label: 'Outside boxing', emphasis: ['jab', 'footwork', 'ringCraft'], tradeoff: ['bodyWork'], note: 'Long-range point boxing off the jab.' },
+  { id: 'spec.box.counter', discipline: 'boxing', label: 'Counter punching', emphasis: ['counters', 'headMovement', 'feints'], tradeoff: ['combinations'], note: 'Waits, reads, returns.' },
+  { id: 'spec.box.power', discipline: 'boxing', label: 'Power punching', emphasis: ['power', 'counters'], tradeoff: ['footwork', 'guard'], note: 'Loads every shot; leaves gaps doing it.' },
+  // muay thai
+  { id: 'spec.mt.clinch', discipline: 'muayThai', label: 'Clinch and knees', emphasis: ['clinch', 'knees', 'elbows'], tradeoff: ['teep'], note: 'Muay Khao: walks through the range to the plum.' },
+  { id: 'spec.mt.kicking', discipline: 'muayThai', label: 'Kicking game', emphasis: ['kicks', 'teep', 'checks'], tradeoff: ['hands'], note: 'Muay Tae: kick volume and the long guard.' },
+  { id: 'spec.mt.elbows', discipline: 'muayThai', label: 'Elbow specialist', emphasis: ['elbows', 'clinch'], tradeoff: ['kicks'], note: 'Cuts in the pocket.' },
+  // kickboxing
+  { id: 'spec.kb.lowKicks', discipline: 'kickboxing', label: 'Low-kick game', emphasis: ['lowKicks', 'checks'], tradeoff: ['spinning'], note: 'Dutch chaining into the leg.' },
+  { id: 'spec.kb.volume', discipline: 'kickboxing', label: 'Volume combinations', emphasis: ['combinations', 'punches', 'footwork'], tradeoff: ['defence'], note: 'Output over defence.' },
+  // karate
+  { id: 'spec.kar.blitz', discipline: 'karate', label: 'Blitz entries', emphasis: ['blitz', 'footwork', 'timing'], tradeoff: ['distanceControl'], note: 'Closes the gap in one explosive step.' },
+  { id: 'spec.kar.pointSniping', discipline: 'karate', label: 'Point sniping', emphasis: ['distanceControl', 'counters', 'timing'], tradeoff: ['blitz'], note: 'In, touch, out.' },
+  // taekwondo
+  { id: 'spec.tkd.headHunting', discipline: 'taekwondo', label: 'Head kicking', emphasis: ['headKicks', 'spinning'], tradeoff: ['counters'], note: 'Everything above the shoulders.' },
+  { id: 'spec.tkd.footwork', discipline: 'taekwondo', label: 'Range footwork', emphasis: ['footwork', 'distance', 'counters'], tradeoff: ['spinning'], note: 'Manages the gap rather than jumping it.' },
+  // wrestling
+  { id: 'spec.wr.chain', discipline: 'wrestling', label: 'Chain wrestling', emphasis: ['chains', 'shots', 'finishes'], tradeoff: ['matReturns'], note: 'Shot to re-shot to finish; never stops on the first attempt.' },
+  { id: 'spec.wr.matReturns', discipline: 'wrestling', label: 'Mat returns', emphasis: ['matReturns', 'topControl'], tradeoff: ['shots'], note: 'Folkstyle riding: he gets up, he goes back down.' },
+  { id: 'spec.wr.defensive', discipline: 'wrestling', label: 'Defensive wrestling', emphasis: ['takedownDefence', 'scrambles', 'getUps'], tradeoff: ['shots'], note: 'Wrestles to stay standing, not to take you down.' },
+  { id: 'spec.wr.cage', discipline: 'wrestling', label: 'Cage wrestling', emphasis: ['cageWrestling', 'clinch', 'finishes'], tradeoff: ['scrambles'], note: 'Bodylock to the fence; an MMA-only sub-game.' },
+  // judo
+  { id: 'spec.ju.gripping', discipline: 'judo', label: 'Grip fighting', emphasis: ['gripFighting', 'kuzushi'], tradeoff: ['newaza'], note: 'Wins the exchange before the throw.' },
+  { id: 'spec.ju.footSweeps', discipline: 'judo', label: 'Ashi-waza', emphasis: ['footSweeps', 'kuzushi', 'counters'], tradeoff: ['throws'], note: 'Trips and sweeps rather than big throws.' },
+  { id: 'spec.ju.newaza', discipline: 'judo', label: 'Newaza', emphasis: ['newaza', 'ukemi'], tradeoff: ['footSweeps'], note: 'Turnovers and pins on the mat.' },
+  // bjj
+  { id: 'spec.bjj.legLocks', discipline: 'bjj', label: 'Leg locks', emphasis: ['legLocks', 'sweeps', 'subAttack'], tradeoff: ['passing', 'topControl'], note: 'Modern leg-lock game; enters from the bottom.' },
+  { id: 'spec.bjj.pressurePassing', discipline: 'bjj', label: 'Pressure passing', emphasis: ['passing', 'topControl', 'backControl'], tradeoff: ['guard', 'legLocks'], note: 'Heavy, slow, inevitable.' },
+  { id: 'spec.bjj.guardPlaying', discipline: 'bjj', label: 'Guard playing', emphasis: ['guard', 'sweeps', 'subAttack'], tradeoff: ['passing'], note: 'Happy to be underneath.' },
+  { id: 'spec.bjj.backAttack', discipline: 'bjj', label: 'Back attacks', emphasis: ['backControl', 'chokes'], tradeoff: ['legLocks'], note: 'Everything ends in a strangle.' },
+  { id: 'spec.bjj.defensive', discipline: 'bjj', label: 'Defensive jiu-jitsu', emphasis: ['escapes', 'subDefence'], tradeoff: ['subAttack'], note: 'Very hard to finish, rarely finishes.' },
+  // sambo
+  { id: 'spec.sam.legLocks', discipline: 'sambo', label: 'Sambo leg locks', emphasis: ['legLocks', 'transitions'], tradeoff: ['topControl'], note: 'Ankle and knee attacks from every entry.' },
+  { id: 'spec.sam.combat', discipline: 'sambo', label: 'Combat sambo', emphasis: ['strikingToGrappling', 'takedowns'], tradeoff: ['legLocks'], note: 'Strikes into the throw; the MMA-shaped sambo.' },
+  // mma integration
+  { id: 'spec.mma.cageControl', discipline: 'mmaIntegration', label: 'Cage control', emphasis: ['cageWork', 'clinchStriking'], tradeoff: ['getUps'], note: 'Owns the fence on both sides of it.' },
+  { id: 'spec.mma.groundAndPound', discipline: 'mmaIntegration', label: 'Ground and pound', emphasis: ['groundAndPound', 'transitions'], tradeoff: ['getUps'], note: 'Damage from the top, not submissions.' },
+  { id: 'spec.mma.scrambling', discipline: 'mmaIntegration', label: 'Scrambling', emphasis: ['getUps', 'transitions', 'levelChanges'], tradeoff: ['groundAndPound'], note: 'Never stays anywhere long enough to be held.' },
+  { id: 'spec.mma.gameplan', discipline: 'mmaIntegration', label: 'Game-plan execution', emphasis: ['gameplanExecution', 'subDefenceUnderStrikes'], tradeoff: ['groundAndPound'], note: 'Does the thing the corner asked for.' },
+]);
+
+/** Specialisation ids grouped by the discipline they belong to. */
+export const SPECIALISATIONS_BY_DISCIPLINE: Readonly<Record<string, readonly SpecialisationSpec[]>> =
+  Object.freeze(
+    SPECIALISATIONS.reduce<Record<string, SpecialisationSpec[]>>((acc, s) => {
+      (acc[s.discipline] ??= []).push(s);
+      return acc;
+    }, {}),
+  );
+
+/**
+ * One discipline's stored experience (01 §2.3, extended by §8). `years` is the
+ * chapter's `yearsTrained`; `sub` is the chapter's `native` map. Nothing
+ * derived is stored here — `effective`, `mean`, `rustMult` and `tier` live on
+ * the runtime.
+ *
+ * Every field below `competition` is additive and optional: a definition
+ * written against the original schema derives bit-identically, because each
+ * new field's default is the neutral value of its own formula.
  */
 export interface DisciplineSkills<S extends Record<string, number> = Record<string, number>> {
   /** Years trained, used for the tier derivation and the experience prior. */
@@ -182,6 +352,29 @@ export interface DisciplineSkills<S extends Record<string, number> = Record<stri
   /** Discipline-specific tags, e.g. wrestling `folkstyle`, Thai `muayFemur`. */
   styleTags?: string[];
   competition?: DisciplineCompetition;
+
+  // --- 01 §8 additions ----------------------------------------------------
+  /**
+   * Age at the first session in this art. Under 18 buys a deeper motor
+   * programme per year trained; defaults to 18 (no youth credit).
+   */
+  startAge?: number;
+  /** Belt, dan, credential or amateur class. Defaults to ungraded. */
+  grade?: DisciplineGrade;
+  /** Mat/ring hours per week during a normal training block. Defaults to 8. */
+  hoursPerWeek?: number;
+  /** Sessions per week; two four-hour days is not the same as eight one-hour days. Defaults to 5. */
+  sessionsPerWeek?: number;
+  /** 0-100: how live the sparring is. 50 is ordinary club sparring. */
+  sparringIntensity?: number;
+  /** Months since this art was last trained. Rust. Defaults to 0. */
+  monthsSinceTrained?: number;
+  /** Ids from {@link SPECIALISATIONS} for this discipline. */
+  specialisations?: string[];
+  /** 0-100 coaching quality for *this* art specifically. Defaults to 50. */
+  coachQuality?: number;
+  /** True for the art the fighter came up in. At most one should be set. */
+  isBase?: boolean;
 }
 
 /**
@@ -227,6 +420,86 @@ export interface BodySpec {
   weightClass?: WeightClassId;
   /** Defaults to the handedness side. */
   dominantLeg?: 'right' | 'left';
+
+  // --- chapter 01 §8.3 additions ------------------------------------------
+  /**
+   * Off-camp walk-around mass. The honest measure of how big this fighter
+   * really is: `(natural - weighIn) / natural` is the *cut severity* the
+   * fight-week dehydration model reads when `weightCut.cutPct` is left at its
+   * default. Defaults to `weighInKg` (a natural, uncut fighter).
+   */
+  naturalWeightKg?: number;
+  /**
+   * 0-100. 50 is an even fighter; 100 is everything in the dominant hand.
+   * Scales the lead hand's share of the power index — a one-handed puncher
+   * hits nothing with the jab and everything with the cross.
+   */
+  handStrengthSplit?: number;
+  /**
+   * Percentage difference between the lead-side and rear-side limb, positive
+   * when the lead side is longer. Real, small (±3 %) and it moves the reach
+   * that matters: the jab arm and the lead kick. Defaults to 0.
+   */
+  limbAsymmetry?: { armPct: number; legPct: number };
+}
+
+/** Regions an injury can be recorded against (01 §8.4). */
+export type InjuryRegion =
+  | 'head' | 'eye' | 'neck' | 'shoulder' | 'elbow' | 'hand'
+  | 'ribs' | 'back' | 'hip' | 'knee' | 'ankle';
+
+export const INJURY_REGIONS = [
+  'head', 'eye', 'neck', 'shoulder', 'elbow', 'hand',
+  'ribs', 'back', 'hip', 'knee', 'ankle',
+] as const;
+
+/**
+ * One entry in the injury history (01 §8.4). Severity is the tissue insult,
+ * `monthsAgo` is how long the body has had to deal with it, and `surgery` /
+ * `recurrent` are what stop it ever fully going away.
+ */
+export interface InjuryEntry {
+  region: InjuryRegion;
+  /** 0-100: 20 a strain, 50 a partial tear, 80 a rupture, 95 a reconstruction. */
+  severity: number;
+  /** Months since the injury. 0 is "carrying it into this fight". */
+  monthsAgo: number;
+  surgery?: boolean;
+  /** A joint that keeps going. Leaves a permanent residue. */
+  recurrent?: boolean;
+  note?: string;
+}
+
+/** Endurance sports that leave a measurable aerobic base (01 §8.3). */
+export type EnduranceSportId =
+  | 'none' | 'running' | 'swimming' | 'cycling' | 'rowing' | 'football' | 'crossCountry' | 'triathlon';
+
+export const ENDURANCE_SPORTS = [
+  'none', 'running', 'swimming', 'cycling', 'rowing', 'football', 'crossCountry', 'triathlon',
+] as const;
+
+/** Career fight-week weight management, as distinct from *this* week's cut. */
+export interface WeightCutHistory {
+  /** Career count of cuts beyond 8 % of walk-around mass. */
+  hardCuts: number;
+  /** The worst single cut ever made, % of walk-around mass. */
+  worstCutPct: number;
+  /** Times the fighter missed weight. Evidence the cut is no longer working. */
+  missedWeight: number;
+}
+
+/**
+ * Biography the sim reads (01 §8.4). Everything here is optional and everything
+ * here has a consumer; a field that only reads well on a fighter card belongs
+ * in `notes`.
+ */
+export interface FighterHistory {
+  injuries?: InjuryEntry[];
+  /** Total career surgeries, including ones with no entry above. */
+  surgeries?: number;
+  weightCutHistory?: WeightCutHistory;
+  /** Endurance-sport background before or alongside the fight career. */
+  cardioBackground?: { sport: EnduranceSportId; years: number };
 }
 
 export type HairLength = 'shaved' | 'short' | 'medium' | 'tied';
@@ -363,6 +636,39 @@ export interface CareerRecord {
   stanceExposure?: { orthodox: number; southpaw: number };
   weightCut?: WeightCut;
   winStreak?: number;
+
+  // --- chapter 01 §8.2 additions: overall experience ----------------------
+  /**
+   * Competitive rounds actually fought, professional and amateur. Two fighters
+   * at 10-0 are not the same fighter if one has 30 rounds and the other has 10
+   * first-round finishes; this is the field that separates them.
+   */
+  totalRounds?: number;
+  /** Years since turning professional. Time *in* the sport, not time training. */
+  yearsPro?: number;
+  /**
+   * 0-100: the average level of the opposition faced. 50 is regional, 75 is
+   * ranked, 90 is champions. Scales the experience composite and composure —
+   * a 20-0 record against nobody is worth less than 12-4 against everybody.
+   */
+  oppositionLevel?: number;
+  /** Main-event and co-main bouts. Big-room experience, separate from titles. */
+  mainEvents?: number;
+  /** Titles actually won, of `titleFights` contested. */
+  titleWins?: number;
+  /**
+   * Hard fights taken: wars, five-round grinds, fights finished on heart. The
+   * damage history the chin pays for beyond the KO count.
+   */
+  warFights?: number;
+  /** Years of habitual hard sparring. Cumulative sub-concussive exposure. */
+  hardSparringYears?: number;
+  /**
+   * 0-100 authored override for the experience composite. When set, it *is*
+   * the experience the sim uses (scaled to 0-1); the derived value is still
+   * computed and reported on the derivation line beside it.
+   */
+  experienceOverride?: number;
 }
 
 /**
@@ -461,6 +767,8 @@ export interface FighterDefinition {
   mental: MentalAttributes;
   record: CareerRecord;
   style: StyleSpec;
+  /** Injury, surgery, weight-cut and endurance background (01 §8.4). */
+  history?: FighterHistory;
   /** Free-form notes shown in the creator; never read by the sim. */
   notes?: string;
 }
@@ -469,6 +777,31 @@ export interface FighterDefinition {
 export function recordTotal(r: FightRecord | undefined): number {
   if (!r) return 0;
   return r.wins + r.losses + (r.draws ?? 0) + (r.noContests ?? 0);
+}
+
+/**
+ * The 0-100 prior a grade attests, stripes included. Unknown ranks are worth
+ * nothing rather than throwing: an import from a future build that invents a
+ * belt must still load (09 §3.6).
+ */
+export function gradePriorOf(grade: DisciplineGrade | undefined): number {
+  if (!grade || grade.system === 'none') return 0;
+  const base = GRADE_PRIORS[grade.rank];
+  if (base === undefined) return 0;
+  const stripes = grade.system === 'bjjBelt' ? Math.max(0, Math.min(4, grade.stripes ?? 0)) : 0;
+  return Math.min(100, base + GRADE_STRIPE_POINTS * stripes);
+}
+
+const SPEC_BY_ID: Readonly<Record<string, SpecialisationSpec>> = Object.freeze(
+  SPECIALISATIONS.reduce<Record<string, SpecialisationSpec>>((acc, s) => {
+    acc[s.id] = s;
+    return acc;
+  }, {}),
+);
+
+/** Look a specialisation up by id; `undefined` for one this build does not know. */
+export function specialisationById(id: string): SpecialisationSpec | undefined {
+  return SPEC_BY_ID[id];
 }
 
 /** Normalise the two accepted somatotype spellings onto the blend. */

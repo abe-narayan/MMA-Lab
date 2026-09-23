@@ -2085,3 +2085,291 @@ Archetypes: all fifteen presets in full.
 10. **Playability vs realism (default realism).** The catalogue makes T0 fighters collapse within 60 s and lose to
     any T2 almost always; a "crowd mode" (`FD §6`) needs this. A "gym-arcade" preset that clamps `energy.actionCostMult
     ≤ 1.2` and disables `beh.gen.t0_burst_collapse` is the suggested playability variant, off by default.
+
+---
+
+## 8. Deep customisation — the fighter as a career
+
+Sections 2 to 7 describe a fighter as a snapshot: fourteen attributes, a set of
+sub-skills, a record. That is enough to run a bout and not enough to *author*
+one. Two welterweights with identical wrestling sub-skills are the same fighter
+to §2, even when one is a former NCAA All-American who has not wrestled in four
+years and the other is a career MMA fighter who drills chain wrestling six days
+a week. Section 8 is the difference between them.
+
+Everything here is **additive and optional**. Each new field's default is the
+identity value of its own formula, so a definition written against the §2 schema
+— one with none of these fields — derives to exactly the numbers it derived to
+before. `tests/fighter.deep.test.ts` asserts that against a frozen pre-§8
+fighter; it is a hard compatibility contract, not an aspiration.
+
+The rule that governs what may be added: **a field the sim does not read is
+decoration.** Every field below names its formula, its provenance tag and the
+consumer that reads it.
+
+### 8.1 Per-discipline depth (`DisciplineSkills`)
+
+#### 8.1.1 Rust — `monthsSinceTrained`
+
+```
+rust = max(rust_floor, e^(-max(0, months - rust_grace) / rust_tau))
+current[skill] = native[skill] x rust
+```
+
+`rust_grace = 3` months, `rust_tau = 54` months, `rust_floor = 0.70` `[E]`.
+
+*Why this shape.* Motor skill is retained far longer than the physical
+qualities that express it — closed-skill retention is measured in years, not
+weeks — so the decay is slow (a five-year absence costs about a fifth) and
+floored (technique never decays to nothing). The grace period exists because
+one fight camp already costs three months away from the secondary arts, and
+that must not be a penalty.
+
+*Consumers.* The rusted values are what the transfer matrix (§2.3.3) reads as
+its **source** and what seeds the effective map, so a rusty judoka transfers
+the judo he still has rather than the judo he once had. Through the effective
+sub-skills it reaches every composite of §2.7. Exposed on the runtime as
+`DisciplineRuntime.rustMult`.
+
+#### 8.1.2 What a training year is worth — `startAge`, `hoursPerWeek`, `sessionsPerWeek`, `coachQuality`, `isBase`
+
+```
+volume  = clamp((hours/8)^0.5 x (sessions/5)^0.25, 0.50, 1.60)
+camp    = 1 + 0.15 x (coachQuality - 50)/50
+youth   = 1 + 0.20 x clamp((18 - startAge)/18, 0, 1)
+base    = isBase ? 1.15 : 1.00
+effectiveYears = years x volume x camp x youth x base
+               + transfer_years_factor x credited_transfer_years
+```
+
+All `[E]`, all registered under `fm.disc.*`.
+
+*Why this shape.* Volume is a square root because training returns diminish
+sharply — doubling the hours is worth about 40 % more, not 100 %. Frequency
+enters at a quarter power rather than equally, which is the distributed-practice
+result stated conservatively: how the hours are spread matters, but less than
+how many there are. The youth term is the training-age argument: a motor
+programme laid down before adolescence is deeper per hour than one laid down
+after it, capped at +20 % for a childhood start. The base art gets 1.15 because
+it is the art everything else was hung on.
+
+Transferred years are deliberately **not** scaled: they were earned in another
+art, at that art's own rate.
+
+*Consumer.* `effectiveYears` is the years cap of the tier derivation (§2.3.4),
+so these five fields move the tier and nothing else — which is right, because
+they describe how the training happened, not what it produced. Exposed as
+`DisciplineRuntime.yearsQualityMult`.
+
+#### 8.1.3 Grade and competition record — `grade`, `competition`
+
+A grade and a competition record are *independent observations* of an art,
+awarded by people who watched the fighter train and compete for years.
+
+```
+gradePrior = GRADE_PRIORS[rank] + 2.5 x stripes          (BJJ only)
+compPrior  = (ceiling(level) + placing + 2 x medals)
+             x (1 - e^(-bouts/12))
+             x (0.70 + 0.30 x winRate)
+prior      = max(gradePrior, compPrior)
+target     = prior_share x prior                          (prior_share = 0.85)
+
+if mean(effective) < target:
+    lift = target - mean(effective)
+    effective[skill] += lift   for every skill in the art
+```
+
+Ceilings: local 35, national 55, international 72. Placings: local podium 3,
+national podium 8, national title 12, continental medal 16, world medal 22,
+Olympic medal 26. All `[E]`, placed inside the `CONV §3` tier bands: a BJJ
+black belt is a T4 grappler by definition of the band (70-90), and an NCAA
+All-American is the same claim from a different sport.
+
+*Why this shape.* Four decisions:
+
+1. **`max`, not a sum.** A black belt who also medalled has not learned the art
+   twice.
+2. **A floor, not an addition.** A grade says "this art cannot be worse than
+   this". A fighter authored above his grade keeps every point he was authored
+   with.
+3. **On the art's *mean*, not on each sub-skill.** A stadium Muay Thai champion
+   has mediocre hands, and that is the whole point of him. Flooring each skill
+   separately would erase every weakness an author deliberately wrote in.
+4. **A uniform offset, not a rescale.** The offset preserves the *differences*
+   between the skills, so the shape of the art survives the lift.
+
+Inside `compPrior`, the ceiling is how good you have to be to be in the room at
+all; the placing raises the room rather than the average, which is why it is
+added inside the bracket; the saturating bout term is sample size; and the
+win-rate factor spans 0.70 to 1.00 and multiplies, so a perfect record can never
+claim more than the room is worth.
+
+*Consumers.* The effective sub-skills, hence every §2.7 composite and the tier.
+Exposed as `DisciplineRuntime.gradePrior` and `.competitionPrior`.
+
+#### 8.1.4 Specialisations and sparring — `specialisations`, `sparringIntensity`
+
+```
+gain    = spec_bonus x spec_decay^i            spec_bonus = 6, spec_decay = 0.60
+cost    = gain x |emphasis| x spec_cost_share / |payers|    spec_cost_share = 1.0
+payers  = spec.tradeoff, or every sub-skill not emphasised when it is empty
+
+effective[e] += gain     for e in emphasis
+effective[p] -= cost     for p in payers
+```
+
+then, last of all,
+
+```
+effective[skill] x= 1 + 0.06 x (sparringIntensity - 50)/50
+```
+
+All `[E]`.
+
+*Why this shape.* A specialisation is a **reallocation of hours, not extra
+hours**: the leg-locker spent on entries the time the pressure passer spent on
+the knee slice. `spec_cost_share = 1.0` makes it exactly mean-neutral, which
+matters for a reason beyond realism — a fighter must not be able to climb a
+tier by ticking boxes. The named trade-off skills pay first because the
+catalogue says which skills actually compete for the same mat time.
+`spec_decay` is the diminishing return on focus: nobody has the hours to
+specialise in everything, and the fourth specialisation is worth a fifth of the
+first.
+
+Sparring intensity multiplies rather than adds because it scales *what survives
+contact*: skill learned against a resisting partner is the skill that shows up
+in a fight, and flow-rolling and pad work are not that. ±6 % is deliberately
+modest — it is a modifier on a skill, not a substitute for one.
+
+*Consumers.* The effective sub-skills, hence every §2.7 composite.
+
+### 8.2 Overall experience (`CareerRecord`)
+
+| Field | Formula | Tag | Consumer |
+|---|---|---|---|
+| `totalRounds` | `expUnits = fights + 0.50 x max(0, rounds/3 - fights)` | `[E]` | `experience` |
+| `oppositionLevel` | `experience x= 1 + 0.20 x (lvl - 50)/50`; `composure += 5 x (lvl - 50)/50` | `[E]` | `experience`, `composureEff` |
+| `mainEvents` | `composure += 0.8 x min(mainEvents, 8)` | `[E]` | `composureEff` |
+| `warFights` | `chin -= 1.2 x min(warFights, 6)` | `[E]` | `chinEff`, `chinZ` |
+| `hardSparringYears` | `chin -= 0.4 x min(years, 15)` | `[E]` | `chinEff`, `chinZ` |
+| `experienceOverride` | `experience = override/100` when set | `[E]` | `experience` |
+| `yearsPro`, `titleWins` | validator cross-checks only | `[E]` | creator, fighter card |
+
+*Why these shapes.* Rounds enter as a **surplus** over the bout count rather
+than as a second additive term: a fighter with ten one-round finishes has ten
+bouts of experience and no more, while one with ten decisions has sat in the
+cage thirty rounds and learned something the bout count cannot see.
+`max(0, rounds/3 - fights)` is zero for an unstated `totalRounds`, which is what
+preserves the §2.4.1 number exactly.
+
+Opposition level is the most under-modelled fact about a record: 20-0 against
+nobody and 12-4 against everybody are not the same career. It is centred on 50
+so that silence changes nothing, and it multiplies the experience composite
+rather than adding to it so that it cannot rescue a debutant.
+
+The two damage terms sit alongside the KO-loss ledger of §2.4.3 rather than
+inside it. A war is repeated sub-concussive load, not one knockout, so it costs
+less per event (1.2 against 3.0) and caps sooner. Habitual hard sparring is the
+same argument applied to training, which is where most of the exposure actually
+happens and where a record shows nothing at all.
+
+`experienceOverride` exists because sometimes the author knows something the
+counters do not. The derived value is still computed and reported on the
+derivation line and in the creator beside the override, so it is an informed
+act rather than a blind one. Exposed as `FighterRuntime.experienceDerived`.
+
+### 8.3 Physique and background (`BodySpec`, `FighterHistory`)
+
+| Field | Formula | Tag | Consumer |
+|---|---|---|---|
+| `body.naturalWeightKg` | `impliedCut% = (natural - weighIn)/natural x 100`, a floor under `weightCut.cutPct` | `[E]`, feeds `[S: DP §4.7]` | `career.residualDehydration` |
+| `body.handStrengthSplit` | `leadHand x= clamp(1 - 0.35 x (split - 50)/50, 0.2, 1.6)` | `[E]` | `powerIndex.leadHand` |
+| `body.limbAsymmetry.armPct` | `effectiveReach += 0.50 x (armPct/100) x armHalf` | `[E]` | `effectiveReachM` |
+| `body.limbAsymmetry.legPct` | `effectiveKickReach += 0.50 x (legPct/100) x legReach` | `[E]` | `effectiveKickReachM` |
+| `history.cardioBackground` | `cardio += 0.8 x min(years, 10)` | `[E]` | `effective.cardio`, energy pools |
+| `history.weightCutHistory.hardCuts` | `cardio -= 0.35 x min(hardCuts, 12)` | `[E]` | `effective.cardio` |
+| `history.weightCutHistory.missedWeight` | `residualDehydration += 0.004 x min(missed, 3)` | `[E]` | `career.residualDehydration` |
+| `history.surgeries` | `recovery -= 1.5 x min(surgeries, 6)` | `[E]` | `effective.recovery` |
+
+*Why these shapes.* The walk-around mass is the honest measure of how hard the
+cut was; it is a **floor** under the authored `cutPct` rather than a
+replacement, so an author who has already stated the cut is never overridden by
+an inference. Only half of a limb asymmetry reaches the effective reach because
+the span measurement `reachM` already averages the two arms — the other half is
+in the number the author typed. Aerobic base is the most durable trained quality
+there is, which is why an endurance background is worth real points a decade
+later; chronic cutting is the mirror image, a chronic cost distinct from this
+week's dehydration.
+
+### 8.4 Injury history (`FighterHistory.injuries`)
+
+```
+healing = e^(-monthsAgo / 18)
+residue = max(surgery ? 0.25 : 0, recurrent ? 0.35 : 0)
+weight  = max(healing, residue) x severity/100
+
+points[attr] += 14 x weight x regionWeight[region][attr]
+caps[cap]    += max(0, weight - 0.35)/(1 - 0.35) x capWeight[region][cap]
+capability    = 1 - clamp(caps[cap], 0, 1) x 0.25
+```
+
+All `[E]`, registered under `fm.injury.*` including the whole region table.
+
+*Why this shape.* `max`, not a sum, because the residue **is** the asymptote of
+the healing curve — a reconstructed knee is 25 % injured forever, not 25 % on
+top of however much it has healed. The 18-month time constant is the interval
+over which a serious soft-tissue injury stops being the thing you think about.
+
+The split between **points** and **caps** is the substantive claim. A hand that
+hurts is points off grip strength; a hand that is broken is a fighter who
+cannot punch, which is a multiplier on the power index rather than points off
+anything. `cap_gate_weight = 0.35` is the line between the two: below it an
+injury is a nuisance, above it it removes an option.
+
+Region mapping (`fm.injury.w.<region>.<attr>`), anatomical rather than
+statistical — there is no dataset of "points of balance lost per ACL", so the
+*shape* is `[E]` and the *size* is carried by one scalar a calibration run can
+move for every region at once:
+
+| Region | Attributes | Capability caps |
+|---|---|---|
+| head | chin 1.0, reactionTime 0.3 | — |
+| eye | reactionTime 0.8 | — |
+| neck | neck 1.0 | — |
+| shoulder | handSpeed 0.5, strength 0.4 | punch power 0.5 |
+| elbow | gripStrength 0.5, strength 0.3 | — |
+| hand | gripStrength 0.8 | punch power 1.0 |
+| ribs | bodyToughness 1.0 | — |
+| back | strength 0.6, balance 0.4 | — |
+| hip | flexibility 0.8, kickSpeed 0.4 | head kick 1.0 |
+| knee | balance 0.6, speed 0.6, kickSpeed 0.4 | kick power 0.8, head kick 0.6 |
+| ankle | balance 0.5, speed 0.5 | kick power 0.5 |
+
+Head injuries fold into the §2.4.3 chin ledger rather than being applied
+separately, so the chin is never decayed twice. The three capabilities multiply
+`powerIndex.rearHand`/`leadHand`/`elbow` (punch), `powerIndex.rearKick`/
+`leadKick`/`knee` (kick) and `flexKickQualityMult` (head kick). Exposed as
+`FighterRuntime.injury`.
+
+### 8.5 Assumptions added by this section
+
+Every formula in §8 is `[E]`. The ones most worth challenging at calibration:
+
+1. **Rust floor 0.70 and tau 54 months.** If a returning veteran reads as too
+   sharp, the floor is the first knob; if he reads as too blunt, tau is.
+2. **Mean-based grade floor.** The alternative — flooring each sub-skill — was
+   rejected because it erases authored weaknesses. If a graded fighter with one
+   catastrophic hole in the art reads wrong, this is the decision to revisit.
+3. **Mean-neutral specialisations.** `spec_cost_share = 1.0` is a design
+   choice, not a measurement. Lowering it would let specialising raise a tier,
+   which is exactly what it is set to 1.0 to prevent.
+4. **`chin_per_war = 1.2` and `chin_per_hard_spar_year = 0.4`.** Both are
+   calibrated against the per-KO-loss cost of 3.0 `[S: DP §7 r21]` rather than
+   against data of their own. The direction is well supported; the magnitude is
+   an estimate.
+5. **Injury `points_per_unit = 14`.** One scalar carries the size of the whole
+   injury model deliberately, so that C-3-style calibration can move it once.
+6. **The presets keep `sparringIntensity` at 50.** Their sub-skills are
+   authored as the finished picture of each art; applying the multiplier on top
+   would double-count it and move the §6 ladder. See the note in
+   `src/sim/fighter/archetypes.ts`.

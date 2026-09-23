@@ -40,6 +40,17 @@ export type {
   DamageEvent, RefereeEvent, ScoringEvent, StrategyEvent, BoutStructureEvent,
 } from './record/events';
 
+// ---- commentary (09 §5) ----------------------------------------------------
+// Post-hoc, deterministic and pure: a forked RNG stream that never touches the
+// bout's, so the same replay always says the same thing and commentary can
+// never change a fight.
+export { generateCommentary, COMMENTABLE_KINDS } from './commentary';
+export type {
+  CommentaryLine, CommentaryOptions, CommentaryPriority, CommentaryVoice, IntentSample,
+} from './commentary';
+export { MODES as COMMENTARY_MODES, TIER_LABEL, modeWords } from './commentary';
+export type { ModeWords } from './commentary';
+
 // ---- parameters ------------------------------------------------------------
 export { PARAMS, DEFAULT_PARAMS_HASH, resolveParams, hashParams } from './params';
 export type { ParamId, ParamOverrides, ParamSpec, ParamSection, ResolvedParams } from './params';
@@ -77,13 +88,22 @@ export type {
   PhysicalAttributes, PrimaryMode, RangeBand, Sex, ShortsStyle, SkillTier, Stance,
   StyleSpec, TakedownSetup, TakedownStyle, TattooSlot, ThaiStyle, TiredBehaviour,
   BottomPriority, TopPriority, WeightCut, WeightedSubmission, WeightedTechnique,
+  // 01 §8 — the deep customisation schema.
+  DisciplineGrade, EnduranceSportId, FighterHistory, GradeSystem, InjuryEntry,
+  InjuryRegion, PlacingId, SpecialisationSpec, WeightCutHistory,
 } from './fighter/types';
 export {
   DISCIPLINE_IDS, GRAPPLING_DISCIPLINES, STRIKING_DISCIPLINES, SUB_SKILLS, TIER_NAMES,
   WEIGHT_CLASS_LIMIT_KG, buildBlendOf, recordTotal, weightClassFor,
+  // 01 §8 catalogues the creator's controls are populated from.
+  ENDURANCE_SPORTS, GRADE_PRIORS, GRADE_RANKS, GRADE_STRIPE_POINTS, GRADE_SYSTEMS,
+  INJURY_REGIONS, PLACING_IDS, SPECIALISATIONS, SPECIALISATIONS_BY_DISCIPLINE,
+  gradePriorOf, specialisationById,
 } from './fighter/types';
 export { TIER_SKILL_BANDS, TIER_YEARS_BANDS, IQ_BANDS } from './fighter/tiers';
 export type { DisciplineRuntime, EffectiveAttributes, DeriveContext } from './fighter/derive';
+export type { InjuryCapabilities, InjuryLoad } from './fighter/derive';
+export { INJURY_ATTRIBUTE_WEIGHTS, INJURY_CAPABILITY_WEIGHTS, competitionPriorOf } from './fighter/derive';
 
 // ---- determinism -----------------------------------------------------------
 // The app generates fighters too (the creator's "randomise", Phase 9's batch

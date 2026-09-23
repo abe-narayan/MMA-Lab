@@ -594,4 +594,136 @@ describe('randomFighter', () => {
       expect(def.body.ageYears).toBeGreaterThanOrEqual(18);
     }
   });
+
+  // ---- 01 §8 deep customisation ----------------------------------------
+
+  it('populates the §8 per-discipline depth on every art it generates', () => {
+    for (let i = 0; i < 40; i++) {
+      const def = randomFighter(`deep-${i}`);
+      const arts = Object.entries(def.disciplines);
+      expect(arts.length, `deep-${i}`).toBeGreaterThan(0);
+      for (const [art, block] of arts) {
+        const where = `deep-${i}.${art}`;
+        expect(block!.startAge, where).toBeGreaterThanOrEqual(5);
+        expect(block!.hoursPerWeek, where).toBeGreaterThan(0);
+        expect(block!.sessionsPerWeek, where).toBeGreaterThan(0);
+        expect(block!.sparringIntensity, where).toBeGreaterThanOrEqual(0);
+        expect(block!.coachQuality, where).toBeGreaterThanOrEqual(0);
+        expect(block!.monthsSinceTrained, where).toBeGreaterThanOrEqual(0);
+        expect(Array.isArray(block!.specialisations), where).toBe(true);
+        // A fighter cannot have started an art before he was born.
+        expect(block!.startAge! + block!.years, where).toBeLessThanOrEqual(def.body.ageYears + 0.5);
+      }
+      // Exactly one base art, and it is the one that is never rusty.
+      const bases = arts.filter(([, b]) => b!.isBase);
+      expect(bases, `deep-${i} base arts`).toHaveLength(1);
+      expect(bases[0][1]!.monthsSinceTrained).toBe(0);
+    }
+  });
+
+  it('generates a grade only where the art has a grading system', () => {
+    for (let i = 0; i < 40; i++) {
+      const def = randomFighter(`grade-${i}`);
+      for (const [art, block] of Object.entries(def.disciplines)) {
+        if (art === 'mmaIntegration') {
+          expect(block!.grade, `grade-${i}.${art}`).toBeUndefined();
+          continue;
+        }
+        expect(block!.grade, `grade-${i}.${art}`).toBeDefined();
+        expect(block!.grade!.system, `grade-${i}.${art}`).not.toBe('none');
+      }
+    }
+  });
+
+  it('generates a §8.2 experience block and a §8.4 biography that hold together', () => {
+    for (let i = 0; i < 40; i++) {
+      const def = randomFighter(`bio-${i}`);
+      const r = def.record;
+      const proBouts = r.proWins + r.proLosses + r.proDraws;
+      expect(r.totalRounds, `bio-${i}`).toBeGreaterThanOrEqual(proBouts);
+      expect(r.oppositionLevel, `bio-${i}`).toBeGreaterThanOrEqual(0);
+      expect(r.oppositionLevel, `bio-${i}`).toBeLessThanOrEqual(100);
+      expect(r.titleWins!, `bio-${i}`).toBeLessThanOrEqual(r.titleFights);
+      expect(r.warFights!, `bio-${i}`).toBeLessThanOrEqual(Math.max(1, proBouts));
+      // An override is never generated: the record is allowed to speak.
+      expect(r.experienceOverride, `bio-${i}`).toBeUndefined();
+
+      const h = def.history!;
+      expect(h, `bio-${i}`).toBeDefined();
+      expect(h.surgeries!, `bio-${i}`).toBeLessThanOrEqual((h.injuries ?? []).length);
+      for (const inj of h.injuries ?? []) {
+        expect(inj.severity, `bio-${i}`).toBeGreaterThan(0);
+        expect(inj.severity, `bio-${i}`).toBeLessThanOrEqual(100);
+        expect(inj.monthsAgo, `bio-${i}`).toBeGreaterThanOrEqual(0);
+      }
+      expect(def.body.naturalWeightKg!, `bio-${i}`).toBeGreaterThanOrEqual(def.body.weighInKg!);
+      expect(def.body.handStrengthSplit!, `bio-${i}`).toBeGreaterThanOrEqual(0);
+      expect(def.body.handStrengthSplit!, `bio-${i}`).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it('makes the §8 fields visible in the derivation rather than silent', () => {
+    // The creator prints `derivation` verbatim, so a generated fighter whose
+    // §8 fields never appear there is a fighter whose depth the user cannot
+    // audit — which is the same as not having it.
+    const def = randomFighter('audit', { tier: 4 });
+    const rt = deriveRuntime(def, params, { explain: true });
+    const text = rt.derivation.join('\n');
+    expect(text).toMatch(/each training year counts x/);
+    for (const d of Object.values(rt.disciplines)) {
+      if (!d.trained) continue;
+      expect(d.yearsQualityMult, d.id).toBeGreaterThan(0);
+    }
+    expect(rt.experienceDerived).toBeGreaterThan(0);
+  });
+});
+
+// --------------------------------------------------------------------------
+// 6. The blank template is upgrade-safe (01 §8)
+// --------------------------------------------------------------------------
+
+describe('blankFighter and the §8 schema', () => {
+  it('ships the §8 blocks at their neutral defaults', () => {
+    const def = blankFighter();
+    expect(validateFighter(def).issues.filter((i) => i.severity === 'error')).toEqual([]);
+    expect(def.history).toBeDefined();
+    expect(def.record.oppositionLevel).toBe(50);
+    expect(def.body.handStrengthSplit).toBe(50);
+    expect(def.body.limbAsymmetry).toEqual({ armPct: 0, legPct: 0 });
+    const block = def.disciplines.mmaIntegration!;
+    expect(block.sparringIntensity).toBe(50);
+    expect(block.coachQuality).toBe(50);
+    expect(block.startAge).toBe(18);
+  });
+
+  it('derives identically with the §8 blocks stripped back out', () => {
+    // The neutral defaults must be genuinely neutral, or a user who opens an
+    // old fighter in the creator and saves it without touching anything has
+    // silently re-rated him.
+    const withDepth = blankFighter();
+    const stripped = clone(withDepth);
+    delete stripped.history;
+    delete stripped.record.oppositionLevel;
+    delete stripped.record.totalRounds;
+    delete stripped.body.handStrengthSplit;
+    delete stripped.body.limbAsymmetry;
+    delete stripped.body.naturalWeightKg;
+    const block = stripped.disciplines.mmaIntegration!;
+    delete block.sparringIntensity;
+    delete block.coachQuality;
+    delete block.startAge;
+    delete block.hoursPerWeek;
+    delete block.sessionsPerWeek;
+    delete block.monthsSinceTrained;
+    delete block.grade;
+
+    const a = deriveRuntime(withDepth, params, { explain: false });
+    const b = deriveRuntime(stripped, params, { explain: false });
+    expect(a.powerIndex.rearHand).toBeCloseTo(b.powerIndex.rearHand, 12);
+    expect(a.chinEff).toBeCloseTo(b.chinEff, 12);
+    expect(a.experience).toBeCloseTo(b.experience, 12);
+    expect(a.grappling.tdDefenceBase).toBeCloseTo(b.grappling.tdDefenceBase, 12);
+    expect(a.effective.cardio).toBeCloseTo(b.effective.cardio, 12);
+    expect(a.mmaTier).toBe(b.mmaTier);
+  });
 });

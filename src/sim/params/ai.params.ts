@@ -58,6 +58,19 @@ export const AI_PARAMS: ParamSpec[] = [
   n('ai.style.weight_max', 2.0, 'x', 'Cap on a per-fighter style weight', '[E]', 1, 5),
   n('ai.style.jitter_sd', 0.10, 'log-normal sd', 'Per-bout style jitter; replaces the old tendencySd of 0.22', '[E]', 0, 1),
 
+  // 01 §2.6 authored style preferences (`ai/preferences.ts`, F-3).
+  n('ai.pref.weight_min', 0.5, 'x', 'Floor on an authored style-preference multiplier; the w_style band of §2.2.3', '[E]', 0, 1),
+  n('ai.pref.weight_max', 2.0, 'x', 'Cap on an authored style-preference multiplier', '[E]', 1, 5),
+  n('ai.pref.default_weight', 1.25, 'x', 'What a bare technique id on a favourites list is worth when no weight is authored', '[E]', 1, 3),
+  n('ai.pref.gain', 0.35, 'x', "Share of an authored weight's distance from 1 that survives into the multiplier", '[E]', 0, 1),
+  n('ai.pref.plan_share', 0.25, 'x', 'Share of a preference carried by the plan family channel; the rest is per technique id', '[E]', 0, 1),
+  n('ai.pref.fidelity.t0', 0.50, 'exponent', 'How faithfully a T0 executes his authored preferences (§2.5.8)', '[E]', 0, 1),
+  n('ai.pref.fidelity.t1', 0.65, 'exponent', 'The same at T1', '[E]', 0, 1),
+  n('ai.pref.fidelity.t2', 0.80, 'exponent', 'The same at T2', '[E]', 0, 1),
+  n('ai.pref.fidelity.t3', 0.90, 'exponent', 'The same at T3', '[E]', 0, 1),
+  n('ai.pref.fidelity.t4', 1.00, 'exponent', 'The same at T4', '[E]', 0, 1),
+  n('ai.pref.fidelity.t5', 1.00, 'exponent', 'The same at T5: the plan is executed as written', '[E]', 0, 1),
+
   n('ai.temp.tier.t0', 1.00, 'tau', 'Softmax temperature at T0 (near-lottery)', '[E]', 0.05, 3),
   n('ai.temp.tier.t1', 0.80, 'tau', 'Softmax temperature at T1', '[E]', 0.05, 3),
   n('ai.temp.tier.t2', 0.60, 'tau', 'Softmax temperature at T2', '[E]', 0.05, 3),

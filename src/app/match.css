@@ -1,0 +1,277 @@
+/* ==========================================================================
+   BOUT LAB - match setup, tournaments, history, post-fight (Phase 7a)
+   --------------------------------------------------------------------------
+   Same rules as the rest of the app: no colour is written literally, every
+   value comes from the tokens declared in ui/styles.css, so both themes
+   resolve without this file knowing which one is active. The look is the
+   broadcast one - muted surfaces, monospace for anything numeric, corner
+   identity carried by --corner-a / --corner-b and nothing else.
+   ========================================================================== */
+
+.ms { max-width: 1180px; }
+
+.ms-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 0 0 16px;
+}
+
+.ms-verdict {
+  margin: 2px 0 4px;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.ms-sub {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--faint);
+}
+.ms-sub code { color: var(--muted); }
+
+.ms-dim { color: var(--faint); }
+
+.ms-note {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.ms-progress {
+  margin: 0 0 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---- warnings ---------------------------------------------------------- */
+
+.ms-warnlist { list-style: none; margin: 14px 0; padding: 0; display: grid; gap: 6px; }
+
+.ms-warn {
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 2px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.ms-warn--error { border-left-color: var(--alert); color: var(--text); }
+.ms-warn--warning { border-left-color: var(--warn); }
+.ms-warn--note { border-left-color: var(--corner-b); }
+
+/* ---- modes ------------------------------------------------------------- */
+
+.ms-modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.ms-mode {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+.ms-mode:hover { border-color: var(--line); background: var(--surface-2); }
+.ms-mode[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.ms-mode-name { font-weight: 650; font-size: 13px; color: var(--text); }
+.ms-mode-help { font-size: 11.5px; line-height: 1.5; }
+
+/* ---- fighter slots ----------------------------------------------------- */
+
+.ms-slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.ms-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.ms-slot > label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.ms-slot--team0 { border-left-color: var(--corner-a); }
+.ms-slot--team1 { border-left-color: var(--corner-b); }
+.ms-slot--team2 { border-left-color: var(--ok); }
+.ms-slot--team3 { border-left-color: var(--warn); }
+.ms-slot--team4 { border-left-color: var(--corner-a-dim); }
+.ms-slot--team5 { border-left-color: var(--corner-b-dim); }
+.ms-slot-meta { margin: 0; font-size: 11px; color: var(--faint); }
+
+/* ---- damage realism ---------------------------------------------------- */
+
+.ms-realism { display: grid; gap: 8px; }
+
+.ms-realism-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  align-items: start;
+  padding: 9px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  cursor: pointer;
+}
+.ms-realism-row.is-on { border-color: var(--accent); background: var(--surface-2); }
+.ms-realism-row > input { margin-top: 3px; }
+.ms-realism-name { font-weight: 650; font-size: 13px; color: var(--text); }
+.ms-realism-changes,
+.ms-realism-tradeoff {
+  grid-column: 2;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.ms-realism-tradeoff { color: var(--faint); }
+
+/* ---- post-fight -------------------------------------------------------- */
+
+.ms-roundtabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.ms-roundtabs .btn[aria-selected='true'] {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.ms-stats,
+.ms-cards {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.ms-stats th,
+.ms-stats td,
+.ms-cards th,
+.ms-cards td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  vertical-align: top;
+}
+.ms-stats thead th,
+.ms-cards thead th {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  border-bottom: 1px solid var(--line);
+}
+.ms-stats tbody th { color: var(--muted); font-weight: 500; }
+.ms-stats td.num,
+.ms-cards td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ms-cards .ms-card-first > th { border-top: 1px solid var(--line); }
+
+.ms-verdict-cell { display: grid; gap: 4px; max-width: 34ch; }
+.ms-verdict-text { font-size: 11px; color: var(--faint); line-height: 1.45; }
+
+/* ---- tournaments ------------------------------------------------------- */
+
+.tr-entrants {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 4px 12px;
+  max-height: 260px;
+  overflow: auto;
+}
+.tr-entrant {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.tr-list { flex-wrap: wrap; }
+.tr-chip { display: inline-flex; gap: 2px; }
+
+.tr-next { display: grid; gap: 6px; margin: 12px 0 18px; }
+.tr-next-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(180px, 1.4fr) minmax(160px, 2fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.tr-next-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.tr-next-fighters { font-size: 13px; color: var(--text); }
+
+.tr-bracket {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding: 4px 0 10px;
+}
+.tr-round { display: flex; flex-direction: column; gap: 8px; min-width: 170px; }
+.tr-round-head {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.tr-match {
+  display: grid;
+  gap: 2px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--muted);
+}
+.tr-match.is-done { border-color: var(--line); }
+.tr-side { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-side.is-winner { color: var(--text); font-weight: 650; }
+
+@media (max-width: 720px) {
+  .tr-next-row { grid-template-columns: 1fr; }
+  .ms-head { flex-direction: column; }
+}

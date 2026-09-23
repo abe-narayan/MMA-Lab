@@ -16,9 +16,11 @@
  */
 
 import { AttributeSlider } from './AttributeSlider';
+import { DisciplineDetail } from './DisciplineDetail';
 import { TierBadge } from './TierBadge';
 import { DISCIPLINE_META } from '../model/fieldMeta';
 import type { DisciplineSection } from '../model/editorModel';
+import type { DisciplineTierRow } from '../model/derivedModel';
 import { clampNumber, describedByIdForPath, fieldIdForPath } from '../model/paths';
 
 export interface SubSkillGridProps {
@@ -30,15 +32,25 @@ export interface SubSkillGridProps {
   expanded: boolean;
   onToggleExpanded: (id: string) => void;
   onChange: (path: string, value: number) => void;
+  /** Non-numeric writes: the grade block, the specialisation list, the base flag. */
+  onField: (path: string, value: unknown) => void;
   onTrain: (id: string) => void;
   onUntrain: (id: string) => void;
   /** Paths that currently carry a validation error. */
   invalidPaths: ReadonlySet<string>;
+  /** Live derived row for this discipline, for the §8.1 detail panel. */
+  derived: DisciplineTierRow | null;
+  /**
+   * Effective sub-skill values after rust, transfer, priors, specialisations
+   * and sparring. Shown beside each stored slider so the user can see the
+   * distance between what they authored and what the sim will use.
+   */
+  effectiveSub: Readonly<Record<string, number>> | null;
 }
 
 export function SubSkillGrid({
   section, tier, effectiveMean, expanded, onToggleExpanded,
-  onChange, onTrain, onUntrain, invalidPaths,
+  onChange, onField, onTrain, onUntrain, invalidPaths, derived, effectiveSub,
 }: SubSkillGridProps): JSX.Element {
   const yearsId = fieldIdForPath(section.yearsPath);
   const qualityId = fieldIdForPath(section.qualityPath);
@@ -139,20 +151,50 @@ export function SubSkillGrid({
           </p>
         )}
 
+        {section.trained ? (
+          <DisciplineDetail
+            section={section}
+            derived={derived}
+            onNumber={onChange}
+            onField={onField}
+            invalidPaths={invalidPaths}
+          />
+        ) : null}
+
+        <h5 className="fc-h fc-h--sub">Sub-skills</h5>
         <div className="subskill-grid">
-          {section.subSkills.map((f) => (
-            <AttributeSlider
-              key={f.path}
-              dense
-              path={f.path}
-              label={f.label}
-              value={f.value}
-              help={f.help}
-              disabled={!section.trained}
-              invalid={invalidPaths.has(f.path)}
-              onChange={onChange}
-            />
-          ))}
+          {section.subSkills.map((f) => {
+            // The effective value is the honest one: it carries the rust, the
+            // transfer credit, the grade floor and the specialisation bias.
+            // Printing it beside the stored slider is the whole point of the
+            // panel — otherwise the user is authoring a number the sim edits
+            // behind their back.
+            const eff = effectiveSub?.[f.skill];
+            const delta = eff === undefined ? 0 : eff - f.value;
+            return (
+              <div className="subskill-row" key={f.path}>
+                <AttributeSlider
+                  dense
+                  path={f.path}
+                  label={f.label}
+                  value={f.value}
+                  help={f.help}
+                  disabled={!section.trained}
+                  invalid={invalidPaths.has(f.path)}
+                  onChange={onChange}
+                />
+                {eff === undefined ? null : (
+                  <span
+                    className={`subskill-eff mono${delta > 0.05 ? ' is-up' : delta < -0.05 ? ' is-down' : ''}`}
+                    title="Effective value after rust, cross-discipline transfer, grade prior, specialisations and sparring intensity."
+                  >
+                    eff {eff.toFixed(1)}
+                    {Math.abs(delta) >= 0.05 ? ` (${delta > 0 ? '+' : ''}${delta.toFixed(1)})` : ''}
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </section>

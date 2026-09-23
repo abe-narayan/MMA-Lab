@@ -17,10 +17,41 @@
  * written before those chapters fixed their ids, so §4's alias map is applied
  * here at construction time rather than silently dropping an id that does not
  * resolve.
+ *
+ * ## The §8 depth fields, and one rule about them
+ *
+ * Every preset carries the chapter §8 detail: a start age, a weekly volume, a
+ * coach quality, a base art, a grade, a competition record in each art, its
+ * specialisations, the overall-experience block and a biography. They are
+ * there to be exemplary — a user opening the Olympic Judoka should see what a
+ * fully described fighter looks like.
+ *
+ * The rule is that **no §8 field on a preset may double-count something the
+ * preset's own numbers already encode.** These fifteen are the calibration
+ * fixtures of §6 (C-1 skill gap, C-3 age, C-9 punch force, C-11 tier priors),
+ * and their sub-skills and attributes were authored as the *finished* picture
+ * of each fighter. So:
+ *
+ *  - `sparringIntensity` stays at the neutral 50. The presets' sub-skills are
+ *    already what the fighter can do against resistance; a second multiplier
+ *    on top would move the whole ladder.
+ *  - `monthsSinceTrained` stays at 0 except where an archetype's story is that
+ *    he has stopped training something (the ageing veteran's Muay Thai).
+ *  - the grade and the competition record are authored honestly and simply do
+ *    not bite, because §8.1.3 floors the art's *mean* and every preset is
+ *    already authored at or above what its grade attests. That is the check
+ *    working, not the check being avoided.
+ *  - specialisations are mean-neutral by construction (§8.1.4), so they
+ *    reshape a preset without moving its tier.
+ *  - injuries are listed only where they are part of the fighter — the ageing
+ *    veteran's two reconstructions and recurrent hand. A preset in peak camp
+ *    has none, which is a claim, not an omission.
  */
 
 import {
-  weightClassFor,
+  weightClassFor, DISCIPLINE_IDS,
+  type CoreDisciplineId, type DisciplineGrade, type DisciplineSkills, type DisciplineCompetition,
+  type FighterHistory, type InjuryEntry,
   type BjjSkills, type BoxingSkills, type BuildBlend, type CareerRecord, type ComboSpec,
   type FighterDefinition, type FighterDisciplines, type FightRecord, type GuardStyle,
   type Handedness, type Initiative, type JudoSkills, type KarateSkills, type KickboxingSkills,
@@ -113,6 +144,38 @@ interface PresetCareer {
   daysSinceLastBout?: number;
   stanceExposure?: { orthodox: number; southpaw: number };
   weightCut?: { cutPct: number; regainPct: number; residualDehydration: number };
+
+  // --- 01 §8.2 overall experience ----------------------------------------
+  /** Defaults to 3 x pro bouts + 2 x amateur bouts if omitted. */
+  totalRounds?: number;
+  yearsPro?: number;
+  /** 0-100; defaults to 50 (the neutral value of the §8.2 scaling). */
+  oppositionLevel?: number;
+  mainEvents?: number;
+  titleWins?: number;
+  warFights?: number;
+  hardSparringYears?: number;
+}
+
+/**
+ * Per-discipline §8.1 depth for a preset.
+ *
+ * Only the fields that cannot be inferred are written per archetype. The rest
+ * — start age, volume, sessions, coach quality — are derived in `preset()`
+ * from the age, the years and the training quality the archetype already
+ * declares, because a preset that restated them would be a preset that could
+ * contradict itself.
+ */
+interface PresetDepth {
+  grade?: DisciplineGrade;
+  competition?: DisciplineCompetition;
+  specialisations?: string[];
+  /** Overrides the `age - years` default; set it where the story needs it. */
+  startAge?: number;
+  /** Months out of this art. 0 for everything the fighter still trains. */
+  monthsSinceTrained?: number;
+  /** Overrides the flag `preset()` puts on the longest-trained art. */
+  isBase?: boolean;
 }
 
 interface PresetStyle {
@@ -146,6 +209,62 @@ interface PresetInput {
   disciplines: FighterDisciplines;
   career: PresetCareer;
   style: PresetStyle;
+  /** 01 §8.1 per-art depth, keyed by discipline id. */
+  depth?: Partial<Record<CoreDisciplineId, PresetDepth>>;
+  /** 01 §8.3, §8.4 biography. Omitted means an unmarked, uninjured fighter. */
+  history?: FighterHistory;
+  /** 01 §8.3: walk-around mass, hand split and limb asymmetry. */
+  physique?: {
+    naturalWeightKg?: number;
+    handStrengthSplit?: number;
+    limbAsymmetry?: { armPct: number; legPct: number };
+  };
+}
+
+const clampN = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
+const round1 = (v: number): number => Math.round(v * 10) / 10;
+
+/**
+ * Fill one discipline block's §8.1 depth.
+ *
+ * Three of the fields are *derived* rather than authored, because the preset
+ * already contains the information they encode:
+ *
+ *  - `startAge = age - yearsTrained`. An archetype who has wrestled eighteen
+ *    years at twenty-nine started at eleven, and saying so twice is an
+ *    invitation to disagree with yourself.
+ *  - volume and sessions from `trainingQuality`, on the §8.1.2 reference of
+ *    8 h across 5 sessions at q = 1.0: `h = 3 + 12(q - 0.55)`, which puts the
+ *    0.6 hobbyist at 3.6 h/week and the 1.15 elite camp at 10.2.
+ *  - `coachQuality = 20 + 130(q - 0.6)`, the same claim on the 0-100 scale.
+ *
+ * `sparringIntensity` stays at the neutral 50 and `monthsSinceTrained` at 0
+ * for every preset unless the archetype says otherwise. That is deliberate and
+ * it is not laziness: the presets are the calibration fixtures of §6, and
+ * their sub-skills are authored as the *finished* picture of each art — what
+ * the fighter can actually do, sparring included. Applying a second
+ * sparring-intensity multiplier on top would double-count it and move the
+ * whole calibration ladder. A user's own fighter, authored from a coach's
+ * estimate rather than from an outcome, is exactly the case the multiplier is
+ * for.
+ */
+function withDepth(
+  block: DisciplineSkills, ageYears: number, depth: PresetDepth | undefined, isBase: boolean,
+): DisciplineSkills {
+  const q = block.trainingQuality ?? 1;
+  return {
+    ...block,
+    startAge: depth?.startAge ?? Math.round(clampN(ageYears - block.years, 5, 45)),
+    hoursPerWeek: round1(clampN(3 + 12 * (q - 0.55), 1, 28)),
+    sessionsPerWeek: Math.round(clampN(2 + 4 * (q - 0.55), 1, 12)),
+    coachQuality: Math.round(clampN(20 + 130 * (q - 0.6), 5, 98)),
+    sparringIntensity: 50,
+    monthsSinceTrained: depth?.monthsSinceTrained ?? 0,
+    isBase: depth?.isBase ?? isBase,
+    specialisations: depth?.specialisations ?? [],
+    ...(depth?.grade ? { grade: depth.grade } : {}),
+    ...(depth?.competition ? { competition: depth.competition } : block.competition ? {} : {}),
+  };
 }
 
 const LOSING_TO_LEGACY: Readonly<Record<LosingBehaviour, StyleSpec['whenLosing']>> = Object.freeze({
@@ -186,7 +305,39 @@ function preset(input: PresetInput): FighterDefinition {
     // enters purely through fightNightKg (01 §7.2 (7)).
     weightCut: input.career.weightCut ?? { cutPct: 7, regainPct, residualDehydration: 0.01 },
     winStreak: input.career.winStreak ?? 0,
+
+    // --- 01 §8.2 -----------------------------------------------------------
+    // Rounds default to three per pro bout and two per amateur bout, which is
+    // what a mixed record of finishes and decisions averages to. That is above
+    // the bout count, so the §8.2 surplus term is non-zero for every preset and
+    // the ladder is exercised rather than merely present.
+    totalRounds: input.career.totalRounds ?? Math.round(3 * proTotal + 2 * total(input.career.amateur)),
+    yearsPro: input.career.yearsPro ?? round1(proTotal / 2.5),
+    oppositionLevel: input.career.oppositionLevel ?? 50,
+    mainEvents: input.career.mainEvents ?? 0,
+    titleWins: input.career.titleWins ?? 0,
+    warFights: input.career.warFights ?? 0,
+    hardSparringYears: input.career.hardSparringYears ?? 0,
   };
+
+  // §8.1: the base art is the one with the most years behind it, unless an
+  // archetype names a different one.
+  let baseArt: CoreDisciplineId | null = null;
+  let bestYears = -1;
+  for (const id of DISCIPLINE_IDS) {
+    const block = input.disciplines[id];
+    if (block && block.years > bestYears) {
+      bestYears = block.years;
+      baseArt = id;
+    }
+  }
+  const disciplines: FighterDisciplines = {};
+  for (const id of DISCIPLINE_IDS) {
+    const block = input.disciplines[id];
+    if (!block) continue;
+    (disciplines as Record<string, DisciplineSkills>)[id] =
+      withDepth(block, b.ageYears, input.depth?.[id], id === baseArt);
+  }
 
   return {
     schema: 1,
@@ -209,6 +360,13 @@ function preset(input: PresetInput): FighterDefinition {
       handedness: b.handedness ?? 'right',
       dominantLeg: b.handedness ?? 'right',
       sex: 'male',
+      // §8.3. The walk-around default reproduces the cut the preset already
+      // implies through `weightCut.cutPct`, so the severity floor introduced
+      // in §8.3 never exceeds what the archetype was calibrated with.
+      naturalWeightKg: input.physique?.naturalWeightKg
+        ?? round1(b.weighInKg / (1 - (input.career.weightCut?.cutPct ?? 7) / 100)),
+      handStrengthSplit: input.physique?.handStrengthSplit ?? 50,
+      limbAsymmetry: input.physique?.limbAsymmetry ?? { armPct: 0, legPct: 0 },
     },
     // Appearance does not affect the simulation; the creator/generator fills it.
     appearance: {
@@ -233,9 +391,15 @@ function preset(input: PresetInput): FighterDefinition {
       gripStrength: input.physical.gripStrength ?? Math.round(0.7 * input.physical.strength + 15),
       neckStrength: input.physical.neck,
     },
-    disciplines: input.disciplines,
+    disciplines,
     mental: input.mental,
     record,
+    history: input.history ?? {
+      injuries: [],
+      surgeries: 0,
+      weightCutHistory: { hardCuts: 0, worstCutPct: input.career.weightCut?.cutPct ?? 7, missedWeight: 0 },
+      cardioBackground: { sport: 'none', years: 0 },
+    },
     style: {
       primaryMode: style.primaryMode,
       preferredRange: style.preferredRange,
@@ -283,6 +447,22 @@ const mma = (years: number, q: number, tags: string[], sub: MmaIntegrationSkills
 /** §4.1 "the modern UFC welterweight": wrestling T4, boxing T3, mmaTier T4. */
 export const ARCH_ELITE_WRESTLER_BOXER = preset({
   id: 'arch.elite_wrestler_boxer', name: 'Elite Wrestler-Boxer', short: 'EWB',
+  depth: {
+    wrestling: {
+      grade: { system: 'wrestlingCredential', rank: 'wr.allAmerican' },
+      competition: { level: 'national', bouts: 150, wins: 128, losses: 22, amateurBouts: 150, amateurWins: 128, bestPlacing: 'nationalPodium', medals: 2 },
+      specialisations: ['spec.wr.chain', 'spec.wr.cage'],
+    },
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.open' }, specialisations: ['spec.box.outside'] },
+    bjj: { grade: { system: 'bjjBelt', rank: 'bjj.brown', stripes: 2 }, specialisations: ['spec.bjj.pressurePassing'] },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 8, worstCutPct: 9, missedWeight: 0 },
+    cardioBackground: { sport: 'crossCountry', years: 3 },
+  },
   notes: 'The modern UFC welterweight: folkstyle base, functional boxing, cage wrestling.',
   body: { heightM: 1.80, reachM: 1.85, legReachM: 1.04, weighInKg: 77.1, fightNightKg: 84.1, weightClass: 'wc.welterweight', ageYears: 29, bodyFatPct: 8, build: { ecto: 0.15, meso: 0.75, endo: 0.10 }, stance: 'orthodox' },
   physical: { strength: 78, explosiveness: 76, speed: 66, handSpeed: 72, kickSpeed: 55, cardio: 80, chin: 70, bodyToughness: 72, recovery: 74, flexibility: 50, balance: 82, reactionTime: 60, neck: 78 },
@@ -313,6 +493,22 @@ export const ARCH_ELITE_WRESTLER_BOXER = preset({
 /** §4.2 "Muay Femur turned MMA lightweight": muayThai T4, grappling T2. */
 export const ARCH_THAI_STRIKER = preset({
   id: 'arch.thai_striker', name: 'Thai Striker', short: 'THA',
+  depth: {
+    muayThai: {
+      grade: { system: 'thaiRecord', rank: 'mt.bangkokStadium' },
+      competition: { level: 'international', bouts: 84, wins: 66, losses: 18, proBouts: 84, proWins: 66, bestPlacing: 'nationalTitle', medals: 1 },
+      specialisations: ['spec.mt.kicking', 'spec.mt.clinch'],
+    },
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.novice' } },
+    wrestling: { },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 10, worstCutPct: 8, missedWeight: 0 },
+    cardioBackground: { sport: 'running', years: 6 },
+  },
   notes: 'Muay Femur turned MMA lightweight: elite kicks and clinch, thin ground game.',
   body: { heightM: 1.78, reachM: 1.83, legReachM: 1.05, weighInKg: 70.3, fightNightKg: 76.1, weightClass: 'wc.lightweight', ageYears: 27, bodyFatPct: 8, build: { ecto: 0.45, meso: 0.50, endo: 0.05 }, stance: 'orthodox' },
   physical: { strength: 58, explosiveness: 74, speed: 70, handSpeed: 70, kickSpeed: 86, cardio: 78, chin: 62, bodyToughness: 80, recovery: 70, flexibility: 84, balance: 86, reactionTime: 58, neck: 60 },
@@ -345,6 +541,22 @@ export const ARCH_THAI_STRIKER = preset({
 /** §4.3 "black-belt world medallist, striking still catching up". */
 export const ARCH_BJJ_GUARD_PLAYER = preset({
   id: 'arch.bjj_guard_player', name: 'BJJ Guard Player', short: 'BJJ',
+  depth: {
+    bjj: {
+      grade: { system: 'bjjBelt', rank: 'bjj.black', stripes: 1 },
+      competition: { level: 'international', bouts: 120, wins: 92, losses: 28, bestPlacing: 'worldMedal', medals: 4 },
+      specialisations: ['spec.bjj.guardPlaying', 'spec.bjj.legLocks'],
+    },
+    judo: { grade: { system: 'judoKyuDan', rank: 'judo.kyu1' }, specialisations: ['spec.ju.newaza'] },
+    wrestling: { },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 5, worstCutPct: 8, missedWeight: 0 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Black-belt world medallist; chooses to play guard because the sport instinct says so.',
   body: { heightM: 1.75, reachM: 1.78, legReachM: 1.01, weighInKg: 65.8, fightNightKg: 71.7, weightClass: 'wc.featherweight', ageYears: 31, bodyFatPct: 9, build: { ecto: 0.40, meso: 0.50, endo: 0.10 }, stance: 'southpaw', handedness: 'left' },
   physical: { strength: 55, explosiveness: 58, speed: 56, handSpeed: 48, kickSpeed: 46, cardio: 74, chin: 58, bodyToughness: 64, recovery: 68, flexibility: 90, balance: 74, reactionTime: 52, neck: 56 },
@@ -377,6 +589,22 @@ export const ARCH_BJJ_GUARD_PLAYER = preset({
 /** §4.4 "Olympic-level judoka, three years into MMA". */
 export const ARCH_JUDOKA = preset({
   id: 'arch.judoka', name: 'Olympic Judoka', short: 'JUD',
+  depth: {
+    judo: {
+      grade: { system: 'judoKyuDan', rank: 'judo.sandan' },
+      competition: { level: 'international', bouts: 240, wins: 188, losses: 52, bestPlacing: 'olympicMedal', medals: 5 },
+      specialisations: ['spec.ju.gripping', 'spec.ju.footSweeps'],
+    },
+    bjj: { grade: { system: 'bjjBelt', rank: 'bjj.purple', stripes: 3 }, specialisations: ['spec.bjj.pressurePassing'] },
+    wrestling: { },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 12, worstCutPct: 10, missedWeight: 0 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Olympic-level judoka three years into MMA: world-class grips and throws, raw hands.',
   body: { heightM: 1.83, reachM: 1.86, legReachM: 1.06, weighInKg: 83.9, fightNightKg: 91.5, weightClass: 'wc.middleweight', ageYears: 30, bodyFatPct: 10, build: { ecto: 0.10, meso: 0.70, endo: 0.20 }, stance: 'orthodox' },
   physical: { strength: 80, explosiveness: 72, speed: 54, handSpeed: 52, kickSpeed: 44, cardio: 70, chin: 64, bodyToughness: 76, recovery: 66, flexibility: 62, balance: 90, reactionTime: 56, neck: 84 },
@@ -408,6 +636,21 @@ export const ARCH_JUDOKA = preset({
 /** §4.5 "Olympic-style boxer who walks you down". */
 export const ARCH_PRESSURE_BOXER = preset({
   id: 'arch.pressure_boxer', name: 'Pressure Boxer', short: 'PBX',
+  depth: {
+    boxing: {
+      grade: { system: 'boxingAmateur', rank: 'box.national' },
+      competition: { level: 'national', bouts: 96, wins: 78, losses: 18, amateurBouts: 96, amateurWins: 78, bestPlacing: 'nationalTitle', medals: 2 },
+      specialisations: ['spec.box.inside', 'spec.box.power'],
+    },
+    wrestling: { },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 9, worstCutPct: 9, missedWeight: 1 },
+    cardioBackground: { sport: 'running', years: 4 },
+  },
   notes: 'Olympic-style boxer who walks you down; heart 86 plus aggression 80 is the brawler-in-trouble profile.',
   body: { heightM: 1.75, reachM: 1.80, legReachM: 1.00, weighInKg: 70.3, fightNightKg: 76.3, weightClass: 'wc.lightweight', ageYears: 28, bodyFatPct: 8, build: { ecto: 0.25, meso: 0.65, endo: 0.10 }, stance: 'orthodox' },
   physical: { strength: 62, explosiveness: 74, speed: 72, handSpeed: 80, kickSpeed: 48, cardio: 84, chin: 76, bodyToughness: 74, recovery: 76, flexibility: 48, balance: 72, reactionTime: 64, neck: 70 },
@@ -441,6 +684,22 @@ export const ARCH_PRESSURE_BOXER = preset({
 /** §4.6 "karate/kickboxing counter puncher, southpaw" — the one T5 striker. */
 export const ARCH_COUNTER_STRIKER = preset({
   id: 'arch.counter_striker', name: 'Counter Striker', short: 'CTR',
+  depth: {
+    karate: {
+      grade: { system: 'karateDan', rank: 'kar.nationalSquad' },
+      competition: { level: 'international', bouts: 180, wins: 150, losses: 30, bestPlacing: 'continentalMedal', medals: 3 },
+      specialisations: ['spec.kar.pointSniping'],
+    },
+    kickboxing: { },
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.open' } },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 6, worstCutPct: 8, missedWeight: 0 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Karate/kickboxing counter puncher, switch stance, 33 years old: the ageing chin is visible.',
   body: { heightM: 1.88, reachM: 1.96, legReachM: 1.10, weighInKg: 83.9, fightNightKg: 90.6, weightClass: 'wc.middleweight', ageYears: 33, bodyFatPct: 9, build: { ecto: 0.55, meso: 0.40, endo: 0.05 }, stance: 'switch', handedness: 'left' },
   physical: { strength: 60, explosiveness: 78, speed: 80, handSpeed: 82, kickSpeed: 80, cardio: 76, chin: 66, bodyToughness: 60, recovery: 66, flexibility: 80, balance: 84, reactionTime: 70, neck: 62 },
@@ -475,6 +734,12 @@ export const ARCH_COUNTER_STRIKER = preset({
 /** §4.7 "big guy from the bar, never trained" — every discipline T0. */
 export const ARCH_BRAND_NEW_BRAWLER = preset({
   id: 'arch.brand_new_brawler', name: 'Brand New Brawler', short: 'BNB',
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 0, worstCutPct: 0, missedWeight: 0 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Never trained. Every T0 tell in the catalogue fires: eyes shut, turns away, football tackle, no tap.',
   body: { heightM: 1.84, reachM: 1.86, legReachM: 1.04, weighInKg: 95, fightNightKg: 95, weightClass: 'wc.cruiserweight', ageYears: 24, bodyFatPct: 22, build: { ecto: 0.10, meso: 0.35, endo: 0.55 }, stance: 'orthodox' },
   physical: { strength: 38, explosiveness: 35, speed: 32, handSpeed: 42, kickSpeed: 30, cardio: 26, chin: 50, bodyToughness: 48, recovery: 36, flexibility: 30, balance: 34, reactionTime: 48, neck: 46 },
@@ -498,6 +763,16 @@ export const ARCH_BRAND_NEW_BRAWLER = preset({
 /** §4.8 "six months of boxing and BJJ, trains four days a week". */
 export const ARCH_GYM_FIT_BEGINNER = preset({
   id: 'arch.gym_fit_beginner', name: 'Gym-Fit Beginner', short: 'GFB',
+  depth: {
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.novice' } },
+    bjj: { grade: { system: 'bjjBelt', rank: 'bjj.white', stripes: 2 } },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 0, worstCutPct: 3, missedWeight: 0 },
+    cardioBackground: { sport: 'cycling', years: 5 },
+  },
   notes: 'Six months in: knows the names, taps late, drops the hands after every punch.',
   body: { heightM: 1.78, reachM: 1.80, legReachM: 1.02, weighInKg: 79, fightNightKg: 79, weightClass: 'wc.super_welterweight', ageYears: 26, bodyFatPct: 14, build: { ecto: 0.30, meso: 0.55, endo: 0.15 }, stance: 'orthodox' },
   physical: { strength: 52, explosiveness: 50, speed: 50, handSpeed: 46, kickSpeed: 40, cardio: 58, chin: 50, bodyToughness: 50, recovery: 54, flexibility: 46, balance: 44, reactionTime: 50, neck: 48 },
@@ -528,6 +803,23 @@ export const ARCH_GYM_FIT_BEGINNER = preset({
 /** §4.9 "8-3 on the regional circuit" — the T3 vs T3 reference fighter. */
 export const ARCH_REGIONAL_PRO_ALLROUNDER = preset({
   id: 'arch.regional_pro_allrounder', name: 'Regional Pro All-Rounder', short: 'RPA',
+  depth: {
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.regional' } },
+    muayThai: { },
+    wrestling: {
+      grade: { system: 'wrestlingCredential', rank: 'wr.statePlacer' },
+      competition: { level: 'local', bouts: 60, wins: 42, losses: 18, amateurBouts: 60, amateurWins: 42, bestPlacing: 'localPodium' },
+      specialisations: ['spec.wr.cage'],
+    },
+    bjj: { grade: { system: 'bjjBelt', rank: 'bjj.purple' }, specialisations: ['spec.bjj.defensive'] },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 4, worstCutPct: 8, missedWeight: 0 },
+    cardioBackground: { sport: 'football', years: 8 },
+  },
   notes: 'The T3 vs T3 reference fighter for the tier-prior rows of FD §5 and calibration hook C-1.',
   body: { heightM: 1.80, reachM: 1.84, legReachM: 1.03, weighInKg: 77.1, fightNightKg: 83.4, weightClass: 'wc.welterweight', ageYears: 27, bodyFatPct: 9, build: { ecto: 0.25, meso: 0.60, endo: 0.15 }, stance: 'orthodox' },
   physical: { strength: 58, explosiveness: 58, speed: 56, handSpeed: 58, kickSpeed: 56, cardio: 62, chin: 58, bodyToughness: 58, recovery: 58, flexibility: 54, balance: 58, reactionTime: 54, neck: 56 },
@@ -556,6 +848,30 @@ export const ARCH_REGIONAL_PRO_ALLROUNDER = preset({
 /** §4.10 "former champion at 38, chin gone, brain intact" — calibration C-3. */
 export const ARCH_AGEING_VETERAN = preset({
   id: 'arch.ageing_veteran', name: 'Ageing Veteran', short: 'VET',
+  depth: {
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.national' } },
+    wrestling: {
+      grade: { system: 'wrestlingCredential', rank: 'wr.ncaaD1' },
+      competition: { level: 'national', bouts: 130, wins: 96, losses: 34, amateurBouts: 130, amateurWins: 96, bestPlacing: 'nationalPodium' },
+      specialisations: ['spec.wr.matReturns'],
+    },
+    bjj: { grade: { system: 'bjjBelt', rank: 'bjj.black' }, specialisations: ['spec.bjj.defensive'] },
+    muayThai: { monthsSinceTrained: 30 },
+    mmaIntegration: { },
+  },
+  history: {
+    // The one preset that carries its career on it. Every entry is old and
+    // decayed; what still bites is the residue the two reconstructions and the
+    // recurrent hand leave behind, which is the point of the archetype.
+    injuries: [
+      { region: 'knee', severity: 70, monthsAgo: 60, surgery: true },
+      { region: 'shoulder', severity: 60, monthsAgo: 44, surgery: true },
+      { region: 'hand', severity: 45, monthsAgo: 28, recurrent: true },
+    ],
+    surgeries: 2,
+    weightCutHistory: { hardCuts: 18, worstCutPct: 11, missedWeight: 1 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Former champion at 38: chinEff ~32 after age and KO history, skills and IQ untouched. Calibration archetype C-3.',
   body: { heightM: 1.88, reachM: 1.93, legReachM: 1.08, weighInKg: 93.0, fightNightKg: 101.0, weightClass: 'wc.light_heavyweight', ageYears: 38, bodyFatPct: 12, build: { ecto: 0.15, meso: 0.65, endo: 0.20 }, stance: 'orthodox' },
   physical: { strength: 74, explosiveness: 60, speed: 52, handSpeed: 66, kickSpeed: 54, cardio: 62, chin: 78, bodyToughness: 80, recovery: 50, flexibility: 42, balance: 74, reactionTime: 56, neck: 80 },
@@ -590,6 +906,18 @@ export const ARCH_AGEING_VETERAN = preset({
 /** §4.11 "one-punch heavyweight, 118 kg, two-round gas tank". */
 export const ARCH_HEAVYWEIGHT_POWER_PUNCHER = preset({
   id: 'arch.heavyweight_power_puncher', name: 'Heavyweight Power Puncher', short: 'HWP',
+  depth: {
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.regional' }, specialisations: ['spec.box.power'] },
+    kickboxing: { },
+    mmaIntegration: { },
+  },
+  physique: { handStrengthSplit: 78 },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 0, worstCutPct: 4, missedWeight: 0 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Highest rearHand of the presets by mass, not skill; expected to lead KD-per-landed-power-strike both dealt and absorbed.',
   body: { heightM: 1.93, reachM: 2.01, legReachM: 1.12, weighInKg: 117.0, fightNightKg: 118.0, weightClass: 'wc.heavyweight', ageYears: 31, bodyFatPct: 18, build: { ecto: 0.05, meso: 0.55, endo: 0.40 }, stance: 'orthodox' },
   physical: { strength: 82, explosiveness: 70, speed: 40, handSpeed: 64, kickSpeed: 42, cardio: 38, chin: 62, bodyToughness: 66, recovery: 44, flexibility: 34, balance: 56, reactionTime: 50, neck: 86 },
@@ -628,6 +956,22 @@ ARCH_HEAVYWEIGHT_POWER_PUNCHER.style.pacing = [
 /** §4.12 "8 significant strikes a minute, never stops moving". */
 export const ARCH_FLYWEIGHT_VOLUME_STRIKER = preset({
   id: 'arch.flyweight_volume_striker', name: 'Flyweight Volume Striker', short: 'FVS',
+  depth: {
+    kickboxing: {
+      grade: { system: 'thaiRecord', rank: 'mt.provincial' },
+      competition: { level: 'national', bouts: 40, wins: 32, losses: 8, proBouts: 40, proWins: 32, bestPlacing: 'nationalPodium' },
+      specialisations: ['spec.kb.volume', 'spec.kb.lowKicks'],
+    },
+    boxing: { },
+    wrestling: { },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 0, worstCutPct: 10, missedWeight: 0 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Dutch-style volume: light but technically sharp, ~8-9 significant attempts a minute.',
   body: { heightM: 1.65, reachM: 1.68, legReachM: 0.94, weighInKg: 56.7, fightNightKg: 61.9, weightClass: 'wc.flyweight', ageYears: 26, bodyFatPct: 7, build: { ecto: 0.45, meso: 0.50, endo: 0.05 }, stance: 'switch' },
   physical: { strength: 44, explosiveness: 80, speed: 92, handSpeed: 88, kickSpeed: 84, cardio: 92, chin: 64, bodyToughness: 62, recovery: 86, flexibility: 78, balance: 82, reactionTime: 72, neck: 48 },
@@ -660,6 +1004,23 @@ export const ARCH_FLYWEIGHT_VOLUME_STRIKER = preset({
 /** §4.13 "combat sambo master of sport, lightweight". */
 export const ARCH_SAMBO_GRAPPLER = preset({
   id: 'arch.sambo_grappler', name: 'Sambo Grappler', short: 'SAM',
+  depth: {
+    sambo: {
+      grade: { system: 'samboRank', rank: 'sam.internationalMaster' },
+      competition: { level: 'international', bouts: 160, wins: 130, losses: 30, bestPlacing: 'worldMedal', medals: 3 },
+      specialisations: ['spec.sam.combat', 'spec.sam.legLocks'],
+    },
+    wrestling: { grade: { system: 'wrestlingCredential', rank: 'wr.statePlacer' } },
+    judo: { grade: { system: 'judoKyuDan', rank: 'judo.kyu1' } },
+    bjj: { grade: { system: 'bjjBelt', rank: 'bjj.purple' } },
+    mmaIntegration: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 7, worstCutPct: 9, missedWeight: 0 },
+    cardioBackground: { sport: 'none', years: 0 },
+  },
   notes: 'Combat sambo master of sport: throws into ground-and-pound, cage-heavy, 9-fight win streak.',
   body: { heightM: 1.75, reachM: 1.78, legReachM: 1.00, weighInKg: 70.3, fightNightKg: 76.3, weightClass: 'wc.lightweight', ageYears: 28, bodyFatPct: 8, build: { ecto: 0.15, meso: 0.75, endo: 0.10 }, stance: 'orthodox' },
   physical: { strength: 72, explosiveness: 70, speed: 60, handSpeed: 56, kickSpeed: 50, cardio: 82, chin: 66, bodyToughness: 78, recovery: 78, flexibility: 56, balance: 86, reactionTime: 56, neck: 76 },
@@ -692,6 +1053,20 @@ export const ARCH_SAMBO_GRAPPLER = preset({
 /** §4.14 the legacy Athlete A with creator-spread sub-skills. */
 export const ARCH_TKD_CONVERT = preset({
   id: 'arch.tkd_convert', name: 'TKD Convert', short: 'TKD',
+  depth: {
+    taekwondo: {
+      grade: { system: 'taekwondoDan', rank: 'tkd.sam_dan' },
+      competition: { level: 'national', bouts: 110, wins: 88, losses: 22, bestPlacing: 'nationalPodium', medals: 2 },
+      specialisations: ['spec.tkd.headHunting', 'spec.tkd.footwork'],
+    },
+    boxing: { },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 1, worstCutPct: 6, missedWeight: 0 },
+    cardioBackground: { sport: 'running', years: 3 },
+  },
   notes: 'legacy.toFighter(ATHLETE_A) with creator-spread sub-skills: competent striking, zero ground game.',
   body: { heightM: 1.778, reachM: 1.824, legReachM: 1.022, weighInKg: 90.7, fightNightKg: 90.7, weightClass: 'wc.super_middleweight', ageYears: 20, bodyFatPct: 12, build: { ecto: 0.20, meso: 0.62, endo: 0.18 }, stance: 'orthodox' },
   physical: { strength: 74, explosiveness: 64, speed: 57, handSpeed: 54, kickSpeed: 62, cardio: 70, chin: 50, bodyToughness: 50, recovery: 70, flexibility: 60, balance: 58, reactionTime: 50, neck: 55 },
@@ -722,6 +1097,23 @@ export const ARCH_TKD_CONVERT = preset({
 /** §4.15 "the T5 reference: complete lightweight champion". */
 export const ARCH_CHAMPION_COMPLETE = preset({
   id: 'arch.champion_complete', name: 'Complete Champion', short: 'CHM',
+  depth: {
+    boxing: { grade: { system: 'boxingAmateur', rank: 'box.national' } },
+    muayThai: { },
+    wrestling: {
+      grade: { system: 'wrestlingCredential', rank: 'wr.allAmerican' },
+      competition: { level: 'national', bouts: 170, wins: 148, losses: 22, amateurBouts: 170, amateurWins: 148, bestPlacing: 'nationalTitle', medals: 3 },
+      specialisations: ['spec.wr.chain'],
+    },
+    bjj: { grade: { system: 'bjjBelt', rank: 'bjj.black' }, specialisations: ['spec.bjj.backAttack'] },
+    mmaIntegration: { specialisations: ['spec.mma.gameplan', 'spec.mma.cageControl'] },
+  },
+  history: {
+    injuries: [],
+    surgeries: 0,
+    weightCutHistory: { hardCuts: 10, worstCutPct: 9, missedWeight: 0 },
+    cardioBackground: { sport: 'swimming', years: 6 },
+  },
   notes: 'The T5 reference. mmaIntegration mean 92.8 with IQ 94 and composure 94 passes the T5 mental gate.',
   body: { heightM: 1.78, reachM: 1.83, legReachM: 1.03, weighInKg: 70.3, fightNightKg: 76.3, weightClass: 'wc.lightweight', ageYears: 30, bodyFatPct: 7, build: { ecto: 0.30, meso: 0.62, endo: 0.08 }, stance: 'switch' },
   physical: { strength: 70, explosiveness: 82, speed: 80, handSpeed: 82, kickSpeed: 78, cardio: 90, chin: 80, bodyToughness: 80, recovery: 84, flexibility: 74, balance: 90, reactionTime: 68, neck: 78 },

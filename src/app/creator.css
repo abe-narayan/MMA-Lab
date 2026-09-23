@@ -318,6 +318,60 @@
   gap: 0 24px;
 }
 
+/* ------------------------------------------- per-art detail panel (01 §8.1) */
+
+.disc-detail {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+  margin-top: 6px;
+}
+
+/* The live derived strip. It is a `role="status"` region, so it must stay
+   readable at a glance while a slider is being dragged — hence the monospace
+   figures and the fixed separators rather than a wrapping sentence. */
+.disc-derived {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-radius: var(--r-sm, 4px);
+  padding: 5px 8px;
+  margin: 0 0 10px;
+}
+.disc-derived span + span::before {
+  content: '·';
+  color: var(--faint);
+  margin-right: 12px;
+}
+
+.injury-list { list-style: none; margin: 0 0 10px; padding: 0; }
+.injury-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px 16px;
+  align-items: start;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.injury-row:first-child { border-top: 0; }
+.injury-row .btn { align-self: center; }
+
+/* Stored slider and its effective value, stacked so the grid keeps its
+   columns; the effective figure is deliberately quiet until it differs. */
+.subskill-row { display: flex; flex-direction: column; }
+.subskill-eff {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin: -4px 0 6px;
+  padding-left: 2px;
+}
+.subskill-eff.is-up { color: var(--ok); }
+.subskill-eff.is-down { color: var(--warn, var(--muted)); }
+
+.chip-rank { font-size: 10px; opacity: 0.7; margin-left: 3px; }
+
 /* -------------------------------------------------------------- validation */
 
 .validation {

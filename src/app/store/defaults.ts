@@ -25,10 +25,12 @@
  */
 
 import {
-  RNG, SUB_SKILLS, SUBMISSIONS, TECHNIQUES, WEIGHT_CLASS_LIMIT_KG,
-  type BodySpec, type CoreDisciplineId, type DisciplineSkills, type FighterDefinition,
-  type FighterDisciplines, type GuardStyle, type PrimaryMode, type RangeBand, type Sex,
-  type Stance, type StyleSpec, type ThaiStyle,
+  GRADE_RANKS, RNG, SPECIALISATIONS_BY_DISCIPLINE, SUB_SKILLS, SUBMISSIONS, TECHNIQUES,
+  WEIGHT_CLASS_LIMIT_KG,
+  type BodySpec, type CompetitionLevel, type CoreDisciplineId, type DisciplineSkills,
+  type EnduranceSportId, type FighterDefinition, type FighterDisciplines, type FighterHistory,
+  type GradeSystem, type GuardStyle, type InjuryEntry, type InjuryRegion, type PlacingId,
+  type PrimaryMode, type RangeBand, type Sex, type Stance, type StyleSpec, type ThaiStyle,
 } from '../../sim';
 
 type FighterWeightClassId = NonNullable<BodySpec['weightClass']>;
@@ -59,6 +61,11 @@ export function blankFighter(id = 'fighter.new', name = 'New Fighter'): FighterD
       handedness: 'right',
       dominantLeg: 'right',
       sex: 'male',
+      // §8.3 neutral: a fighter who does not cut, punches evenly and is
+      // symmetrical. Each of these is the identity value of its formula.
+      naturalWeightKg: 77.1,
+      handStrengthSplit: 50,
+      limbAsymmetry: { armPct: 0, legPct: 0 },
     },
     appearance: {
       skinTone: 0.5,
@@ -83,6 +90,17 @@ export function blankFighter(id = 'fighter.new', name = 'New Fighter'): FighterD
           levelChanges: 5, clinchStriking: 5, cageWork: 5, groundAndPound: 5,
           getUps: 5, transitions: 5, subDefenceUnderStrikes: 5, gameplanExecution: 5,
         },
+        // The §8.1 depth fields, at the neutral value of each formula, so the
+        // blank template derives exactly as it did before the chapter existed
+        // and every control on the detail panel starts somewhere honest.
+        startAge: 18,
+        hoursPerWeek: 8,
+        sessionsPerWeek: 5,
+        sparringIntensity: 50,
+        coachQuality: 50,
+        monthsSinceTrained: 0,
+        specialisations: [],
+        grade: { system: 'none', rank: 'none.unranked' },
       },
     },
     mental: {
@@ -99,6 +117,21 @@ export function blankFighter(id = 'fighter.new', name = 'New Fighter'): FighterD
       stanceExposure: { orthodox: 0, southpaw: 0 },
       weightCut: { cutPct: 0, regainPct: 0, residualDehydration: 0 },
       winStreak: 0,
+      // §8.2, all at the neutral value: no rounds, average opposition, no
+      // damage history, no override.
+      totalRounds: 0,
+      yearsPro: 0,
+      oppositionLevel: 50,
+      mainEvents: 0,
+      titleWins: 0,
+      warFights: 0,
+      hardSparringYears: 0,
+    },
+    history: {
+      injuries: [],
+      surgeries: 0,
+      weightCutHistory: { hardCuts: 0, worstCutPct: 0, missedWeight: 0 },
+      cardioBackground: { sport: 'none', years: 0 },
     },
     style: {
       primaryMode: 'allRounder',
@@ -229,22 +262,32 @@ export function randomFighter(seed: string, opts: RandomOptions = {}): FighterDe
   const leftChance = stance === 'southpaw' ? 0.60 : sex === 'female' ? 0.099 : 0.126;
   const handedness = rng.chance(leftChance) ? 'left' : 'right';
 
-  // ---- training (§2.3) ---------------------------------------------------
+  // ---- training (§2.3, §8.1) ---------------------------------------------
   const years = TIER_YEARS[tier];
   const quality = TIER_QUALITY[tier];
+
+  // An 18-year-old with eleven years of training would be a warning, so age is
+  // built up from the training instead of drawn beside it. It is drawn *before*
+  // the disciplines now, because §8.1 start ages are `age - years trained` and
+  // a discipline cannot know when it began without knowing how old the fighter
+  // is today.
+  const ageYears = round(clamp(17 + years + rng.normal(4, 2.5), 18, 44), 1);
+
   const primary = opts.primaryDiscipline
     ?? (rng.chance(0.55) ? STRIKING_POOL[rng.int(STRIKING_POOL.length)] : GRAPPLING_POOL[rng.int(GRAPPLING_POOL.length)]);
   const complementPool = STRIKING_POOL.includes(primary) ? GRAPPLING_POOL : STRIKING_POOL;
   const secondary = complementPool[rng.int(complementPool.length)];
 
   const disciplines: FighterDisciplines = {};
-  assign(disciplines, primary, discipline(rng, primary, years * rng.range(0.8, 1.0), quality));
-  assign(disciplines, secondary, discipline(rng, secondary, years * rng.range(0.30, 0.60), quality * 0.9));
-  assign(disciplines, 'mmaIntegration', discipline(rng, 'mmaIntegration', years * rng.range(0.4, 0.8), quality));
-
-  // An 18-year-old with eleven years of training would be a warning, so age is
-  // built up from the training instead of drawn beside it.
-  const ageYears = round(clamp(17 + years + rng.normal(4, 2.5), 18, 44), 1);
+  assign(disciplines, primary, discipline(rng, primary, years * rng.range(0.8, 1.0), quality, {
+    ageYears, tier, isBase: true,
+  }));
+  assign(disciplines, secondary, discipline(rng, secondary, years * rng.range(0.30, 0.60), quality * 0.9, {
+    ageYears, tier: Math.max(0, tier - 1), isBase: false,
+  }));
+  assign(disciplines, 'mmaIntegration', discipline(rng, 'mmaIntegration', years * rng.range(0.4, 0.8), quality, {
+    ageYears, tier, isBase: false,
+  }));
 
   // ---- attributes (§2.2, §2.5) -------------------------------------------
   const athleticBase = 34 + tier * 7;
@@ -283,8 +326,13 @@ export function randomFighter(seed: string, opts: RandomOptions = {}): FighterDe
     adaptability: Math.round(clamp(rng.normal(mentalBase - 6, 7), 5, 95)),
   };
 
-  // ---- record (§2.4) -----------------------------------------------------
+  // ---- record (§2.4, §8.2) ------------------------------------------------
   const record = careerFor(rng, tier, mental.composure);
+  // ---- biography (§8.3, §8.4) --------------------------------------------
+  const history = historyFor(rng, tier, ageYears);
+  // Walk-around mass: the cut is the difference. Bigger classes cut less in
+  // percentage terms, which is what the class regain medians already say.
+  const naturalWeightKg = round(weighInKg * (1 + rng.range(0.06, 0.16) * (1 - 0.4 * heavy)), 1);
 
   return {
     schema: 1,
@@ -306,6 +354,10 @@ export function randomFighter(seed: string, opts: RandomOptions = {}): FighterDe
       handedness,
       dominantLeg: handedness,
       sex,
+      naturalWeightKg,
+      // Most fighters are a little lopsided; a few are one-handed punchers.
+      handStrengthSplit: Math.round(clamp(rng.normal(55, 10), 30, 92)),
+      limbAsymmetry: { armPct: round(clamp(rng.normal(0, 0.8), -3, 3), 1), legPct: round(clamp(rng.normal(0, 0.8), -3, 3), 1) },
     },
     appearance: {
       skinTone: round(rng.next(), 2),
@@ -319,8 +371,60 @@ export function randomFighter(seed: string, opts: RandomOptions = {}): FighterDe
     disciplines,
     mental,
     record,
+    history,
     style: styleFor(rng, primary, tier, mental),
     notes: `Generated from seed "${seed}".`,
+  };
+}
+
+const INJURY_POOL: readonly InjuryRegion[] = [
+  'knee', 'hand', 'shoulder', 'back', 'ribs', 'ankle', 'elbow', 'hip', 'eye', 'neck', 'head',
+];
+
+const ENDURANCE_POOL: readonly EnduranceSportId[] = [
+  'running', 'swimming', 'cycling', 'rowing', 'football', 'crossCountry', 'triathlon',
+];
+
+/**
+ * Injuries, surgeries, cut history and endurance background (01 §8.3, §8.4).
+ *
+ * Injuries accumulate with the tier because the tier is a proxy for career
+ * length: nobody gets to T5 without paying for it. They are dated *backwards*
+ * from today so that most of a veteran's list has already healed — otherwise a
+ * champion would derive as a cripple, which is the failure mode this generator
+ * has to avoid.
+ */
+function historyFor(rng: RNG, tier: number, ageYears: number): FighterHistory {
+  const count = tier <= 1 ? 0 : rng.int(Math.min(4, tier));
+  const injuries: InjuryEntry[] = [];
+  for (let i = 0; i < count; i++) {
+    const region = INJURY_POOL[rng.int(INJURY_POOL.length)];
+    const severity = Math.round(clamp(rng.normal(38, 16), 8, 92));
+    // Spread over the career, skewed old: the fresh ones are the rare ones.
+    const monthsAgo = Math.round(clamp(rng.range(4, Math.max(12, (ageYears - 18) * 12)), 4, 300));
+    const surgery = severity >= 65 && rng.chance(0.55);
+    injuries.push({
+      region,
+      severity,
+      monthsAgo,
+      ...(surgery ? { surgery: true } : {}),
+      ...(rng.chance(0.2) ? { recurrent: true } : {}),
+    });
+  }
+  const surgeries = injuries.filter((i) => i.surgery).length;
+
+  const hasBackground = rng.chance(0.45);
+  return {
+    injuries,
+    surgeries,
+    weightCutHistory: {
+      hardCuts: tier <= 1 ? 0 : rng.int(tier * 3),
+      worstCutPct: round(rng.range(4, 11), 1),
+      missedWeight: rng.chance(0.12) ? 1 : 0,
+    },
+    cardioBackground: hasBackground
+      ? { sport: ENDURANCE_POOL[rng.int(ENDURANCE_POOL.length)], years: round(rng.range(1, 8), 1) }
+      : { sport: 'none', years: 0 },
   };
 }
 
@@ -330,12 +434,127 @@ function assign(into: FighterDisciplines, id: CoreDisciplineId, block: Disciplin
   (into as Record<string, DisciplineSkills>)[id] = block;
 }
 
-/** Sub-skills as `S(years, quality) + N(0, 8)`, exactly as 01 §2.3.2 specifies. */
-function discipline(rng: RNG, id: CoreDisciplineId, years: number, quality: number): DisciplineSkills {
+/**
+ * Which grading system each art is generated with (01 §8.1.3). Kickboxing has
+ * no universal grade, so it borrows Muay Thai's standing; MMA integration has
+ * none at all, which is itself true to life.
+ */
+const GRADE_SYSTEM_FOR: Readonly<Record<CoreDisciplineId, GradeSystem>> = {
+  boxing: 'boxingAmateur',
+  muayThai: 'thaiRecord',
+  kickboxing: 'thaiRecord',
+  karate: 'karateDan',
+  taekwondo: 'taekwondoDan',
+  wrestling: 'wrestlingCredential',
+  judo: 'judoKyuDan',
+  bjj: 'bjjBelt',
+  sambo: 'samboRank',
+  mmaIntegration: 'none',
+};
+
+const COMPETITION_LEVEL_BY_TIER: readonly CompetitionLevel[] =
+  ['none', 'none', 'local', 'local', 'national', 'international'];
+
+const PLACING_BY_TIER: readonly PlacingId[] =
+  ['none', 'none', 'none', 'localPodium', 'nationalPodium', 'worldMedal'];
+
+/**
+ * Sub-skills as `S(years, quality) + N(0, 8)`, exactly as 01 §2.3.2 specifies,
+ * plus the §8.1 career of the art.
+ *
+ * Everything here is generated *from* the years and the tier rather than drawn
+ * beside them, for the same reason the rest of this file is: a fighter with a
+ * black belt, eleven years of training and a start age of thirty-two is legal,
+ * derivable and a person who does not exist.
+ */
+function discipline(
+  rng: RNG, id: CoreDisciplineId, years: number, quality: number,
+  ctx: { ageYears: number; tier: number; isBase: boolean },
+): DisciplineSkills {
   const level = yearsToSkill(years, quality);
   const sub: Record<string, number> = {};
   for (const key of SUB_SKILLS[id]) sub[key] = Math.round(clamp(level + rng.normal(0, 8), 1, 99));
-  return { years: round(years, 1), trainingQuality: round(clamp(quality, 0.6, 1.15), 2), sub, styleTags: [] };
+
+  // Start age: old enough to have trained for `years`, with a little slack for
+  // the gap between the first session and the serious ones.
+  const startAge = Math.round(clamp(ctx.ageYears - years - rng.range(0, 2), 5, 45));
+
+  // Volume tracks camp quality: the hobbyist trains three hours a week, the
+  // elite camp ten across five or six sessions.
+  const hoursPerWeek = round(clamp(rng.normal(3 + 12 * (quality - 0.55), 2), 1, 28), 1);
+  const sessionsPerWeek = Math.round(clamp(rng.normal(2 + 4 * (quality - 0.55), 1), 1, 12));
+  const sparringIntensity = Math.round(clamp(rng.normal(30 + 8 * ctx.tier, 9), 5, 95));
+  const coachQuality = Math.round(clamp(rng.normal(20 + 12 * ctx.tier, 8), 5, 98));
+
+  // The base art is current by definition; a secondary art is often something
+  // the fighter has not touched since the camp changed.
+  const monthsSinceTrained = ctx.isBase ? 0 : rng.chance(0.25) ? rng.int(40) : 0;
+
+  const grade = gradeFor(rng, id, ctx.tier);
+
+  const catalogue = SPECIALISATIONS_BY_DISCIPLINE[id] ?? [];
+  const specialisations: string[] = [];
+  if (catalogue.length > 0) {
+    // Zero for a beginner, one or two for anyone with a game.
+    const wanted = ctx.tier <= 1 ? 0 : ctx.tier <= 3 ? 1 : 1 + rng.int(2);
+    for (let i = 0; i < wanted; i++) {
+      const pick = catalogue[rng.int(catalogue.length)].id;
+      if (!specialisations.includes(pick)) specialisations.push(pick);
+    }
+  }
+
+  const level3 = COMPETITION_LEVEL_BY_TIER[clamp(ctx.tier, 0, 5)];
+  const bouts = ctx.tier <= 1 ? 0 : Math.round(ctx.tier * 4 + rng.int(8));
+  const wins = Math.round(bouts * rng.range(0.55, 0.9));
+  const amateurBouts = Math.round(bouts * rng.range(0.5, 1));
+
+  return {
+    years: round(years, 1),
+    trainingQuality: round(clamp(quality, 0.6, 1.15), 2),
+    sub,
+    styleTags: [],
+    startAge,
+    hoursPerWeek,
+    sessionsPerWeek,
+    sparringIntensity,
+    coachQuality,
+    monthsSinceTrained,
+    specialisations,
+    isBase: ctx.isBase,
+    ...(grade ? { grade } : {}),
+    ...(bouts > 0
+      ? {
+        competition: {
+          level: level3,
+          bouts,
+          wins,
+          losses: bouts - wins,
+          draws: 0,
+          amateurBouts,
+          amateurWins: Math.round(amateurBouts * rng.range(0.5, 0.9)),
+          proBouts: bouts - amateurBouts,
+          proWins: Math.max(0, wins - Math.round(amateurBouts * 0.7)),
+          bestPlacing: PLACING_BY_TIER[clamp(ctx.tier, 0, 5)],
+          medals: ctx.tier >= 4 ? rng.int(3) : 0,
+        },
+      }
+      : {}),
+  };
+}
+
+/** A rank proportional to the tier, inside the art's own grading system. */
+function gradeFor(
+  rng: RNG, id: CoreDisciplineId, tier: number,
+): { system: GradeSystem; rank: string; stripes?: number } | null {
+  const system = GRADE_SYSTEM_FOR[id];
+  if (system === 'none') return null;
+  const ranks = GRADE_RANKS[system];
+  // The ladders differ in length, so the tier is mapped onto the ladder rather
+  // than indexed into it: T3 is two thirds of the way up whether the system
+  // has five rungs or nine.
+  const idx = Math.round(clamp(((ranks.length - 1) * tier) / 5 + rng.range(-0.5, 0.5), 0, ranks.length - 1));
+  const rank = ranks[idx];
+  return system === 'bjjBelt' ? { system, rank, stripes: rng.int(5) } : { system, rank };
 }
 
 function buildBlendFor(rng: RNG, heavy: number): { ecto: number; meso: number; endo: number } {
@@ -360,6 +579,10 @@ function careerFor(rng: RNG, tier: number, composure: number): FighterDefinition
   const amWins = rng.int(6);
   const amLosses = rng.int(4);
   const days = 60 + rng.int(500);
+  // Title fights first, then the titles won *of* them: generating the two
+  // independently is how you get a champion who never fought for a belt.
+  const titleFights = tier >= 4 ? rng.int(4) : 0;
+  const titleWins = titleFights > 0 ? rng.int(titleFights + 1) : 0;
 
   return {
     proWins: wins,
@@ -369,7 +592,7 @@ function careerFor(rng: RNG, tier: number, composure: number): FighterDefinition
     amLosses,
     koLosses,
     knockdownsSuffered: koLosses + rng.int(3),
-    titleFights: tier >= 4 ? rng.int(4) : 0,
+    titleFights,
     layoffMonths: round(days / 30.4375, 1),
     bigFightComposure: Math.round(clamp(composure + rng.normal(-6, 8), 5, 95)),
     pro: { wins, losses, draws: 0, noContests: 0, koWins, subWins, decWins, koLosses, subLosses, decLosses },
@@ -384,6 +607,24 @@ function careerFor(rng: RNG, tier: number, composure: number): FighterDefinition
       residualDehydration: round(rng.range(0, 0.02), 3),
     },
     winStreak: losses === 0 ? wins : rng.int(4),
+
+    // --- §8.2 overall experience ------------------------------------------
+    // Rounds are generated from the bouts and the method split rather than
+    // drawn: a fighter with ten KO wins cannot also have thirty rounds.
+    totalRounds: Math.round(
+      koWins * rng.range(1, 1.8) + subWins * rng.range(1, 2) + decWins * rng.range(2.8, 3.2) +
+      koLosses * rng.range(1, 2) + subLosses * rng.range(1, 2) + decLosses * rng.range(2.8, 3.2) +
+      (amWins + amLosses) * rng.range(1.5, 2.5),
+    ),
+    yearsPro: round(bouts === 0 ? 0 : clamp(bouts / rng.range(1.8, 3.2), 0.5, 22), 1),
+    // Opposition level tracks the tier: that is what a tier *means*.
+    oppositionLevel: Math.round(clamp(rng.normal(28 + 11 * tier, 7), 5, 96)),
+    mainEvents: tier >= 3 ? rng.int(Math.min(bouts, tier * 2) + 1) : 0,
+    titleWins,
+    // Hard fights: roughly a fifth of a long career, and a veteran of a war is
+    // rarely a veteran of only one.
+    warFights: bouts === 0 ? 0 : rng.int(Math.max(1, Math.round(bouts * 0.25)) + 1),
+    hardSparringYears: round(clamp(rng.normal(tier * 1.6, 1.5), 0, 20), 1),
   };
 }
 

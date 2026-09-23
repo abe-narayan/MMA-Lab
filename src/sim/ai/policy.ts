@@ -56,9 +56,13 @@ import {
 } from './utility';
 import {
   abortReason, advance as advanceMacro, availableMacros, begin as beginMacro, comboCap,
-  isRunning as macroRunning, newMacroState, reset as resetMacro, type Macro, type MacroState,
+  isRunning as macroRunning, newMacroState, preferComboOrder, reset as resetMacro,
+  type Macro, type MacroState,
 } from './macros';
 import { executionQuality, executionTierFor, type ExecutionQuality } from './execution';
+import {
+  preferenceWeight, preferencesFor, rangeTargetOf, type StylePreferences,
+} from './preferences';
 import {
   ExchangeLedger, OpponentModel, baseFeintBiteP, baseReadP, buildContext, counterOnRead,
   feintBiteProbabilityFor, hurtCueP, readCues, readProbability,
@@ -167,6 +171,12 @@ export interface AiState {
   plan: PlanView | null;
   /** `w_style(a)`: per-bout jittered style vector. */
   style: Record<ActionFamily, number>;
+  /**
+   * `w_pref(a)`: 01 §2.6's authored technique, combination, submission and
+   * takedown preferences, compiled once and tier-gated (`ai/preferences.ts`).
+   * Draw-free — it is a pure function of the definition.
+   */
+  prefs: StylePreferences;
   model: OpponentModel;
   ledger: ExchangeLedger;
   macro: MacroState;
@@ -313,7 +323,9 @@ export class MmaPolicy implements DecisionPolicy {
     const pacing = pacingFor(plan, 1);
     const intent: Intent = {
       mode: plan?.primaryMode ?? defaultModeFor(f),
-      rangeTarget: plan?.rangeTarget ?? 'mid',
+      // With no plan (the T0 row of §2.5.8) the authored `preferredRange` is
+      // the only statement of where this fighter wants the fight.
+      rangeTarget: plan?.rangeTarget ?? rangeTargetOf(rt.def.style?.preferredRange),
       phaseTarget: plan?.phaseTarget ?? 'any',
       initiative: plan?.initiative ?? 'mixed',
       paceTarget: pacing?.paceTarget ?? DEFAULT_PACE_TARGET,
@@ -354,6 +366,7 @@ export class MmaPolicy implements DecisionPolicy {
       mustNotViolations: [],
       planLines: planLinesFor(plan),
       behaviour: tierBehaviourFor(rt),
+      prefs: preferencesFor(rt),
       tierWeights: null,
       firedRules: [],
       pendingDefence: null,
@@ -886,7 +899,12 @@ export class MmaPolicy implements DecisionPolicy {
         || self.damage.regions.leg.right.acute.acute > 30,
       oppLegDamaged: cues.oppLegDamaged,
       trapReady: false,
-      losingBehaviourUnchanged: rt.def.style.losingBehaviour === 'unchanged',
+      // 01 §2.6 has two fields for the same idea: `losingBehaviour` (the
+      // §2.6.3 enum) and the simpler `whenLosing`. Either one saying "do not
+      // change" disables SC-2/SC-3.
+      losingBehaviourUnchanged: rt.def.style.losingBehaviour === 'unchanged'
+        || rt.def.style.whenLosing === 'hold',
+      whenLosing: rt.def.style.whenLosing ?? 'press',
       isWrestler: rt.grapplingTier >= rt.strikingTier,
       isStriker: rt.strikingTier > rt.grapplingTier,
       strengthEdge: rt.effective.strength >= 60,
@@ -1070,6 +1088,10 @@ export class MmaPolicy implements DecisionPolicy {
     adapt *= st.tierWeights?.weights.get(c.family) ?? 1;
     return {
       style: st.style[c.family] ?? 1,
+      // F-3: the authored preference for *this id*. The plan can only speak in
+      // families, and a guillotine specialist differs from an armbar
+      // specialist only by id.
+      pref: preferenceWeight(st.prefs, c.id, c.family),
       plan: planWeight(st.plan, c.family),
       adapt,
       matchup: this.matchupWeight(self, opp, c.family),
@@ -1191,9 +1213,13 @@ export class MmaPolicy implements DecisionPolicy {
       planCap: st.plan?.comboCapMax ?? undefined,
     });
     if (cap <= 1) return;
-    const options: Macro[] = availableMacros(rt.strikingTier, cap)
+    const legal: Macro[] = availableMacros(rt.strikingTier, cap)
       .filter((m) => m.steps.length > 1 && m.steps[0].id === chosen.id);
-    if (options.length === 0) return;
+    if (legal.length === 0) return;
+    // 01 §2.6 `favouriteCombos`: among the chains this tier and this cap allow,
+    // run the one the author wrote. A reorder, never an unlock, and no draw —
+    // the head action was already chosen by the utility layer.
+    const options = preferComboOrder(legal, st.prefs.combos);
     // The head action is already committed this tick, so the macro starts at
     // its second step next tick.
     const macro = options[0];

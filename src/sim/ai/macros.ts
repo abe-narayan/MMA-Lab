@@ -190,6 +190,81 @@ export function availableMacros(tier: number, cap: number): Macro[] {
 }
 
 // ---------------------------------------------------------------------------
+// 01 §2.6 `favouriteCombos`
+// ---------------------------------------------------------------------------
+
+/** One authored chain, already normalised by `ai/preferences.ts`. */
+export interface ComboPreference {
+  id: string;
+  sequence: readonly string[];
+  /** Bounded multiplier; > 1 means "he likes this one". */
+  weight: number;
+}
+
+/**
+ * How well an available macro answers an authored combination. The authored
+ * list is technique ids, so the comparison is against the macro's step ids:
+ *
+ *   3 — the macro *is* the chain (same ids, same order, same length)
+ *   2 — the macro's steps are a prefix of the chain, or the chain of the macro
+ *   1 — the heads agree and at least one more step does
+ *   0 — no relationship
+ *
+ * Nothing here can create a macro: only chains `availableMacros` already
+ * produced for this tier and combination cap are ever scored, so an authored
+ * four-punch combination on a T1 fighter stays a four-punch combination he
+ * cannot throw.
+ */
+export function comboMatchScore(macro: Macro, pref: ComboPreference): number {
+  const steps = macro.steps;
+  const seq = pref.sequence;
+  if (steps.length === 0 || seq.length === 0) return 0;
+  if (steps[0].id !== seq[0]) return 0;
+  const shared = Math.min(steps.length, seq.length);
+  let agree = 0;
+  for (let i = 0; i < shared; i++) {
+    if (steps[i].id !== seq[i]) break;
+    agree += 1;
+  }
+  if (agree === steps.length && agree === seq.length) return 3;
+  if (agree === shared) return 2;
+  return agree >= 2 ? 1 : 0;
+}
+
+/**
+ * Reorder the legal macro list so the fighter's authored combinations come
+ * first (§2.2.5 head-action selection already chose the first strike; this is
+ * which of the chains starting with it he actually runs).
+ *
+ * Deterministic and draw-free: the sort key is match quality, then the
+ * authored weight, then the original catalogue order — which is the tie-break
+ * the caller had before preferences existed, so a fighter with no authored
+ * combinations picks exactly what he picked yesterday.
+ */
+export function preferComboOrder(
+  options: readonly Macro[], prefs: readonly ComboPreference[],
+): Macro[] {
+  if (prefs.length === 0 || options.length === 0) return [...options];
+  const scored = options.map((macro, index) => {
+    let best = 0;
+    let weight = 1;
+    for (const p of prefs) {
+      const s = comboMatchScore(macro, p);
+      if (s === 0) continue;
+      if (s > best) {
+        best = s;
+        weight = p.weight;
+      } else if (s === best && p.weight > weight) {
+        weight = p.weight;
+      }
+    }
+    return { macro, index, best, weight };
+  });
+  scored.sort((a, b) => (b.best - a.best) || (b.weight - a.weight) || (a.index - b.index));
+  return scored.map((s) => s.macro);
+}
+
+// ---------------------------------------------------------------------------
 // Running a macro
 // ---------------------------------------------------------------------------
 

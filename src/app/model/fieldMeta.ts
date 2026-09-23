@@ -333,14 +333,285 @@ export const DISCIPLINE_META: Readonly<Record<string, FieldMeta>> = Object.freez
   years: {
     label: 'Years trained',
     unit: 'yr',
-    help: 'Training age. Caps the derived tier: under 0.25 yr is T0, under 1 T1, under 4 T2, under 8 T3, and a fighter may sit one tier above the cap.',
+    help: 'Training age. Caps the derived tier: under 0.25 yr is T0, under 1 T1, under 4 T2, under 8 T3, and a fighter may sit one tier above the cap. What one year is worth is then scaled by the volume, camp and start age below.',
     clamp: { min: 0, max: 45, dp: 1 },
   },
   trainingQuality: {
     label: 'Training quality',
-    help: 'Camp quality, 0.6 hobbyist to 1.15 elite. Scales how much the stored sub-skills are worth.',
+    help: 'Camp quality, 0.6 hobbyist to 1.15 elite. The generator uses it to set the sub-skills; the per-art coach quality below is what the derivation reads.',
     clamp: { min: 0.5, max: 1.2, dp: 2 },
   },
+
+  // --- 01 §8.1 per-art depth ---------------------------------------------
+  startAge: {
+    label: 'Start age',
+    unit: 'yr',
+    help: 'Age at the first session in this art. Below 18 each training year counts for more — up to x1.20 for a childhood start — because the motor programme laid down then is deeper. 18 or above is neutral.',
+    clamp: { min: 3, max: 45, dp: 0 },
+  },
+  hoursPerWeek: {
+    label: 'Hours / week',
+    unit: 'h',
+    help: 'Mat or ring hours in a normal block. Scales what a training year is worth as sqrt(hours/8), so doubling the hours is worth about 40 % more, not 100 %. Capped at x1.6 with sessions.',
+    clamp: { min: 0, max: 40, dp: 1 },
+  },
+  sessionsPerWeek: {
+    label: 'Sessions / week',
+    unit: '#',
+    help: 'How the hours are spread. Frequency helps — distributed practice beats massed — but at a quarter power, so it matters less than total volume. 5 is neutral.',
+    clamp: { min: 0, max: 14, dp: 0 },
+  },
+  sparringIntensity: {
+    label: 'Sparring intensity',
+    help: 'How live the training is. Multiplies every effective sub-skill in this art by 1 ± 6 % across the range: skill learned against a resisting partner is the skill that shows up. 50 is ordinary club sparring.',
+    clamp: ATTRIBUTE_CLAMP,
+  },
+  monthsSinceTrained: {
+    label: 'Months since last trained',
+    unit: 'mo',
+    help: 'Rust. Every sub-skill in this art decays exp(-(months - 3)/54), floored at x0.70 — technique is retained for years, but not untouched. Rusted values are also what transfers to other arts.',
+    clamp: { min: 0, max: 360, dp: 0 },
+  },
+  coachQuality: {
+    label: 'Coach quality',
+    help: 'The coaching in this art specifically, 0-100. Moves what a training year is worth by ±15 %, which moves the years cap on the derived tier. 50 is neutral.',
+    clamp: ATTRIBUTE_CLAMP,
+  },
+  isBase: {
+    label: 'Base art',
+    help: 'The art this fighter came up in. Each training year in it counts x1.15, because the base art is the one everything else was hung on. Set it on at most one discipline.',
+  },
+  grade: {
+    label: 'Grade',
+    help: 'Belt, dan, credential or amateur class. A grade is an independent observation of the art, so it floors every effective sub-skill at 85 % of the rank prior rather than adding to them — it cannot make a skill worse, and it will not push a good one higher.',
+  },
+  stripes: {
+    label: 'Stripes',
+    help: 'BJJ stripes on the current belt; each adds 2.5 points to the rank prior. Ignored by every other grading system.',
+    clamp: { min: 0, max: 4, dp: 0 },
+  },
+  specialisations: {
+    label: 'Specialisations',
+    help: 'What this fighter actually does in this art. Each adds 6 points to the emphasised sub-skills and takes 2.5 off the traded ones; each further specialisation in the same art is worth 60 % of the last, because nobody has the hours for four.',
+  },
+});
+
+/** Per-art competition record (01 §8.1.3). */
+export const DISCIPLINE_COMPETITION_META: Readonly<Record<string, FieldMeta>> = Object.freeze({
+  level: {
+    label: 'Level',
+    help: 'The circuit competed on. Sets the ceiling of the competition prior: local 35, national 55, international 72 — the tier band of the room, whatever your record in it.',
+  },
+  bouts: {
+    label: 'Bouts',
+    help: 'Total contests in this art. The prior saturates as 1 - e^(-bouts/12): the first few prove something, the twenty-first proves almost nothing new.',
+    clamp: { min: 0, max: 400, dp: 0 },
+  },
+  wins: {
+    label: 'Wins',
+    help: 'Wins of those bouts. The win rate scales the prior between x0.70 and x1.30 — losing at a high level still means being in the room.',
+    clamp: { min: 0, max: 400, dp: 0 },
+  },
+  losses: { label: 'Losses', help: 'Recorded for the fighter card and the win-rate sanity check.', clamp: { min: 0, max: 400, dp: 0 } },
+  draws: { label: 'Draws', help: 'Recorded for the fighter card.', clamp: { min: 0, max: 100, dp: 0 } },
+  amateurBouts: { label: 'Amateur bouts', help: 'The amateur share of the total, for the card. Boxing amateur counts belong here.', clamp: { min: 0, max: 400, dp: 0 } },
+  amateurWins: { label: 'Amateur wins', help: 'Wins of the amateur bouts.', clamp: { min: 0, max: 400, dp: 0 } },
+  proBouts: { label: 'Pro bouts', help: 'The professional share of the total, for the card.', clamp: { min: 0, max: 400, dp: 0 } },
+  proWins: { label: 'Pro wins', help: 'Wins of the professional bouts.', clamp: { min: 0, max: 400, dp: 0 } },
+  bestPlacing: {
+    label: 'Best placing',
+    help: 'The best result ever achieved. Added to the prior outright — 3 for a local podium up to 26 for an Olympic medal — because a medal is a fact about the tail, not the average.',
+  },
+  medals: {
+    label: 'Medals',
+    help: 'Medals or podiums beyond the best placing. 2 points each, capped at five.',
+    clamp: { min: 0, max: 30, dp: 0 },
+  },
+});
+
+/** Overall experience block (01 §8.2). */
+export const EXPERIENCE_META: Readonly<Record<string, FieldMeta>> = Object.freeze({
+  totalRounds: {
+    label: 'Rounds fought',
+    unit: '#',
+    help: 'Competitive rounds actually contested. Counts as a surplus over the bout total at half weight: ten decisions teach more than ten first-round finishes, and this is the only field that knows the difference.',
+    clamp: { min: 0, max: 600, dp: 0 },
+  },
+  yearsPro: {
+    label: 'Years pro',
+    unit: 'yr',
+    help: 'Time in the sport since turning professional. Shown on the card and checked against age and the bout count by the validator.',
+    clamp: { min: 0, max: 40, dp: 1 },
+  },
+  oppositionLevel: {
+    label: 'Opposition level',
+    help: 'Average level of the opposition faced. 50 regional, 75 ranked, 90 champions. Scales the experience composite by ±20 % and composure by ±5 points: 20-0 against nobody is worth less than 12-4 against everybody.',
+    clamp: ATTRIBUTE_CLAMP,
+  },
+  mainEvents: {
+    label: 'Main events',
+    unit: '#',
+    help: 'Main and co-main bouts contested. +0.8 composure each up to eight — habituation to the big room, separate from the title count.',
+    clamp: { min: 0, max: 60, dp: 0 },
+  },
+  titleWins: {
+    label: 'Titles won',
+    unit: '#',
+    help: 'Titles actually won of the title fights contested. Card and validator; the composure credit comes from the title fights themselves.',
+    clamp: { min: 0, max: 30, dp: 0 },
+  },
+  warFights: {
+    label: 'Hard fights taken',
+    unit: '#',
+    help: 'Wars: five-round grinds, fights finished on heart. -1.2 chin points each up to six. Below the per-KO-loss cost because a war is repeated sub-concussive load, not one knockout.',
+    clamp: { min: 0, max: 40, dp: 0 },
+  },
+  hardSparringYears: {
+    label: 'Hard-sparring years',
+    unit: 'yr',
+    help: 'Years of habitual hard sparring. -0.4 chin points per year up to fifteen: the damage a record never shows.',
+    clamp: { min: 0, max: 40, dp: 1 },
+  },
+  experienceOverride: {
+    label: 'Overall experience (override)',
+    help: 'Set the experience composite directly, 0-100. When set it is what the sim uses; the derived panel keeps showing what the bouts, rounds and opposition imply beside it. Leave unset to let the record speak.',
+    clamp: ATTRIBUTE_CLAMP,
+  },
+});
+
+/** Physique and biography (01 §8.3, §8.4). */
+export const HISTORY_META: Readonly<Record<string, FieldMeta>> = Object.freeze({
+  naturalWeightKg: {
+    label: 'Walk-around mass',
+    unit: 'kg',
+    help: 'Off-camp mass — how big this fighter naturally is. The cut it implies, (natural - weigh-in)/natural, is a floor under the authored cut percentage, so a huge natural size is paid for in residual dehydration. Leave equal to the weigh-in for a fighter who does not cut.',
+    clamp: { min: 40, max: 220, dp: 1 },
+  },
+  handStrengthSplit: {
+    label: 'Hand strength split',
+    help: 'How lopsided the power is. 50 is even; 100 is everything in the dominant hand, which scales lead-hand power down by 35 %. The one-punch knockout artist with nothing on the jab lives at 85.',
+    clamp: ATTRIBUTE_CLAMP,
+  },
+  armAsymmetryPct: {
+    label: 'Arm asymmetry',
+    unit: '%',
+    help: 'Lead arm longer (+) or shorter (-) than the rear. Half of it reaches the effective reach, because the wingspan measurement already averages the two. ±3 % is the realistic band.',
+    clamp: { min: -8, max: 8, dp: 1 },
+  },
+  legAsymmetryPct: {
+    label: 'Leg asymmetry',
+    unit: '%',
+    help: 'Lead leg longer (+) or shorter (-). Half of it reaches the effective kick reach.',
+    clamp: { min: -8, max: 8, dp: 1 },
+  },
+  surgeries: {
+    label: 'Career surgeries',
+    unit: '#',
+    help: 'Total operations. -1.5 recovery points each up to six, on top of anything the injury list below says.',
+    clamp: { min: 0, max: 30, dp: 0 },
+  },
+  cardioSport: {
+    label: 'Endurance background',
+    help: 'An endurance sport trained before or alongside fighting. Aerobic base is the most durable trained quality there is, so it is worth +0.8 cardio points per year up to ten.',
+  },
+  cardioYears: {
+    label: 'Endurance years',
+    unit: 'yr',
+    help: 'Years of that sport. Counted to a maximum of ten.',
+    clamp: { min: 0, max: 40, dp: 1 },
+  },
+  hardCuts: {
+    label: 'Career hard cuts',
+    unit: '#',
+    help: 'Cuts beyond 8 % of walk-around mass over the whole career. -0.35 cardio points each up to twelve: chronic cutting is a chronic cost, separate from this week’s dehydration.',
+    clamp: { min: 0, max: 60, dp: 0 },
+  },
+  worstCutPct: {
+    label: 'Worst cut',
+    unit: '%',
+    help: 'The worst single cut ever made. Recorded for the card and flagged by the validator past 12 %.',
+    clamp: { min: 0, max: 30, dp: 1 },
+  },
+  missedWeight: {
+    label: 'Missed weigh-ins',
+    unit: '#',
+    help: 'Times the fighter missed weight. +0.004 residual dehydration each up to three — evidence the cut has stopped working.',
+    clamp: { min: 0, max: 10, dp: 0 },
+  },
+  injuryRegion: { label: 'Region', help: 'Where the injury is. The region decides which attributes it costs and whether it caps a capability outright.' },
+  injurySeverity: {
+    label: 'Severity',
+    help: '20 a strain, 50 a partial tear, 80 a rupture, 95 a reconstruction. Scales the whole penalty linearly.',
+    clamp: ATTRIBUTE_CLAMP,
+  },
+  injuryMonthsAgo: {
+    label: 'Months ago',
+    unit: 'mo',
+    help: 'How long the body has had to deal with it. The penalty decays as e^(-months/18) — unless it was operated on or keeps recurring, which leave a permanent floor of 25 % and 35 %.',
+    clamp: { min: 0, max: 360, dp: 0 },
+  },
+  injurySurgery: { label: 'Operated', help: 'Leaves a permanent 25 % floor under the penalty. A reconstructed joint is never the joint it was.' },
+  injuryRecurrent: { label: 'Recurrent', help: 'A joint that keeps going. Leaves a permanent 35 % floor — the worst of the two applies, they do not stack.' },
+});
+
+/** Human labels for the grading systems. */
+export const GRADE_SYSTEM_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  none: 'Ungraded',
+  bjjBelt: 'BJJ belt',
+  judoKyuDan: 'Judo kyu / dan',
+  wrestlingCredential: 'Wrestling credential',
+  boxingAmateur: 'Boxing amateur class',
+  thaiRecord: 'Muay Thai standing',
+  karateDan: 'Karate dan',
+  taekwondoDan: 'Taekwondo dan',
+  samboRank: 'Sambo rank',
+});
+
+/** Human labels for the grade ranks. */
+export const GRADE_RANK_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  'none.unranked': 'Ungraded',
+  'bjj.white': 'White belt', 'bjj.blue': 'Blue belt', 'bjj.purple': 'Purple belt',
+  'bjj.brown': 'Brown belt', 'bjj.black': 'Black belt', 'bjj.black2': 'Black belt, 2nd degree',
+  'bjj.coral': 'Coral belt',
+  'judo.kyu5': '5th kyu', 'judo.kyu3': '3rd kyu', 'judo.kyu1': '1st kyu',
+  'judo.shodan': 'Shodan (1st dan)', 'judo.nidan': 'Nidan', 'judo.sandan': 'Sandan', 'judo.yondan': 'Yondan',
+  'wr.club': 'Club', 'wr.highSchool': 'High school', 'wr.statePlacer': 'State placer',
+  'wr.ncaaD2': 'NCAA Division II', 'wr.ncaaD1': 'NCAA Division I', 'wr.allAmerican': 'All-American',
+  'wr.ncaaChampion': 'NCAA champion', 'wr.worldTeam': 'World team', 'wr.olympian': 'Olympian',
+  'box.novice': 'Novice', 'box.open': 'Open class', 'box.regional': 'Regional',
+  'box.national': 'National', 'box.international': 'International', 'box.olympian': 'Olympian',
+  'mt.gymFighter': 'Gym fighter', 'mt.provincial': 'Provincial', 'mt.bangkokStadium': 'Bangkok stadium',
+  'mt.stadiumChampion': 'Stadium champion', 'mt.worldTitle': 'World title',
+  'kar.kyu': 'Kyu grade', 'kar.shodan': 'Shodan', 'kar.nidan': 'Nidan', 'kar.sandan': 'Sandan',
+  'kar.nationalSquad': 'National squad',
+  'tkd.kyu': 'Geup grade', 'tkd.il_dan': '1st dan', 'tkd.i_dan': '2nd dan', 'tkd.sam_dan': '3rd dan',
+  'tkd.nationalSquad': 'National squad',
+  'sam.club': 'Club', 'sam.candidateMaster': 'Candidate master', 'sam.master': 'Master of sport',
+  'sam.internationalMaster': 'International master', 'sam.worldMedallist': 'World medallist',
+});
+
+/** Grading systems that make sense for each discipline, most natural first. */
+export const GRADE_SYSTEMS_FOR_DISCIPLINE: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  bjj: ['bjjBelt', 'none'],
+  judo: ['judoKyuDan', 'none'],
+  wrestling: ['wrestlingCredential', 'none'],
+  boxing: ['boxingAmateur', 'none'],
+  muayThai: ['thaiRecord', 'none'],
+  kickboxing: ['thaiRecord', 'none'],
+  karate: ['karateDan', 'none'],
+  taekwondo: ['taekwondoDan', 'none'],
+  sambo: ['samboRank', 'none'],
+  mmaIntegration: ['none'],
+});
+
+export const PLACING_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  none: 'No placing',
+  localPodium: 'Local podium',
+  nationalPodium: 'National podium',
+  nationalTitle: 'National title',
+  continentalMedal: 'Continental medal',
+  worldMedal: 'World medal',
+  olympicMedal: 'Olympic medal',
 });
 
 /** Human labels for the discipline ids. */

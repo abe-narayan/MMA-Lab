@@ -1,0 +1,345 @@
+/* ==========================================================================
+   WATCH — the spectator surface (Phase 7b)
+
+   Additive: this file adds `watch-*` rules and reuses the shell's tokens and
+   primitives (.panel, .btn, .chip, .meter, .event, .scrub) from
+   src/ui/styles.css rather than restating them. No colour is hard-coded, so
+   both themes resolve as complete sets exactly as the shell does.
+   ========================================================================== */
+
+.watch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+  gap: 10px;
+  min-height: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 10px;
+}
+
+.watch-main,
+.watch-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+@media (max-width: 1100px) {
+  .watch { grid-template-columns: minmax(0, 1fr); }
+  .watch-side { max-height: 60vh; }
+}
+
+/* ------------------------------------------------------------------ stage */
+
+.watch-stage {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  overflow: hidden;
+  aspect-ratio: 16 / 10;
+  min-height: 260px;
+  box-shadow: var(--shadow);
+}
+
+.watch-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.watch-canvas[data-camera="free"] { cursor: grab; }
+.watch-canvas[data-camera="free"]:active { cursor: grabbing; }
+
+/* --------------------------------------------------------------- controls */
+
+.watch-controls .group-row { flex-wrap: wrap; }
+
+.watch-speed {
+  max-width: 160px;
+  min-width: 90px;
+}
+
+/* -------------------------------------------------------------------- HUD */
+
+.watch-hud-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.watch-hud-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.watch-hud-card[data-down="true"] { border-color: var(--alert); }
+
+.watch-hud-name {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.watch-hud-title {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watch-hud-record { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+.watch-hud-sub,
+.watch-kv,
+.watch-rules,
+.watch-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+}
+
+.watch-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--faint);
+  flex: 0 0 auto;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.watch-dot[data-actor="A"] { background: var(--corner-a); }
+.watch-dot[data-actor="B"] { background: var(--corner-b); }
+.watch-dot[data-actor="C"] { background: var(--ok); }
+.watch-dot[data-actor="D"] { background: var(--warn); }
+
+.watch-hud-stats {
+  display: flex;
+  gap: 14px;
+  margin: 2px 0 0;
+}
+
+.watch-hud-stats div { display: flex; flex-direction: column; gap: 2px; }
+.watch-hud-stats dt { font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--faint); }
+.watch-hud-stats dd { margin: 0; font-weight: 700; }
+
+.watch-hud-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 0 10px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.meter--burst i { background: var(--accent); }
+
+/* ------------------------------------------------------------- game plan */
+
+.watch-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.watch-plan-card {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.watch-plan-card[data-corner="A"] { border-left-color: var(--corner-a); }
+.watch-plan-card[data-corner="B"] { border-left-color: var(--corner-b); }
+
+.watch-plan-card header { display: flex; align-items: center; gap: 6px; }
+
+.watch-plan-mode { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; }
+
+.watch-plan-line {
+  margin: 0;
+  font-style: italic;
+  color: var(--text);
+  border-left: 2px solid var(--accent);
+  padding-left: 8px;
+  font-size: 13px;
+}
+
+.watch-plan-lines,
+.watch-adjust {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.watch-plan-section h4 {
+  margin: 0 0 4px;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.watch-belief {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+}
+
+.watch-belief i { display: block; height: 100%; background: var(--accent); }
+
+.watch-rules code,
+.watch-adjust code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--surface-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  padding: 1px 5px;
+  color: var(--muted);
+}
+
+.watch-rules code.watch-anim { color: var(--accent); border-color: var(--accent-soft); }
+
+.small { font-size: 12px; margin: 0; }
+.muted { color: var(--muted); }
+
+/* ------------------------------------------------------------- commentary */
+
+.watch-commentary { display: flex; flex-direction: column; min-height: 160px; }
+
+.watch-comm-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.watch-comm {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 5px 7px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.watch-comm:hover { background: var(--surface-2); border-color: var(--line-soft); }
+
+.watch-comm-time { color: var(--faint); font-size: 11px; }
+
+.watch-comm[data-voice="colour"] {
+  border-left: 2px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.watch-comm[data-voice="colour"] .watch-comm-text { font-style: italic; }
+
+.watch-comm[data-priority="3"] .watch-comm-text { font-weight: 700; color: var(--alert); }
+
+/* ---------------------------------------------------------------- tables */
+
+.watch-stat-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.watch-stat-table th,
+.watch-stat-table td {
+  padding: 5px 9px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: right;
+}
+
+.watch-stat-table thead th { color: var(--faint); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; }
+.watch-stat-table th[scope="row"],
+.watch-stat-table thead th:first-child { text-align: left; color: var(--muted); font-weight: 500; }
+.watch-stat-table td[data-lead="true"] { color: var(--text); font-weight: 700; }
+
+.watch-cards-key { display: flex; gap: 6px; padding: 8px 10px; margin: 0; flex-wrap: wrap; }
+
+/* ----------------------------------------------------------------- debug */
+
+.watch-debug-digest { padding: 0 10px; margin: 6px 0 0; color: var(--faint); font-size: 11px; }
+
+.watch-debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.watch-debug-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.watch-debug-card h4 {
+  margin: 6px 0 0;
+  font-size: 10px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: 600;
+}
+
+.watch-debug-meters {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.watch-zones { margin: 0; font-size: 10px; color: var(--faint); overflow-wrap: anywhere; }
+
+/* --------------------------------------------------------------- timeline */
+
+.watch-timeline { min-height: 220px; display: flex; flex-direction: column; }
+.watch-timeline .timeline-list { max-height: 420px; }
+.watch-filter .group-row { padding: 8px 10px; flex-wrap: wrap; }

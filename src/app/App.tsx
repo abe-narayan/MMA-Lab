@@ -28,11 +28,27 @@ import type { FighterRecord } from './store/types';
 import type { FighterStoreApi, ImportOutcome } from './storeApi';
 import { FighterDatabase } from './screens/FighterDatabase';
 import { FighterCreator } from './screens/FighterCreator';
+import { MatchSetup } from './screens/MatchSetup';
+import { Tournaments } from './screens/Tournaments';
+import { History } from './screens/History';
+import { BoutResultScreen } from './screens/BoutResult';
+import { bindMatchStore } from './run/matchStore';
+import { defaultDraft, newSeed, type MatchDraft } from './model/matchModel';
+import type { BoutRunOutcome } from './run/runBout';
+import type { BoutRun, SimConfig } from '../sim';
+import { Watch } from './screens/Watch';
 
-type TabId = 'replay' | 'dashboard' | 'model' | 'fighters' | 'creator';
+type TabId =
+  | 'replay' | 'dashboard' | 'model' | 'fighters' | 'creator'
+  | 'match' | 'watch' | 'result' | 'tournaments' | 'history';
 type ThemeChoice = 'system' | 'light' | 'dark';
 
 const TABS: { id: TabId; label: string; hint: string }[] = [
+  { id: 'match', label: 'Match', hint: 'Build a bout: mode, fighters, ruleset, arena, settings, seed' },
+  { id: 'watch', label: 'Watch', hint: 'Play a bout back, frame by frame' },
+  { id: 'result', label: 'Result', hint: 'The last bout: scorecards and the full stat sheet' },
+  { id: 'tournaments', label: 'Tournaments', hint: 'Brackets, seeding, carry-over' },
+  { id: 'history', label: 'History', hint: 'Past bouts: re-watch, verify, export' },
   { id: 'replay', label: 'Replay', hint: 'Watch one simulated bout in 3D' },
   { id: 'dashboard', label: 'Dashboard', hint: 'Aggregate outcomes across every recorded bout' },
   { id: 'model', label: 'Model', hint: 'Derived attributes and every model parameter' },
@@ -118,15 +134,33 @@ export function bindStore(): FighterStoreApi {
 }
 
 export function App(): JSX.Element {
-  const [tab, setTab] = useState<TabId>('replay');
+  const [tab, setTab] = useState<TabId>('match');
   const [opponents, setOpponents] = useState(1);
   const [boutIndex, setBoutIndex] = useState(1);
   const [theme, setTheme] = useState<ThemeChoice>(readStoredTheme);
 
   const store = useMemo(() => bindStore(), []);
+  const matchStore = useMemo(() => bindMatchStore(), []);
   const [revision, setRevision] = useState(0);
   const [editing, setEditing] = useState<{ def: FighterDefinition; fromBuiltIn: boolean } | null>(null);
   const [creatorDirty, setCreatorDirty] = useState(false);
+
+  // Phase 7a state: the match draft, and the last bout that was run. The draft
+  // lives here rather than in the screen so a rematch from the result screen
+  // can pre-fill it, and so switching tabs never throws away a half-built card.
+  const [draft, setDraft] = useState<MatchDraft>(() => defaultDraft(newSeed('bout', Date.now())));
+  const [lastRun, setLastRun] = useState<BoutRun | null>(null);
+  // What the replay view is showing. It takes a `SimConfig` and rebuilds the
+  // frames itself (09 §4.5), so handing a bout over means handing over its
+  // config — which is the same object whether the bout came from Match setup,
+  // from a tournament, or from a replay file in History.
+  const [watching, setWatching] = useState<SimConfig | null>(null);
+
+  const watchRun = useCallback((run: BoutRun) => {
+    setWatching(run.config);
+    setLastRun(run);
+    setTab('watch');
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -182,6 +216,38 @@ export function App(): JSX.Element {
     setEditing({ def: store.random(seed), fromBuiltIn: false });
     setTab('creator');
   }, [store]);
+
+  /** A finished bout: remember it, refresh history, and show the card. */
+  const onRan = useCallback((outcome: BoutRunOutcome) => {
+    setLastRun(outcome.run);
+    setRevision((r) => r + 1);
+    setTab('result');
+  }, []);
+
+  /** Same fighters and settings, a new seed. */
+  const rematch = useCallback((run: BoutRun) => {
+    setDraft((d) => ({ ...d, seed: newSeed('bout', Date.now()) }));
+    void run;
+    setTab('match');
+  }, []);
+
+  const exportRun = useCallback((run: BoutRun) => {
+    try {
+      const entry = matchStore.history().find((e) => {
+        const r = e.replay;
+        return typeof r === 'object' && r !== null && 'digest' in r && r.digest === run.digest;
+      });
+      const text = JSON.stringify(entry?.replay ?? run, null, 2);
+      const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bout-${run.digest.slice(0, 12)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* a refused download is not worth blanking the screen over */
+    }
+  }, [matchStore]);
 
   const onSaved = useCallback((record: FighterRecord) => {
     setRevision((r) => r + 1);
@@ -243,6 +309,83 @@ export function App(): JSX.Element {
       </p>
 
       <main className="app-main">
+        <div
+          className="tabpanel tabpanel--scroll"
+          role="tabpanel"
+          id="panel-match"
+          aria-labelledby="tab-match"
+          hidden={tab !== 'match'}
+        >
+          <MatchSetup
+            store={store}
+            matchStore={matchStore}
+            revision={revision}
+            draft={draft}
+            onDraftChange={setDraft}
+            onRan={onRan}
+          />
+        </div>
+
+        <div
+          className="tabpanel"
+          role="tabpanel"
+          id="panel-watch"
+          aria-labelledby="tab-watch"
+          hidden={tab !== 'watch'}
+        >
+          <Watch config={watching} active={tab === 'watch'} />
+        </div>
+
+        <div
+          className="tabpanel tabpanel--scroll"
+          role="tabpanel"
+          id="panel-result"
+          aria-labelledby="tab-result"
+          hidden={tab !== 'result'}
+        >
+          <BoutResultScreen
+            run={lastRun}
+            onWatch={watchRun}
+            onExport={exportRun}
+            onRematch={rematch}
+          />
+        </div>
+
+        <div
+          className="tabpanel tabpanel--scroll"
+          role="tabpanel"
+          id="panel-tournaments"
+          aria-labelledby="tab-tournaments"
+          hidden={tab !== 'tournaments'}
+        >
+          <Tournaments
+            store={store}
+            matchStore={matchStore}
+            revision={revision}
+            onChanged={() => setRevision((r) => r + 1)}
+            onRan={(outcome) => setLastRun(outcome.run)}
+          />
+        </div>
+
+        <div
+          className="tabpanel tabpanel--scroll"
+          role="tabpanel"
+          id="panel-history"
+          aria-labelledby="tab-history"
+          hidden={tab !== 'history'}
+        >
+          <History
+            matchStore={matchStore}
+            revision={revision}
+            onChanged={() => setRevision((r) => r + 1)}
+            onWatch={watchRun}
+            onOpenResult={(run) => {
+              setLastRun(run);
+              setTab('result');
+            }}
+          />
+        </div>
+
         <div
           className="tabpanel"
           role="tabpanel"

@@ -15,6 +15,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import './ui/styles.css';
 import './app/creator.css';
+import './app/match.css';
 import { App } from './app/App';
 
 const host = document.getElementById('root');

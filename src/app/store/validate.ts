@@ -28,6 +28,8 @@
 import {
   SUB_SKILLS, WEIGHT_CLASS_LIMIT_KG, TIER_SKILL_BANDS, TIER_YEARS_BANDS,
   hasTechnique, SUBMISSIONS, GRAPPLING_EDGES, isSubmissionReference,
+  ENDURANCE_SPORTS, GRADE_RANKS, GRADE_SYSTEMS, INJURY_REGIONS, PLACING_IDS,
+  SPECIALISATIONS_BY_DISCIPLINE,
   type BodySpec, type BottomPriority, type Build, type CompetitionLevel,
   type CoreDisciplineId, type FighterDefinition, type GuardStyle, type Handedness,
   type HurtBehaviour, type Initiative, type LastResult, type LosingBehaviour,
@@ -221,6 +223,7 @@ export function validateFighter(def: unknown): ValidationResult {
   validateBlock(def.mental, 'mental', MENTAL_KEYS, iss);
   validateDisciplines(def.disciplines, def.mental, iss);
   validateRecord(def.record, def.body, iss);
+  validateHistory(def.history, def.body, iss);
   validateStyle(def.style, iss);
 
   if (def.notes !== undefined && typeof def.notes !== 'string') {
@@ -302,6 +305,37 @@ function validateBody(body: unknown, iss: Issues): void {
     const scale = typeof weighIn === 'number' ? weighIn : body.massKg;
     if (limit !== undefined && typeof scale === 'number' && scale > limit) {
       iss.warn('body.weightClass', `${scale} kg misses the ${limit} kg limit of ${String(body.weightClass)}`);
+    }
+  }
+
+  // --- 01 §8.3 additions -------------------------------------------------
+  if (body.naturalWeightKg !== undefined) {
+    iss.ranged('body.naturalWeightKg', body.naturalWeightKg, 'walk-around mass', BODY_RANGES.massKg);
+    if (typeof body.naturalWeightKg === 'number' && typeof weighIn === 'number' && weighIn > 0) {
+      const cut = ((body.naturalWeightKg - weighIn) / body.naturalWeightKg) * 100;
+      if (cut > 15) {
+        iss.warn(
+          'body.naturalWeightKg',
+          `${cut.toFixed(1)} % implied fight-week cut; above ~10 % the residual dehydration saturates at its cap`,
+        );
+      }
+    }
+  }
+  if (body.handStrengthSplit !== undefined) {
+    iss.score('body.handStrengthSplit', body.handStrengthSplit, 'hand strength split');
+  }
+  if (body.limbAsymmetry !== undefined) {
+    if (!isObject(body.limbAsymmetry)) {
+      iss.error('body.limbAsymmetry', 'limbAsymmetry must be { armPct, legPct }');
+    } else {
+      for (const k of ['armPct', 'legPct'] as const) {
+        if (!iss.finite(`body.limbAsymmetry.${k}`, body.limbAsymmetry[k], k)) continue;
+        const v = body.limbAsymmetry[k] as number;
+        // Real limb-length asymmetry is a fraction of a percent to a few
+        // percent; beyond that a fighter is describing a deformity, not a limb.
+        if (Math.abs(v) > 10) iss.error(`body.limbAsymmetry.${k}`, `${k} of ${v} % is not an anatomy`);
+        else if (Math.abs(v) > 4) iss.warn(`body.limbAsymmetry.${k}`, `${v} % asymmetry is clinically large`);
+      }
     }
   }
 }
@@ -409,6 +443,7 @@ function validateDisciplines(disciplines: unknown, mental: unknown, iss: Issues)
     const mean = validateSubSkills(raw.sub, canonical, path, iss);
     if (mean !== null) validateTierConsistency(mean, years, fightIQ, composure, path, iss);
     validateCompetition(raw.competition, path, iss);
+    validateDisciplineDepth(raw, canonical, path, years, iss);
 
     if (raw.styleTags !== undefined && !Array.isArray(raw.styleTags)) {
       iss.error(`${path}.styleTags`, 'styleTags must be an array of strings');
@@ -485,6 +520,125 @@ function validateCompetition(comp: unknown, path: string, iss: Issues): void {
   if (typeof comp.bouts === 'number' && typeof comp.wins === 'number' && comp.wins > comp.bouts) {
     iss.warn(`${path}.competition.wins`, `${comp.wins} wins from ${comp.bouts} bouts`);
   }
+
+  // 01 §8.1.3 additions. All optional, all plain counters; the amateur and pro
+  // splits are checked against the total because a split that exceeds it means
+  // the competition prior is being computed from a number nobody meant.
+  for (const k of ['losses', 'draws', 'amateurBouts', 'amateurWins', 'proBouts', 'proWins', 'medals'] as const) {
+    if (comp[k] !== undefined) iss.counter(`${path}.competition.${k}`, comp[k], k);
+  }
+  if (comp.bestPlacing !== undefined) {
+    iss.enumOf(`${path}.competition.bestPlacing`, comp.bestPlacing, 'bestPlacing', PLACING_IDS);
+  }
+  const total = typeof comp.bouts === 'number' ? comp.bouts : 0;
+  const am = typeof comp.amateurBouts === 'number' ? comp.amateurBouts : 0;
+  const prof = typeof comp.proBouts === 'number' ? comp.proBouts : 0;
+  if (am + prof > total) {
+    iss.warn(
+      `${path}.competition.amateurBouts`,
+      `${am} amateur + ${prof} pro bouts exceeds the ${total} recorded in this art`,
+    );
+  }
+  if (comp.bestPlacing !== undefined && comp.bestPlacing !== 'none' && total === 0) {
+    iss.warn(`${path}.competition.bestPlacing`, 'a placing with no bouts recorded in this art');
+  }
+}
+
+/**
+ * The §8.1 depth fields on one discipline block.
+ *
+ * Every check here is a warning unless the value would make the derivation
+ * read nonsense (a negative rust, a rank that scores zero because it belongs
+ * to another system). The chapter's ranges are priors, never gates.
+ */
+function validateDisciplineDepth(
+  raw: Record<string, unknown>, discipline: CoreDisciplineId, path: string, years: number, iss: Issues,
+): void {
+  if (raw.startAge !== undefined && iss.finite(`${path}.startAge`, raw.startAge, 'start age')) {
+    const a = raw.startAge as number;
+    if (a < 0) iss.error(`${path}.startAge`, 'a start age cannot be negative');
+    else if (a < 4 || a > 60) iss.warn(`${path}.startAge`, `starting this art at ${a} is unusual`);
+  }
+  for (const [k, label, hi] of [
+    ['hoursPerWeek', 'hours per week', 40],
+    ['sessionsPerWeek', 'sessions per week', 14],
+  ] as const) {
+    if (raw[k] === undefined) continue;
+    if (!iss.finite(`${path}.${k}`, raw[k], label)) continue;
+    const v = raw[k] as number;
+    if (v < 0) iss.error(`${path}.${k}`, `${label} cannot be negative`);
+    else if (v > hi) iss.warn(`${path}.${k}`, `${v} ${label} is beyond what a human trains`);
+  }
+  if (raw.sparringIntensity !== undefined) {
+    iss.score(`${path}.sparringIntensity`, raw.sparringIntensity, 'sparring intensity');
+  }
+  if (raw.coachQuality !== undefined) {
+    iss.score(`${path}.coachQuality`, raw.coachQuality, 'coach quality');
+  }
+  if (raw.monthsSinceTrained !== undefined
+    && iss.finite(`${path}.monthsSinceTrained`, raw.monthsSinceTrained, 'months since trained')) {
+    const m = raw.monthsSinceTrained as number;
+    if (m < 0) iss.error(`${path}.monthsSinceTrained`, 'months since trained cannot be negative');
+    else if (m > 600) {
+      iss.warn(`${path}.monthsSinceTrained`, `${m} months is fifty years away from the art`);
+    }
+  }
+  if (raw.isBase !== undefined && typeof raw.isBase !== 'boolean') {
+    iss.error(`${path}.isBase`, 'isBase must be a boolean');
+  }
+  if (years === 0 && typeof raw.monthsSinceTrained === 'number' && raw.monthsSinceTrained > 0) {
+    iss.warn(`${path}.monthsSinceTrained`, 'rust on an art with no training years does nothing');
+  }
+
+  if (raw.grade !== undefined) {
+    if (!isObject(raw.grade)) {
+      iss.error(`${path}.grade`, 'grade must be { system, rank, stripes? }');
+    } else {
+      iss.enumOf(`${path}.grade.system`, raw.grade.system, 'grade system', GRADE_SYSTEMS);
+      const system = raw.grade.system as keyof typeof GRADE_RANKS;
+      const ranks = GRADE_RANKS[system];
+      if (ranks !== undefined && typeof raw.grade.rank === 'string' && !ranks.includes(raw.grade.rank)) {
+        // Not an error: the prior resolves an unknown rank to 0 rather than
+        // throwing, so the definition still derives. It is a silent zero,
+        // though, which is exactly the surprise worth surfacing.
+        iss.warn(
+          `${path}.grade.rank`,
+          `"${raw.grade.rank}" is not a ${String(system)} rank, so it attests nothing; expected ${ranks.join(', ')}`,
+        );
+      }
+      if (raw.grade.stripes !== undefined) {
+        iss.counter(`${path}.grade.stripes`, raw.grade.stripes, 'stripes');
+        if (typeof raw.grade.stripes === 'number' && raw.grade.stripes > 4) {
+          iss.warn(`${path}.grade.stripes`, 'a belt carries at most four stripes');
+        }
+      }
+    }
+  }
+
+  if (raw.specialisations !== undefined) {
+    if (!Array.isArray(raw.specialisations)) {
+      iss.error(`${path}.specialisations`, 'specialisations must be an array of ids');
+    } else {
+      const catalogue = SPECIALISATIONS_BY_DISCIPLINE[discipline] ?? [];
+      const known = new Set(catalogue.map((c) => c.id));
+      raw.specialisations.forEach((id, i) => {
+        if (typeof id !== 'string') {
+          iss.error(`${path}.specialisations.${i}`, 'a specialisation id must be a string');
+        } else if (!known.has(id)) {
+          iss.warn(
+            `${path}.specialisations.${i}`,
+            `"${id}" is not a ${discipline} specialisation, so the derivation ignores it`,
+          );
+        }
+      });
+      if (raw.specialisations.length > 3) {
+        iss.warn(
+          `${path}.specialisations`,
+          `${raw.specialisations.length} specialisations in one art; each past the first is worth 60 % of the last`,
+        );
+      }
+    }
+  }
 }
 
 const CAREER_COUNTERS = [
@@ -549,6 +703,144 @@ function validateRecord(record: unknown, body: unknown, iss: Issues): void {
     + (typeof record.proLosses === 'number' ? record.proLosses : 0);
   if (age !== undefined && age < 18 && proBouts > 0) {
     iss.warn('record.proWins', `${proBouts} professional bouts at age ${age}`);
+  }
+
+  validateOverallExperience(record, age, proBouts, iss);
+}
+
+/**
+ * The §8.2 overall-experience block.
+ *
+ * The cross-checks matter more than the bounds here. Rounds below the bout
+ * count, a title won without a title fight, more years pro than years alive
+ * minus eighteen — each of those is a definition that will derive perfectly
+ * well and describe a fighter who cannot exist, which is precisely the class
+ * of mistake a validator is for.
+ */
+function validateOverallExperience(
+  record: Record<string, unknown>, age: number | undefined, proBouts: number, iss: Issues,
+): void {
+  for (const k of ['totalRounds', 'mainEvents', 'titleWins', 'warFights'] as const) {
+    if (record[k] !== undefined) iss.counter(`record.${k}`, record[k], k);
+  }
+  for (const [k, label] of [['yearsPro', 'years pro'], ['hardSparringYears', 'hard-sparring years']] as const) {
+    if (record[k] === undefined) continue;
+    if (!iss.finite(`record.${k}`, record[k], label)) continue;
+    if ((record[k] as number) < 0) iss.error(`record.${k}`, `${label} cannot be negative`);
+  }
+  if (record.oppositionLevel !== undefined) {
+    iss.score('record.oppositionLevel', record.oppositionLevel, 'opposition level');
+  }
+  if (record.experienceOverride !== undefined) {
+    iss.score('record.experienceOverride', record.experienceOverride, 'experience override');
+  }
+
+  const rounds = typeof record.totalRounds === 'number' ? record.totalRounds : undefined;
+  if (rounds !== undefined && proBouts > 0 && rounds < proBouts) {
+    iss.warn('record.totalRounds', `${rounds} rounds across ${proBouts} professional bouts`);
+  }
+  const titleFights = typeof record.titleFights === 'number' ? record.titleFights : 0;
+  if (typeof record.titleWins === 'number' && record.titleWins > titleFights) {
+    iss.warn('record.titleWins', `${record.titleWins} titles won from ${titleFights} title fights`);
+  }
+  if (typeof record.mainEvents === 'number' && proBouts > 0 && record.mainEvents > proBouts) {
+    iss.warn('record.mainEvents', `${record.mainEvents} main events from ${proBouts} professional bouts`);
+  }
+  if (typeof record.warFights === 'number' && proBouts > 0 && record.warFights > proBouts) {
+    iss.warn('record.warFights', `${record.warFights} hard fights from ${proBouts} professional bouts`);
+  }
+  if (typeof record.yearsPro === 'number' && age !== undefined && record.yearsPro > age - 15) {
+    iss.warn('record.yearsPro', `${record.yearsPro} years professional at age ${age}`);
+  }
+}
+
+/** The §8.3/§8.4 biography block. Optional in full; validated when present. */
+function validateHistory(history: unknown, body: unknown, iss: Issues): void {
+  if (history === undefined) return;
+  if (!isObject(history)) {
+    iss.error('history', 'history must be an object');
+    return;
+  }
+
+  if (history.surgeries !== undefined) iss.counter('history.surgeries', history.surgeries, 'surgeries');
+
+  if (history.cardioBackground !== undefined) {
+    const cb = history.cardioBackground;
+    if (!isObject(cb)) {
+      iss.error('history.cardioBackground', 'cardioBackground must be { sport, years }');
+    } else {
+      iss.enumOf('history.cardioBackground.sport', cb.sport, 'sport', ENDURANCE_SPORTS);
+      if (iss.finite('history.cardioBackground.years', cb.years, 'endurance years')) {
+        if ((cb.years as number) < 0) {
+          iss.error('history.cardioBackground.years', 'endurance years cannot be negative');
+        } else if ((cb.years as number) > 30) {
+          iss.warn('history.cardioBackground.years', `${cb.years} years of endurance sport is a second career`);
+        }
+      }
+    }
+  }
+
+  if (history.weightCutHistory !== undefined) {
+    const wc = history.weightCutHistory;
+    if (!isObject(wc)) {
+      iss.error('history.weightCutHistory', 'weightCutHistory must be { hardCuts, worstCutPct, missedWeight }');
+    } else {
+      iss.counter('history.weightCutHistory.hardCuts', wc.hardCuts, 'hard cuts');
+      iss.counter('history.weightCutHistory.missedWeight', wc.missedWeight, 'missed weigh-ins');
+      if (iss.finite('history.weightCutHistory.worstCutPct', wc.worstCutPct, 'worst cut')) {
+        const v = wc.worstCutPct as number;
+        if (v < 0) iss.error('history.weightCutHistory.worstCutPct', 'a cut cannot be negative');
+        else if (v > 12) {
+          iss.warn('history.weightCutHistory.worstCutPct', `${v} % is beyond anything in the CSAC data`);
+        }
+      }
+    }
+  }
+
+  if (history.injuries !== undefined) {
+    if (!Array.isArray(history.injuries)) {
+      iss.error('history.injuries', 'injuries must be an array');
+      return;
+    }
+    history.injuries.forEach((entry, i) => {
+      const path = `history.injuries.${i}`;
+      if (!isObject(entry)) {
+        iss.error(path, 'an injury must be { region, severity, monthsAgo }');
+        return;
+      }
+      iss.enumOf(`${path}.region`, entry.region, 'region', INJURY_REGIONS);
+      iss.score(`${path}.severity`, entry.severity, 'severity');
+      if (iss.finite(`${path}.monthsAgo`, entry.monthsAgo, 'months ago')) {
+        if ((entry.monthsAgo as number) < 0) {
+          iss.error(`${path}.monthsAgo`, 'an injury cannot be in the future');
+        }
+      }
+      for (const k of ['surgery', 'recurrent'] as const) {
+        if (entry[k] !== undefined && typeof entry[k] !== 'boolean') {
+          iss.error(`${path}.${k}`, `${k} must be a boolean`);
+        }
+      }
+      // A fresh severe injury is legal — fighters do take fights hurt — but it
+      // is worth saying out loud, because it will visibly gut the derivation.
+      if (typeof entry.severity === 'number' && entry.severity >= 70
+        && typeof entry.monthsAgo === 'number' && entry.monthsAgo <= 2) {
+        iss.warn(`${path}.severity`, 'a severe injury this recent will cost a large share of the affected attributes');
+      }
+    });
+    if (history.injuries.length > 12) {
+      iss.warn('history.injuries', `${history.injuries.length} injuries; the penalties stack without a cap`);
+    }
+  }
+
+  // Cross-check against the body: a walk-around mass below the weigh-in means
+  // the fighter gained weight to make the class, which is possible but almost
+  // always a transposition.
+  if (isObject(body) && typeof body.naturalWeightKg === 'number') {
+    const weighIn = typeof body.weighInKg === 'number' ? body.weighInKg
+      : typeof body.massKg === 'number' ? body.massKg : undefined;
+    if (weighIn !== undefined && body.naturalWeightKg < weighIn) {
+      iss.warn('body.naturalWeightKg', 'walk-around mass below the weigh-in mass: no cut is being modelled');
+    }
   }
 }
 

@@ -169,6 +169,13 @@ export interface AdaptSignals {
   trapReady: boolean;
   /** `losingBehaviour: 'unchanged'` disables SC-2 and SC-3 (§2.6.3). */
   losingBehaviourUnchanged: boolean;
+  /**
+   * 01 §2.6 `whenLosing`: what this fighter *does* about being behind, once
+   * SC-2 has fired. It shapes the adjustment rather than gating it — `hold` is
+   * already handled by `losingBehaviourUnchanged` above. Optional: absent is
+   * the §2.6.3 default, `press`.
+   */
+  whenLosing?: 'press' | 'stall' | 'gamble' | 'hold';
   /** Style hooks that select among the variants. */
   isWrestler: boolean;
   isStriker: boolean;
@@ -300,10 +307,19 @@ export const ADJUSTMENT_ROWS: readonly AdjustmentRow[] = [
     id: 'adj.behind_final', minIqTier: 2, trigger: 'behindFinal',
     fires: (s) => s.finalRound && s.perceivedRoundsUp <= -1
       && s.perceivedRoundsUp > -s.needFinishDeficit && !s.losingBehaviourUnchanged,
-    build: () => ({
+    build: (s) => ({
       weights: { shoot: 0.8, nakedShot: 0.8, bodylockTd: 0.8, shootOffStrikes: 0.8 },
-      policy: { paceMult: 1.25, riskDelta: 1, emergency: 'stealRound' },
-      label: 'down a round — steal it on volume',
+      // 01 §2.6 `whenLosing`: the gambler empties the clip, the staller does
+      // not change the pace he is already losing with, `press` is the default
+      // §2.6.3 row.
+      policy: {
+        paceMult: s.whenLosing === 'gamble' ? 1.35 : s.whenLosing === 'stall' ? 1.0 : 1.25,
+        riskDelta: s.whenLosing === 'gamble' ? 2 : s.whenLosing === 'stall' ? 0 : 1,
+        emergency: 'stealRound',
+      },
+      label: s.whenLosing === 'gamble'
+        ? 'down a round — go and get it'
+        : 'down a round — steal it on volume',
     }),
   },
   {

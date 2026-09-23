@@ -3,8 +3,15 @@
  *
  *     score(a) = base(a)
  *              x  PI_k comp( c_k(x_k(a)), n )
- *              x  clamp( w_style x w_plan x w_adapt x w_matchup, 0.25, 3.0 )
+ *              x  clamp( w_style x w_pref x w_plan x w_adapt x w_matchup, 0.25, 3.0 )
  *              x  w_multi(a)
+ *
+ * `w_pref` is 01 §2.6's authored style preference for *this technique id*
+ * (`ai/preferences.ts`). It is a sixth factor only in the bookkeeping sense:
+ * it is bounded to the same [0.5, 2.0] band as `w_style` and enters the same
+ * clamp, so the utility model's ceiling is unchanged and a preference biases
+ * the choice without ever unlocking anything (the candidate has to exist
+ * first). It is never a new roll — the draw schedule of 09 §2.7 is untouched.
  *
  * The shape is the Infinite Axis Utility System's: every consideration is a
  * response curve onto [0, 1] and the score is their product, with the
@@ -119,6 +126,13 @@ export interface ScorableAction {
  */
 export interface WeightBundle {
   style: number;
+  /**
+   * 01 §2.6's authored preference for this candidate's own id
+   * (`ai/preferences.preferenceWeight`). Optional so every existing caller and
+   * test keeps meaning "no opinion"; bounded to `[PREF_CLAMP_MIN,
+   * PREF_CLAMP_MAX]` before it enters the product.
+   */
+  pref?: number;
   plan: number;
   adapt: number;
   matchup: number;
@@ -126,7 +140,21 @@ export interface WeightBundle {
 }
 
 export const NEUTRAL_WEIGHTS: WeightBundle =
-  Object.freeze({ style: 1, plan: 1, adapt: 1, matchup: 1, multi: 1 });
+  Object.freeze({ style: 1, pref: 1, plan: 1, adapt: 1, matchup: 1, multi: 1 });
+
+/**
+ * `ai.pref.clamp` — the band a style preference may move a single action by,
+ * before the §2.2.3 product clamp. Same range as `w_style` (§2.2.3), so the
+ * preference channel is never wider than the style channel it belongs to.
+ */
+export const PREF_CLAMP_MIN = 0.5;
+export const PREF_CLAMP_MAX = 2.0;
+
+/** The bounded preference factor. Non-finite and absent both mean "no opinion". */
+export function preferenceFactor(v: number | undefined): number {
+  if (v === undefined || !Number.isFinite(v)) return 1;
+  return clamp(v, PREF_CLAMP_MIN, PREF_CLAMP_MAX);
+}
 
 // ---------------------------------------------------------------------------
 // The IAUS compensation factor (§2.2.1)
@@ -318,7 +346,7 @@ export function scoreAction<T extends ScorableAction>(
     product *= compensate(c, n);
   }
   const weightProduct = clamp(
-    w.style * w.plan * w.adapt * w.matchup,
+    w.style * preferenceFactor(w.pref) * w.plan * w.adapt * w.matchup,
     WEIGHT_CLAMP_MIN,
     WEIGHT_CLAMP_MAX,
   );

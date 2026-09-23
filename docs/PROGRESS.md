@@ -14,7 +14,7 @@ be rolled back independently.
 | 4 Strategy & game plans | `src/sim/ai/**` | **Done** — scouting, plans, utility AI, adaptation, corners, multi-opponent | `bffe627` … `f0f2371` |
 | 5 Skill tiers | tier catalogue → behaviour/animation | **Done** — 196 rules wired into decisions, execution and defence | `b8215e6` |
 | 6 Fighter creator | `src/app/**` | **Done** — database, 7-section editor, live derived panel, import/export | `06c47ac` … `d26d5a3` |
-| 7 Match modes & features | rulesets, arenas, tournaments, commentary, replay | Not started (spec in ch. 06/09) | |
+| 7 Match modes & features | match setup, tournaments, history, commentary, replay, spectator | **Done** — all modes, 14 rulesets x 9 arenas, worker-run bouts | see Phase 7 summary |
 | 8 Graphics & animation | `src/presentation/**`, `docs/ASSETS.md` | Not started (spec in ch. 08) | |
 | 9 Calibration & validation | `docs/CALIBRATION.md` | Not started (129-row target table in ch. 09 §7) | |
 
@@ -102,6 +102,42 @@ submission conversion are not, and are carried into Phase 9 with evidence in
   exhaustion; lossless JSON import/export preserving unknown fields.
 - Verified in a real browser, not just compiled: 15 archetypes listed, opening one loads the full
   editor, no console errors.
+
+## Phase 7 — summary
+- **Match setup**: every mode (1v1, teams with 2v2/1v2/1v3/1v5/3v3, free-for-all 2-6, crowd 1-vs-2-8),
+  all 14 rulesets x 9 arenas with a non-standard-pairing warning that warns rather than blocks,
+  the full settings block, and a visible, copyable seed — a bout is a pure function of it.
+- **Bouts run in a Web Worker** so the UI never freezes, with a parity test asserting the worker and
+  main thread produce an identical digest, ticks, draw count, events and stats across five
+  mode/ruleset/arena families. A worker must not be able to change a fight.
+- **Tournaments**: single elimination 4/8/16/32, double 8/16, round-robin <=8; seeding by rating,
+  manual or random (seeded from the tournament id); byes handled by one rule; carry-over none /
+  sameNight / career with the documented damage and stamina fractions.
+- **History**: re-watch, export, delete, and verification that reports `engine-version` mismatches
+  honestly rather than silently failing.
+- **Commentary** explains strategy, not just strikes, driven by plans, adjustments, corner cues and
+  score belief ("EWB's corner asked for exactly this between rounds - he is headhunting for it").
+  It runs on a forked RNG, so commentary provably cannot change a bout.
+- **Watch screen**: frame-accurate transport with 0.1x-8x speed, event seek, loop, instant replay,
+  four cameras, the visible game-plan panel, live stats, filterable event log and a debug overlay.
+
+## Deep fighter customization — summary
+Chapter 01 gained §8, "the fighter as a career". Every field is optional and defaults to its
+formula's identity value; backward compatibility was proved by deriving a pre-change fighter and
+comparing byte-for-byte.
+- **Per art**: months since trained (rust decays that art's effective sub-skills *and* what it
+  transfers out), start age, hours and sessions per week, coach quality, base-art flag, grade
+  (BJJ belts and stripes, judo kyu/dan, wrestling credentials, amateur boxing class, Thai/karate/
+  TKD/sambo ranks), competition record in that art, a 31-entry specialisation catalogue, and
+  sparring intensity.
+- **Overall**: total rounds fought, opposition level, main events, war fights, hard sparring years,
+  years pro, title wins, and a direct experience override shown beside the derived value.
+- **Physique and biography**: natural weight (cut severity), hand strength split, limb asymmetry,
+  cardio background, weight-cut history, surgeries.
+- **Injuries**: 11 regions mapping to attribute penalties and capability caps.
+- Design choices worth noting: grade and competition raise an art's *mean* with a uniform offset so
+  the authored skill shape survives; specialisations reshape mean-neutrally so nobody climbs a tier
+  by ticking boxes.
 
 ## Known gaps carried forward
 - **Style preferences do not affect a bout** (F-3). Favourite techniques, combos, go-to submissions

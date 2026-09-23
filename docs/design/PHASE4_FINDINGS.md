@@ -398,16 +398,18 @@ one variant would claim its owner only ever attacks from that position, which is
 wrong. `resolveSubmissionFamily()` now expands a family into its members, and an
 exact id resolves to itself, so either vocabulary is valid. Dangling ids: 0.
 
-**F-3 (OPEN, for Phase 7): style preferences are not consumed by the AI.**
-`style.goToSubmissions`, `favouriteTechniques`, `favouriteCombos` and
-`takedownPreferences` are authored, validated and stored, but nothing in
-`src/sim/ai/` reads them — a `grep` for `goToSubmissions` across the sim finds
-only the legacy importer. So a fighter built around the guillotine currently
-hunts it no more often than anyone else, and the creator's style tab has no
-effect on the bout. The plan generator (07 §2.5) is the right consumer: its
-weapon-selection step should seed from these lists before falling back to
-discipline means. Until then the creator over-promises, and that is worth saying
-plainly rather than leaving a user to discover it.
+**F-3 (RESOLVED in Phase 7): style preferences are not consumed by the AI.**
+`style.goToSubmissions`, `favouriteTechniques`, `favouriteCombos`,
+`takedownPreferences`, `preferredRange` and `whenLosing` were authored,
+validated and stored, but nothing in `src/sim/ai/` read them — a `grep` for
+`goToSubmissions` across the sim found only the legacy importer. So a fighter
+built around the guillotine hunted it no more often than anyone else, and the
+creator's style tab had no effect on the bout.
+
+`src/sim/ai/preferences.ts` is now the consumer, wired into plan generation
+(07 §2.5.3 step 5), action selection (§2.2.3 `w_pref`) and the macro runner
+(§2.2.5). The full account, with the measured usage shift, is the Phase 7
+section at the end of this document.
 
 ---
 
@@ -631,3 +633,165 @@ fragile, and a ~1.4x force edge beats a ~1.3x accuracy reduction. Knockdowns per
   vulnerability +20 %"** are not wired: the first needs 02's sub-location
   weights to take a defender-side modifier, the second needs 03's takedown
   defence to. Both are one-line hooks in chapters Phase 5 did not open.
+
+
+---
+
+# Phase 7 — making the Style tab change the fight (F-3)
+
+Phase 6 closed with the creator's Style tab writing six fields that nothing read.
+This section records what now reads them, the guard rails, the measured effect,
+and what is deliberately left as a number to re-fit rather than a thing to build.
+
+## 1. What was built
+
+`src/sim/ai/preferences.ts` compiles a `StyleSpec` once per `FighterRuntime`
+(cached; no RNG, no world) into four things:
+
+| compiled | from | consumed by |
+| --- | --- | --- |
+| `byId` — technique / edge / submission id -> multiplier | `favouriteTechniques`, `takedownPreferences.prefs`, `goToSubmissions` | `policy.weightsFor` -> `utility.scoreAction` as `w_pref` |
+| `families` / `weaponOrder` | the same lists, mapped through `familyForTechnique` and `familyForEdge` | `plan.preferenceRules` (`PR-1`) and the weapon seeding |
+| `submissionTargets` — family-expanded | `goToSubmissions` | `GamePlan.submissionTargets`, the plan panel |
+| `combos` | `favouriteCombos` | `macros.preferComboOrder` -> `policy.maybeBeginMacro` |
+
+Five plan rules were added to §2.5.3 step 5, pushed onto the hit list *ahead* of
+the scouted rules of §2.5.4-§2.5.6 so that the camp's read of the opponent
+overrides the author on the policy fields while the weights simply multiply:
+
+- `PR-1` the authored families (a quarter share — see below);
+- `PR-2` `takedownPreferences.setup` (naked / off strikes / off a feint / reactive / off the clinch);
+- `PR-3` `preferredRange` -> `rangeTarget`, and `clinch` / `ground` -> `phaseTarget`;
+- `PR-4` `takedownPreferences.cageBias` -> `cagePolicy`;
+- `PR-5` the submission targets, for the rationale panel.
+
+`whenLosing` went to the tactical layer instead of the plan, which is where
+§2.6.3 keeps it: `hold` now joins `losingBehaviour: 'unchanged'` in disabling
+SC-2/SC-3, and `gamble` / `press` / `stall` shape `adj.behind_final`'s
+`riskDelta` (2 / 1 / 0) and `paceMult` (1.35 / 1.25 / 1.00).
+
+## 2. The four guard rails
+
+**The draw schedule is untouched.** Nothing in `preferences.ts` takes a uniform.
+The preference is a *weight multiplier inside the existing selection*, never a
+new roll: 8 draws per fighter in P3, 1 in P5, unchanged. `tests/style.test.ts`
+asserts the per-tick count explicitly over 40 ticks with a deliberately loud
+Style tab and with every list emptied.
+
+**A preference may bias, never unlock.** `familiesForPreferredId` applies the
+same predicate `actions.ts` enumerates with — `spec.minTier`,
+`TierBehaviour.forbidden`, `techniqueBlockedBy`, the edge's
+`requirements.minTier`, and chapter 04's selection gates for submissions. A T0
+brawler who lists `tech.elbow_horizontal` and `tech.kick_head_switch` as
+favourites compiles to an *empty* preference map, and the candidate set still
+contains no elbow.
+
+**It stays inside the documented band.** `w_pref` is clamped to [0.5, 2.0] — the
+`w_style` range of §2.2.3 — and enters the same `clamp[0.25, 3.0]` product as
+style, plan, adapt and matchup. The utility model's ceiling is exactly what it
+was.
+
+**`gamePlanOverride` still wins.** The override is applied last and replaces the
+generated plan wholesale, preference-seeded weapons included.
+
+## 3. Tier scaling (§2.5.8)
+
+The authored weight is raised to a fidelity exponent by iqTier,
+`ai.pref.fidelity.tier = 0.50 / 0.65 / 0.80 / 0.90 / 1.00 / 1.00`. A T5 executes
+the game plan as written; a T1's preferences are a crude bias; a T0 keeps the
+weakest version, because instinct is all he has — he has no plan at all, which
+is unchanged (`generateGamePlan` still returns `null` for him). The exponent is
+monotone, so it never reorders a fighter's own preferences.
+
+Two compressions keep the feature from re-tuning the population:
+
+- `ai.pref.gain = 0.35` — only that share of an authored weight's distance from
+  1 survives into the multiplier. At gain 1 an elite wrestler who lists the jab,
+  the cross and the double leg stops throwing anything else and jabs his way to
+  a decision he used to finish; the three-tier-gap check of 09 §7.3 caught it
+  (26/30 against a 0.9 floor).
+- `ai.pref.plan_share = 0.25` — the plan's family channel and the utility
+  layer's id channel are the *same opinion*, so the family side is a quarter of
+  it rather than a second full copy. The two submission families are excluded
+  from the plan channel entirely: `submission` covers sixty techniques, and a
+  guillotine specialist must not come out better at the heel hook.
+
+## 4. Measured — `scripts/dev/style.ts`
+
+One archetype, cloned into variants that differ in *nothing but* the Style tab,
+150 seeded bouts of each against the same fixed opponent
+(`arch.regional_pro_allrounder` both sides, 12.8 min mean). "off" is the same
+fighter with every preference list emptied; the share is of that fighter's own
+strikes / submission stages.
+
+| preference | off /15 min | on /15 min | ratio | share off -> on |
+| --- | --- | --- | --- | --- |
+| guillotine specialist | 0.96 | 1.41 | **x1.46** | 11.7 % -> 15.8 % |
+| armbar specialist | 0.33 | 0.54 | **x1.64** | 4.0 % -> 6.0 % |
+| kimura specialist (*family*, 5 variants) | 0.70 | 1.08 | **x1.55** | 8.5 % -> 11.3 % |
+| leg-locker (heel hook + kneebar) | 0.27 | 0.35 | **x1.28** | 3.3 % -> 4.1 % |
+| strangler (RNC + arm triangle) | 2.46 | 3.77 | **x1.53** | 29.9 % -> 37.9 % |
+| head-kick lover | 0.27 | 0.30 | x1.14 | 0.47 % -> 0.54 % |
+| body puncher | 5.16 | 6.64 | **x1.29** | 9.2 % -> 10.6 % |
+| leg kicker | 0.59 | 0.78 | **x1.32** | 1.1 % -> 1.4 % |
+| jabber | 17.89 | 21.27 | x1.19 | 31.9 % -> 35.9 % |
+| double-leg wrestler | 0.67 | 0.77 | x1.16 | — |
+| single-leg wrestler | 0.60 | 0.95 | **x1.58** | — |
+| judo thrower (uchi mata / osoto / kouchi) | 0.06 | 0.10 | **x1.65** | — |
+| one-two man (`favouriteCombos`) | 4.75 | 6.89 | **x1.45** | 8.5 % -> 11.5 % (the cross) |
+| jab-cross-low-kick (`favouriteCombos`) | 0.26 | 1.28 | **x4.95** | 0.5 % -> 2.1 % (the low kick) |
+
+The guillotine, armbar, kimura and leg-lock variants all share the `submission`
+family and differ only by id — which is the case the plan's family granularity
+cannot express, and the reason `w_pref` is keyed on the technique id.
+
+An authored chain moves the technique at its *tail* hardest: the low kick a
+jab-cross-low-kick fighter never reaches on its own merits is thrown five
+times as often once the chain is the macro he runs (x4.95). That is the
+`favouriteCombos` path doing what §2.2.5 says combinations are for.
+
+The head kick moves least (x1.14). That is `c.risk` and `c.range_fit` doing
+their job: a preference multiplies a candidate's score, it does not excuse the
+head kick's risk class of 0.75 at the wrong distance.
+
+## 5. Headline batch — no regression
+
+`arch.regional_pro_allrounder` mirror, four independent 200-bout seed batches,
+preferences off vs on, paired on the same seeds:
+
+| seed batch | duration off -> on | KD/15 off -> on |
+| --- | --- | --- |
+| probe | 11.9 -> 12.6 | 0.29 -> 0.25 |
+| probeA | 11.7 -> 11.5 | 0.31 -> 0.33 |
+| probeB | 10.4 -> 11.3 | 0.41 -> 0.32 |
+| probeC | 12.0 -> 11.5 | 0.25 -> 0.30 |
+| **mean (800 bouts)** | **11.50 -> 11.73** | **0.315 -> 0.300** |
+
++0.23 min and -0.015 KD per 15 min, against a seed-batch spread of +/-0.8 min and
++/-0.08 KD at this sample size — i.e. inside the noise, and the sign flips
+between batches. Worth recording that a *single* 200-bout batch is not enough to
+judge a change of this size: the first batch alone read +0.7 min and would have
+been mistaken for a regression.
+
+## 6. Left measured, not patched
+
+- **Three preset id aliases point at ids that do not exist.**
+  `resolvePresetId` maps `tech.collar_tie_knee -> tech.clinch_knee` and
+  `tech.gnp_cross -> tech.gnp_punch`, and the ageing veteran names
+  `tech.clinch_elbow` directly; none of the three targets is in chapter 02's
+  catalogue or chapter 03's graph. The preference compiler ignores an id it
+  cannot resolve (which is the right behaviour), so the judoka's collar-tie
+  knee, the sambo grappler's ground-and-pound and the veteran's clinch elbow are
+  authored and silently inert. Fixing the alias targets is an archetype-data
+  change, not an AI one, and it will move those three archetypes' behaviour — so
+  it belongs with the next calibration pass, not with this one. The creator's
+  validator already warns on them.
+- **`ai.pref.gain` and `ai.pref.plan_share` are `[E]`.** They were set to the
+  largest values that leave the §5 headline inside its noise band; if the
+  archetypes are re-fitted in Phase 9 the honest move is to raise the gain and
+  re-fit the population together, rather than keeping a deliberately quiet
+  feature forever.
+- **Submission *finishes* are still zero** across every variant, preferred or
+  not — the Phase 4 item ("attempts are not converting") is untouched by this
+  work. Preferences change which submission is attempted, not whether the finish
+  path works.

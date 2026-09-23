@@ -694,4 +694,126 @@ for (const [id, v, unit, tag, note] of BEH) {
   add(id, v, unit, tag, note, !tag.startsWith('[S:'));
 }
 
+// --------------------------------------------------------------------------
+// §5.8 Per-discipline depth, overall experience, biography and injuries
+//
+// Chapter 01 §8. Every id below is read by `deriveRuntime`; none of them is a
+// display value. The defaults are chosen so that a definition written against
+// the original schema — one carrying none of these fields — derives to exactly
+// the numbers it derived to before, which is the backward-compatibility
+// contract `tests/fighter.deep.test.ts` asserts.
+// --------------------------------------------------------------------------
+
+// ---- rust (§8.1.1) --------------------------------------------------------
+// Motor skill is retained far longer than the physical qualities that express
+// it: closed-skill retention is measured in years, not weeks, which is why the
+// floor is high (0.70) and the time constant long.
+add('fm.disc.rust_grace_months', 3, 'months', '[E]', 'Months out of an art before any decay starts; a fight camp already costs this much.', true, 0, 24);
+add('fm.disc.rust_tau_months', 54, 'months', '[E]', 'Exponential time constant of skill rust in one art.', true, 6, 240);
+add('fm.disc.rust_floor', 0.70, 'ratio', '[E]', 'Floor on the rust multiplier; technique never decays to nothing.', true, 0.3, 1);
+
+// ---- training volume, camp and training age (§8.1.2) ----------------------
+add('fm.disc.volume_ref_hours', 8, 'h/week', '[E]', 'Hours per week a "1.0" training block means.', true, 1, 40);
+add('fm.disc.volume_hours_exp', 0.5, 'exponent', '[E]', 'Square-root diminishing return on weekly hours.', true, 0, 1);
+add('fm.disc.volume_ref_sessions', 5, 'count/week', '[E]', 'Sessions per week a "1.0" block means.', true, 1, 14);
+add('fm.disc.volume_sessions_exp', 0.25, 'exponent', '[E]', 'Frequency matters, but less than total volume (distributed practice).', true, 0, 1);
+add('fm.disc.volume_min', 0.50, 'ratio', '[E]', 'Floor on the volume factor.', true, 0.1, 1);
+add('fm.disc.volume_max', 1.60, 'ratio', '[E]', 'Ceiling on the volume factor; more hours stop paying.', true, 1, 3);
+add('fm.disc.camp_slope', 0.15, 'ratio', '[E]', 'Per-art coaching quality moves effective years by +/- this much across 0-100.', true, 0, 0.5);
+add('fm.disc.youth_ref_age', 18, 'yr', '[E]', 'Start age at or above which no youth credit is given.', true, 10, 30);
+add('fm.disc.youth_bonus', 0.20, 'ratio', '[E]', 'Maximum effective-years bonus for starting in early childhood.', true, 0, 0.6);
+add('fm.disc.base_art_years_mult', 1.15, 'ratio', '[E]', 'Effective-years multiplier for the art flagged as the base.', true, 1, 1.5);
+add('fm.disc.spar_slope', 0.06, 'ratio', '[E]', 'Effective sub-skills move +/- this fraction across the sparring-intensity range: skill learned against resistance is the skill that shows up.', true, 0, 0.3);
+
+// ---- grade and competition prior (§8.1.3) ---------------------------------
+add('fm.disc.prior_share', 0.85, 'ratio', '[E]', 'Fraction of the grade/competition prior an effective sub-skill is floored at. Below 1 because a belt attests the art, not every skill in it.', true, 0, 1);
+add('fm.disc.comp_tau_bouts', 12, 'count', '[E]', 'Bouts at which the competition prior reaches ~63 % of its level ceiling.', true, 1, 60);
+const COMP_LEVEL: Array<[string, number]> = [['none', 0], ['local', 35], ['national', 55], ['international', 72]];
+for (const [lvl, v] of COMP_LEVEL) {
+  add(`fm.disc.comp_level.${lvl}`, v, '0-100', '[E]', `Ceiling of the competition prior at ${lvl} level, inside the CONV §3 tier bands.`, true, 0, 100);
+}
+add('fm.disc.comp_winrate_base', 0.70, 'ratio', '[E]', 'Competition-prior multiplier at a 0 % win rate.', true, 0, 1);
+add('fm.disc.comp_winrate_slope', 0.30, 'ratio', '[E]', 'Added across the win-rate range, so the form factor spans 0.70 to 1.00 and a perfect record can never claim more than the room is worth.', true, 0, 1);
+const PLACING_BONUS: Array<[string, number]> = [
+  ['none', 0], ['localPodium', 3], ['nationalPodium', 8], ['nationalTitle', 12],
+  ['continentalMedal', 16], ['worldMedal', 22], ['olympicMedal', 26],
+];
+for (const [id, v] of PLACING_BONUS) {
+  add(`fm.disc.placing.${id}`, v, '0-100', '[E]', `Points added to the competition prior for a best placing of ${id}.`, true, 0, 40);
+}
+add('fm.disc.medal_points', 2, '0-100', '[E]', 'Points per medal beyond the best placing.', true, 0, 10);
+add('fm.disc.medal_cap', 5, 'count', '[E]', 'Medals counted.', true, 0, 30);
+
+// ---- specialisations (§8.1.4) ---------------------------------------------
+add('fm.disc.spec_bonus', 6, '0-100', '[E]', 'Points added to each emphasised sub-skill of a specialisation.', true, 0, 20);
+add('fm.disc.spec_cost_share', 1.0, 'ratio', '[E]', 'Share of the emphasis points paid back by the traded sub-skills. 1.0 makes a specialisation mean-neutral: it reallocates training hours rather than adding them, so nobody climbs a tier by ticking boxes.', true, 0, 2);
+add('fm.disc.spec_decay', 0.60, 'ratio', '[E]', 'Each further specialisation in the same art is worth this much of the previous one — nobody specialises in everything.', true, 0, 1);
+
+// ---- overall experience (§8.2) --------------------------------------------
+add('fm.exp.rounds_per_fight', 3, 'count', '[E]', 'Rounds a "fight" is worth when converting rounds fought into experience units.', true, 1, 5);
+add('fm.exp.rounds_weight', 0.50, 'ratio', '[E]', 'Weight on the rounds-fought surplus over the bout count: cage time beyond the bouts themselves still teaches, at half rate.', true, 0, 1);
+add('fm.exp.opposition_slope', 0.20, 'ratio', '[E]', 'Experience is scaled +/- this fraction across the opposition-level range.', true, 0, 0.6);
+add('fm.career.opposition_composure', 5, '0-100', '[E]', 'Composure points at the extremes of the opposition-level range.', true, 0, 20);
+add('fm.career.main_event_composure', 0.8, '0-100', '[E]', 'Composure gained per main event contested.', true, 0, 5);
+add('fm.career.main_event_cap', 8, 'count', '[E]', 'Main events counted.', true, 0, 40);
+add('fm.career.chin_per_war', 1.2, '0-100', '[E]', 'Chin points lost per hard fight taken. Below the per-KO-loss cost because a war is repeated sub-concussive load, not one knockout.', true, 0, 6);
+add('fm.career.war_cap', 6, 'count', '[E]', 'Hard fights counted against the chin.', true, 0, 30);
+add('fm.career.chin_per_hard_spar_year', 0.4, '0-100', '[E]', 'Chin points lost per year of habitual hard sparring (cumulative sub-concussive exposure).', true, 0, 3);
+add('fm.career.hard_spar_cap', 15, 'yr', '[E]', 'Years of hard sparring counted.', true, 0, 40);
+
+// ---- biography (§8.3) -----------------------------------------------------
+add('fm.hist.cardio_per_year', 0.8, '0-100', '[E]', 'Cardio points per year of endurance-sport background; aerobic base is the most durable trained quality there is.', true, 0, 4);
+add('fm.hist.cardio_year_cap', 10, 'yr', '[E]', 'Endurance years counted.', true, 0, 40);
+add('fm.hist.hard_cut_cardio', 0.35, '0-100', '[E]', 'Cardio points lost per career cut beyond 8 %; chronic cutting is a chronic cost.', true, 0, 3);
+add('fm.hist.hard_cut_cap', 12, 'count', '[E]', 'Hard cuts counted.', true, 0, 60);
+add('fm.hist.missed_weight_dehydration', 0.004, 'fraction', '[E]', 'Residual dehydration added per missed weigh-in: the cut has stopped working.', true, 0, 0.02);
+add('fm.hist.missed_weight_cap', 3, 'count', '[E]', 'Missed weigh-ins counted.', true, 0, 10);
+add('fm.hist.surgery_recovery', 1.5, '0-100', '[E]', 'Recovery points lost per career surgery.', true, 0, 6);
+add('fm.hist.surgery_cap', 6, 'count', '[E]', 'Surgeries counted against recovery.', true, 0, 30);
+add('fm.power.hand_split_slope', 0.35, 'ratio', '[E]', 'Lead-hand power is scaled by 1 - slope x (split - 50)/50: a one-handed puncher has nothing on the jab.', true, 0, 1);
+add('fm.reach.asym_share', 0.50, 'ratio', '[E]', 'Share of a limb-length asymmetry that reaches the effective reach; the span measurement already carries the other half.', true, 0, 1);
+
+// ---- injuries (§8.4) ------------------------------------------------------
+add('fm.injury.heal_tau_months', 18, 'months', '[E]', 'Exponential time constant on which an injury stops mattering.', true, 1, 120);
+add('fm.injury.surgery_residue', 0.25, 'ratio', '[E]', 'Permanent floor on an operated injury’s weight. A reconstructed joint is never the joint it was.', true, 0, 1);
+add('fm.injury.recurrent_residue', 0.35, 'ratio', '[E]', 'Permanent floor on a recurrent injury’s weight.', true, 0, 1);
+add('fm.injury.points_per_unit', 14, '0-100', '[E]', 'Attribute points removed at injury weight 1.0 and region weight 1.0 — a fresh rupture.', true, 0, 40);
+add('fm.injury.cap_gate_weight', 0.35, 'ratio', '[E]', 'Injury weight above which a capability cap starts to bite at all.', true, 0, 1);
+add('fm.injury.cap_strength', 0.25, 'ratio', '[E]', 'Largest fraction a capability (punch power, kick power, head-kick quality) can be capped away by injury.', true, 0, 0.8);
+
+/**
+ * Region -> attribute weights for the injury model. The mapping is anatomical
+ * rather than statistical: a shoulder costs hand speed and the strength behind
+ * it, a knee costs balance, foot speed and the kick, a hand costs grip and the
+ * punch. `[E]` throughout.
+ */
+const INJURY_W: Array<[string, string, number]> = [
+  ['head', 'chin', 1.0], ['head', 'reactionTime', 0.3],
+  ['eye', 'reactionTime', 0.8],
+  ['neck', 'neck', 1.0],
+  ['shoulder', 'handSpeed', 0.5], ['shoulder', 'strength', 0.4],
+  ['elbow', 'gripStrength', 0.5], ['elbow', 'strength', 0.3],
+  ['hand', 'gripStrength', 0.8],
+  ['ribs', 'bodyToughness', 1.0],
+  ['back', 'strength', 0.6], ['back', 'balance', 0.4],
+  ['hip', 'flexibility', 0.8], ['hip', 'kickSpeed', 0.4],
+  ['knee', 'balance', 0.6], ['knee', 'speed', 0.6], ['knee', 'kickSpeed', 0.4],
+  ['ankle', 'balance', 0.5], ['ankle', 'speed', 0.5],
+];
+for (const [region, attr, w] of INJURY_W) {
+  add(`fm.injury.w.${region}.${attr}`, w, 'ratio', '[E]', `Share of the injury penalty a ${region} injury puts on ${attr}.`, true, 0, 2);
+}
+
+/** Region -> capability caps. A capability cap is a multiplier, not points. */
+const INJURY_CAP_W: Array<[string, string, number]> = [
+  ['hand', 'punchPower', 1.0],
+  ['shoulder', 'punchPower', 0.5],
+  ['hip', 'headKick', 1.0],
+  ['knee', 'kickPower', 0.8], ['knee', 'headKick', 0.6],
+  ['ankle', 'kickPower', 0.5],
+];
+for (const [region, cap, w] of INJURY_CAP_W) {
+  add(`fm.injury.cap.${region}.${cap}`, w, 'ratio', '[E]', `Share of the capability cap a ${region} injury applies to ${cap}.`, true, 0, 2);
+}
+
 export const FIGHTER_PARAMS: ParamSpec[] = params;

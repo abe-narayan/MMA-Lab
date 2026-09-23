@@ -64,6 +64,51 @@ export interface SubSkillField {
   help: string;
 }
 
+/**
+ * One discipline's detail block (01 §8.1). Every field carries its own dotted
+ * path so the detail panel can be written as a table rather than as thirty
+ * hand-wired controls, and so a validation issue on any of them lands on the
+ * right input through the same `focusPath` route as everything else.
+ */
+export interface DisciplineDetail {
+  startAge: number;
+  startAgePath: string;
+  hoursPerWeek: number;
+  hoursPath: string;
+  sessionsPerWeek: number;
+  sessionsPath: string;
+  sparringIntensity: number;
+  sparringPath: string;
+  monthsSinceTrained: number;
+  rustPath: string;
+  coachQuality: number;
+  coachPath: string;
+  isBase: boolean;
+  isBasePath: string;
+  gradeSystem: string;
+  gradeSystemPath: string;
+  gradeRank: string;
+  gradeRankPath: string;
+  stripes: number;
+  stripesPath: string;
+  specialisations: string[];
+  specialisationsPath: string;
+  competition: {
+    level: string;
+    bouts: number;
+    wins: number;
+    losses: number;
+    draws: number;
+    amateurBouts: number;
+    amateurWins: number;
+    proBouts: number;
+    proWins: number;
+    bestPlacing: string;
+    medals: number;
+  };
+  competitionPath: string;
+}
+
 export interface DisciplineSection {
   id: CoreDisciplineId;
   label: string;
@@ -74,6 +119,8 @@ export interface DisciplineSection {
   qualityPath: string;
   trainingQuality: number;
   subSkills: SubSkillField[];
+  /** 01 §8.1 depth: grade, record, volume, rust, specialisations. */
+  detail: DisciplineDetail;
 }
 
 /** The untrained default every sub-skill starts at (01 §4 preamble). */
@@ -91,13 +138,15 @@ export function disciplineSections(def: FighterDefinition): DisciplineSection[] 
   return DISCIPLINE_IDS.map((id) => {
     const block = def.disciplines[id];
     const sub = (block?.sub ?? {}) as Record<string, number>;
+    const p = (suffix: string): string => `disciplines.${id}.${suffix}`;
+    const comp = block?.competition;
     return {
       id,
       label: DISCIPLINE_LABELS[id] ?? id,
       trained: block !== undefined,
-      yearsPath: `disciplines.${id}.years`,
+      yearsPath: p('years'),
       years: block?.years ?? 0,
-      qualityPath: `disciplines.${id}.trainingQuality`,
+      qualityPath: p('trainingQuality'),
       trainingQuality: block?.trainingQuality ?? 1,
       subSkills: (SUB_SKILLS[id] ?? []).map((skill) => ({
         skill,
@@ -106,15 +155,83 @@ export function disciplineSections(def: FighterDefinition): DisciplineSection[] 
         value: sub[skill] ?? UNTRAINED_SUB_SKILL,
         help: subSkillHelp(id, skill),
       })),
+      detail: {
+        // Every default below is the neutral value of the derivation's own
+        // formula, so an untouched control cannot change a derived number.
+        startAge: block?.startAge ?? DISCIPLINE_DEFAULTS.startAge,
+        startAgePath: p('startAge'),
+        hoursPerWeek: block?.hoursPerWeek ?? DISCIPLINE_DEFAULTS.hoursPerWeek,
+        hoursPath: p('hoursPerWeek'),
+        sessionsPerWeek: block?.sessionsPerWeek ?? DISCIPLINE_DEFAULTS.sessionsPerWeek,
+        sessionsPath: p('sessionsPerWeek'),
+        sparringIntensity: block?.sparringIntensity ?? DISCIPLINE_DEFAULTS.sparringIntensity,
+        sparringPath: p('sparringIntensity'),
+        monthsSinceTrained: block?.monthsSinceTrained ?? 0,
+        rustPath: p('monthsSinceTrained'),
+        coachQuality: block?.coachQuality ?? DISCIPLINE_DEFAULTS.coachQuality,
+        coachPath: p('coachQuality'),
+        isBase: block?.isBase ?? false,
+        isBasePath: p('isBase'),
+        gradeSystem: block?.grade?.system ?? 'none',
+        gradeSystemPath: p('grade.system'),
+        gradeRank: block?.grade?.rank ?? 'none.unranked',
+        gradeRankPath: p('grade.rank'),
+        stripes: block?.grade?.stripes ?? 0,
+        stripesPath: p('grade.stripes'),
+        specialisations: block?.specialisations ? [...block.specialisations] : [],
+        specialisationsPath: p('specialisations'),
+        competition: {
+          level: comp?.level ?? 'none',
+          bouts: comp?.bouts ?? 0,
+          wins: comp?.wins ?? 0,
+          losses: comp?.losses ?? 0,
+          draws: comp?.draws ?? 0,
+          amateurBouts: comp?.amateurBouts ?? 0,
+          amateurWins: comp?.amateurWins ?? 0,
+          proBouts: comp?.proBouts ?? 0,
+          proWins: comp?.proWins ?? 0,
+          bestPlacing: comp?.bestPlacing ?? 'none',
+          medals: comp?.medals ?? 0,
+        },
+        competitionPath: p('competition'),
+      },
     };
   });
 }
 
+/**
+ * The neutral defaults for the §8.1 depth fields.
+ *
+ * They are exported because three places need to agree on them — the editor
+ * (so an untouched control shows what the sim assumes), the validator (so it
+ * does not warn about a value nobody set) and the generator. A fourth copy
+ * would be a fourth chance to disagree with `fighter.params.ts`.
+ */
+export const DISCIPLINE_DEFAULTS = Object.freeze({
+  startAge: 18,
+  hoursPerWeek: 8,
+  sessionsPerWeek: 5,
+  sparringIntensity: 50,
+  coachQuality: 50,
+});
+
 /** A fresh, fully-populated block for a discipline the fighter is taking up. */
-export function blankDisciplineBlock(id: CoreDisciplineId): { years: number; trainingQuality: number; styleTags: string[]; sub: Record<string, number> } {
+export function blankDisciplineBlock(id: CoreDisciplineId): {
+  years: number; trainingQuality: number; styleTags: string[]; sub: Record<string, number>;
+  startAge: number; hoursPerWeek: number; sessionsPerWeek: number; sparringIntensity: number;
+  monthsSinceTrained: number; coachQuality: number; specialisations: string[];
+} {
   const sub: Record<string, number> = {};
   for (const skill of SUB_SKILLS[id] ?? []) sub[skill] = UNTRAINED_SUB_SKILL;
-  return { years: 0, trainingQuality: 1, styleTags: [], sub };
+  return {
+    years: 0,
+    trainingQuality: 1,
+    styleTags: [],
+    sub,
+    ...DISCIPLINE_DEFAULTS,
+    monthsSinceTrained: 0,
+    specialisations: [],
+  };
 }
 
 // --------------------------------------------------------------------------

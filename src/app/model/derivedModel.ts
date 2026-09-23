@@ -44,6 +44,18 @@ export interface DisciplineTierRow {
   mean: number;
   /** Mean of the stored sub-skills alone, for the transfer delta. */
   nativeMean: number;
+
+  // --- 01 §8.1 -----------------------------------------------------------
+  /** Skill retained after time away from this art; 1.0 when current. */
+  rustMult: number;
+  /** The larger of the grade and competition priors, 0-100. */
+  prior: number;
+  gradePrior: number;
+  competitionPrior: number;
+  /** What one training year in this art is worth, after volume/camp/age/base. */
+  yearsQualityMult: number;
+  specialisations: readonly string[];
+  isBase: boolean;
 }
 
 /**
@@ -84,6 +96,13 @@ export function disciplineTierRows(rt: FighterRuntime): DisciplineTierRow[] {
       effectiveYears: d.effectiveYears,
       mean: d.mean,
       nativeMean: names.length > 0 ? sum / names.length : 0,
+      rustMult: d.rustMult,
+      prior: Math.max(d.gradePrior, d.competitionPrior),
+      gradePrior: d.gradePrior,
+      competitionPrior: d.competitionPrior,
+      yearsQualityMult: d.yearsQualityMult,
+      specialisations: d.specialisations,
+      isBase: d.isBase,
     });
   }
   // Trained disciplines first, then by tier: the fighter's actual identity
@@ -118,7 +137,32 @@ export function derivedGroups(rt: FighterRuntime): DerivedGroup[] {
         { label: 'Grappling', value: `T${rt.grapplingTier} ${TIER_NAMES[rt.grapplingTier]}`, note: `mean ${n(rt.grapplingMean)}` },
         { label: 'MMA integration', value: `T${rt.mmaTier} ${TIER_NAMES[rt.mmaTier]}`, note: `mean ${n(rt.mmaMean)}` },
         { label: 'Decision quality', value: `IQ tier ${rt.iqTier}`, note: `fight IQ ${n(rt.def.mental.fightIQ, 0)}` },
-        { label: 'Experience', value: n(rt.experience, 2), note: 'pro bouts + half the amateur bouts, scaled' },
+        {
+          label: 'Experience',
+          value: n(rt.experience, 2),
+          note: rt.def.record.experienceOverride !== undefined
+            ? `authored override; the record implies ${n(rt.experienceDerived, 2)}`
+            : 'bouts + rounds surplus, scaled by opposition level',
+        },
+      ],
+    },
+    {
+      id: 'injury',
+      title: 'Injury and biography',
+      rows: [
+        {
+          label: 'Injury load',
+          value: n(rt.injury.load, 2),
+          note: rt.injury.notes.length > 0 ? rt.injury.notes.join('; ') : 'no injuries recorded',
+        },
+        { label: 'Punch-power cap', value: `x${n(rt.injury.capabilities.punchPower, 3)}` },
+        { label: 'Kick-power cap', value: `x${n(rt.injury.capabilities.kickPower, 3)}` },
+        { label: 'Head-kick cap', value: `x${n(rt.injury.capabilities.headKick, 3)}`, note: 'folded into the kick-quality multiplier' },
+        {
+          label: 'Attribute points lost',
+          value: injuryPenaltySummary(rt),
+          note: 'after healing, surgery and recurrence',
+        },
       ],
     },
     {
@@ -186,6 +230,15 @@ export function derivedGroups(rt: FighterRuntime): DerivedGroup[] {
       ],
     },
   ];
+}
+
+/** `chin -4.2, balance -2.1`, or a dash when nothing is hurt. */
+function injuryPenaltySummary(rt: FighterRuntime): string {
+  const parts = Object.entries(rt.injury.attributePenalties)
+    .filter(([, v]) => Math.abs(v) >= 0.05)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${humaniseKey(k)} -${v.toFixed(1)}`);
+  return parts.length > 0 ? parts.join(', ') : '—';
 }
 
 function fmtDelta(v: number, dp = 2): string {

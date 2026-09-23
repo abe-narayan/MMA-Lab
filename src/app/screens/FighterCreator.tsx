@@ -19,8 +19,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  SUBMISSIONS, TECHNIQUES, WEIGHT_CLASS_LIMIT_KG, buildBlendOf,
-  type CoreDisciplineId, type FighterDefinition,
+  ENDURANCE_SPORTS, INJURY_REGIONS, SUBMISSIONS, TECHNIQUES, WEIGHT_CLASS_LIMIT_KG, buildBlendOf,
+  type CoreDisciplineId, type EnduranceSportId, type FighterDefinition, type InjuryEntry,
+  type InjuryRegion,
 } from '../../sim';
 import {
   BUILDS, GUARD_STYLES, HANDEDNESSES, HURT_BEHAVIOURS, INITIATIVES, LOSING_BEHAVIOURS,
@@ -38,10 +39,11 @@ import {
   blankDisciplineBlock, comboSpecs, disciplineSections, isDirty,
   takedownPrefs, weightedSubmissions, weightedTechniques,
 } from '../model/editorModel';
-import { deriveSafely } from '../model/derivedModel';
+import { deriveSafely, disciplineTierRows } from '../model/derivedModel';
 import {
-  BODY_META, BUILD_META, DISCIPLINE_LABELS, MENTAL_META, PHYSICAL_GROUPS, PHYSICAL_META,
-  RECORD_META, STYLE_META, humaniseKey, weightClassLabel, type FieldMeta,
+  BODY_META, BUILD_META, DISCIPLINE_LABELS, EXPERIENCE_META, HISTORY_META, MENTAL_META,
+  PHYSICAL_GROUPS, PHYSICAL_META, RECORD_META, STYLE_META, humaniseKey, weightClassLabel,
+  type FieldMeta,
 } from '../model/fieldMeta';
 import { clampNumber, deleteAtPath, describedByIdForPath, fieldIdForPath, getAtPath, setAtPath } from '../model/paths';
 import { dualLength, dualMass } from '../model/units';
@@ -50,22 +52,44 @@ import { dualLength, dualMass } from '../model/units';
 // Sections
 // --------------------------------------------------------------------------
 
-type SectionId = 'body' | 'appearance' | 'physical' | 'disciplines' | 'record' | 'mental' | 'style';
+type SectionId =
+  | 'body' | 'appearance' | 'physical' | 'disciplines' | 'record'
+  | 'experience' | 'history' | 'mental' | 'style';
 
 const SECTIONS: readonly { id: SectionId; label: string; hint: string }[] = [
   { id: 'body', label: 'Body', hint: 'Frame, mass, age and stance' },
   { id: 'appearance', label: 'Appearance', hint: 'Cosmetic only; never read by the simulation' },
   { id: 'physical', label: 'Physical', hint: 'The fourteen physical attributes' },
-  { id: 'disciplines', label: 'Disciplines', hint: 'Years trained and every named sub-skill' },
+  { id: 'disciplines', label: 'Disciplines', hint: 'Per-art career: grade, record, volume, rust and specialisations' },
   { id: 'record', label: 'Record', hint: 'Career counters and layoff' },
+  { id: 'experience', label: 'Experience', hint: 'Rounds, opposition level, big-fight and damage history' },
+  { id: 'history', label: 'Injuries & history', hint: 'Injuries, surgeries, cut history and endurance background' },
   { id: 'mental', label: 'Mental', hint: 'The six mental attributes' },
   { id: 'style', label: 'Style', hint: 'Game plan, favourites and behaviour under pressure' },
 ];
 
+/**
+ * Overall-experience fields live under `record` in the schema but under their
+ * own tab in the editor, because the Record tab is already the longest in the
+ * creator and these eight fields are a different question: not "what is the
+ * record" but "what did it cost and who was it against".
+ */
+const EXPERIENCE_KEYS = [
+  'totalRounds', 'yearsPro', 'oppositionLevel', 'mainEvents', 'titleWins',
+  'warFights', 'hardSparringYears', 'experienceOverride',
+] as const;
+
+/** Body fields the Injuries & history tab owns rather than the Body tab. */
+const HISTORY_BODY_KEYS = ['naturalWeightKg', 'handStrengthSplit', 'limbAsymmetry'] as const;
+
 /** Which section owns a validation path, so clicking an issue can open it. */
 export function sectionForPath(path: string): SectionId {
-  const head = path.split('.')[0];
+  const parts = path.split('.');
+  const head = parts[0];
+  if (head === 'record' && (EXPERIENCE_KEYS as readonly string[]).includes(parts[1])) return 'experience';
+  if (head === 'body' && (HISTORY_BODY_KEYS as readonly string[]).includes(parts[1])) return 'history';
   switch (head) {
+    case 'history': return 'history';
     case 'body': return 'body';
     case 'appearance': return 'appearance';
     case 'physical': return 'physical';
@@ -341,6 +365,13 @@ export function FighterCreator({
 
   const sections = useMemo(() => disciplineSections(draft), [draft]);
   const runtimeDisciplines = derived.runtime?.disciplines ?? null;
+  // The tier rows carry the §8.1 derived figures (rust, priors, what a year is
+  // worth) that the per-art detail panel prints live.
+  const derivedByDiscipline = useMemo(() => {
+    const out: Record<string, ReturnType<typeof disciplineTierRows>[number]> = {};
+    if (derived.runtime) for (const row of disciplineTierRows(derived.runtime)) out[row.id] = row;
+    return out;
+  }, [derived.runtime]);
 
   return (
     <div className="creator">
@@ -458,9 +489,12 @@ export function FighterCreator({
                     expanded={expanded.has(s.id)}
                     onToggleExpanded={toggleDiscipline}
                     onChange={setNumber}
+                    onField={setField}
                     onTrain={trainDiscipline}
                     onUntrain={untrainDiscipline}
                     invalidPaths={badPaths}
+                    derived={derivedByDiscipline[s.id] ?? null}
+                    effectiveSub={rt ? rt.effective : null}
                   />
                 );
               })}
@@ -468,6 +502,19 @@ export function FighterCreator({
           </div>
           <div role="tabpanel" id="sectpanel-record" aria-labelledby="sect-record" hidden={section !== 'record'}>
             <RecordSection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
+          </div>
+          <div role="tabpanel" id="sectpanel-experience" aria-labelledby="sect-experience" hidden={section !== 'experience'}>
+            <ExperienceSection
+              draft={draft}
+              onNumber={setNumber}
+              onField={setField}
+              bad={badPaths}
+              derivedExperience={derived.runtime?.experienceDerived ?? null}
+              usedExperience={derived.runtime?.experience ?? null}
+            />
+          </div>
+          <div role="tabpanel" id="sectpanel-history" aria-labelledby="sect-history" hidden={section !== 'history'}>
+            <HistorySection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
           </div>
           <div role="tabpanel" id="sectpanel-mental" aria-labelledby="sect-mental" hidden={section !== 'mental'}>
             <AttributeSection
@@ -769,6 +816,244 @@ function RecordSection({ draft, onNumber, onField, bad }: SectionProps): JSX.Ele
           meta={{ label: 'Win streak', help: 'Consecutive wins going in.', clamp: { min: 0, max: 40, dp: 0 } }}
           value={r.winStreak ?? 0} step={1} onChange={onNumber} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * EXPERIENCE (01 §8.2) — what the record cost and who it was against.
+ *
+ * The Record tab counts bouts. This one asks the two questions a bout count
+ * cannot answer: how much cage time is behind it, and how good was the
+ * opposition. Both move derived numbers, and the override at the bottom exists
+ * because sometimes the author knows something the counters do not — with the
+ * derived value printed beside it so the override is an informed act.
+ */
+function ExperienceSection({
+  draft, onNumber, onField, bad, derivedExperience, usedExperience,
+}: SectionProps & {
+  derivedExperience: number | null;
+  usedExperience: number | null;
+}): JSX.Element {
+  const r = draft.record;
+  const overrideSet = r.experienceOverride !== undefined;
+  const v = (k: string): number => (r as unknown as Record<string, number>)[k] ?? 0;
+
+  return (
+    <div className="fc-section">
+      <h3 className="fc-h">Experience and career depth</h3>
+      <p className="fc-blurb">
+        Two fighters at 10-0 are not the same fighter. One has thirty rounds behind him and has
+        beaten ranked opposition; the other has ten first-round finishes against debutants. These
+        fields are the difference, and every one of them moves the experience composite, composure
+        or the chin.
+      </p>
+
+      <h4 className="fc-h fc-h--sub">Cage time and level</h4>
+      <div className="fc-grid">
+        <NumberField path="record.totalRounds" meta={EXPERIENCE_META.totalRounds} value={v('totalRounds')}
+          onChange={onNumber} invalid={bad?.has('record.totalRounds')} />
+        <NumberField path="record.yearsPro" meta={EXPERIENCE_META.yearsPro} value={v('yearsPro')} step={0.5}
+          onChange={onNumber} invalid={bad?.has('record.yearsPro')} />
+        <NumberField path="record.mainEvents" meta={EXPERIENCE_META.mainEvents} value={v('mainEvents')}
+          onChange={onNumber} invalid={bad?.has('record.mainEvents')} />
+        <NumberField path="record.titleWins" meta={EXPERIENCE_META.titleWins} value={v('titleWins')}
+          onChange={onNumber} invalid={bad?.has('record.titleWins')} />
+      </div>
+
+      <div className="attr-list-grid">
+        <AttributeSlider path="record.oppositionLevel" label={EXPERIENCE_META.oppositionLevel.label}
+          help={EXPERIENCE_META.oppositionLevel.help} value={r.oppositionLevel ?? 50}
+          onChange={onNumber} invalid={bad?.has('record.oppositionLevel')} />
+      </div>
+
+      <h4 className="fc-h fc-h--sub">Damage history</h4>
+      <p className="fc-blurb">
+        The mileage the KO column never shows. Both of these decay the chin permanently, on top of
+        the age curve and the KO losses on the Record tab.
+      </p>
+      <div className="fc-grid fc-grid--tight">
+        <NumberField path="record.warFights" meta={EXPERIENCE_META.warFights} value={v('warFights')}
+          onChange={onNumber} invalid={bad?.has('record.warFights')} />
+        <NumberField path="record.hardSparringYears" meta={EXPERIENCE_META.hardSparringYears}
+          value={v('hardSparringYears')} step={0.5}
+          onChange={onNumber} invalid={bad?.has('record.hardSparringYears')} />
+      </div>
+
+      <h4 className="fc-h fc-h--sub">Overall experience</h4>
+      <p className="fc-blurb">
+        {derivedExperience === null
+          ? 'The draft will not derive, so the implied value is unavailable.'
+          : `The record, rounds and opposition level imply ${(derivedExperience * 100).toFixed(1)} / 100. ` +
+            `The sim is currently using ${((usedExperience ?? derivedExperience) * 100).toFixed(1)}.`}
+      </p>
+      <div className="fc-field fc-field--checkbox">
+        <input
+          id={fieldIdForPath('record.experienceOverride.enabled')}
+          type="checkbox"
+          checked={overrideSet}
+          aria-describedby={describedByIdForPath('record.experienceOverride.enabled')}
+          onChange={(e) =>
+            onField(
+              'record.experienceOverride',
+              e.target.checked ? Math.round((derivedExperience ?? 0.5) * 100) : undefined,
+            )
+          }
+        />
+        <label htmlFor={fieldIdForPath('record.experienceOverride.enabled')}>
+          Set overall experience by hand
+        </label>
+        <p className="fc-help" id={describedByIdForPath('record.experienceOverride.enabled')}>
+          {EXPERIENCE_META.experienceOverride.help}
+        </p>
+      </div>
+      {overrideSet ? (
+        <div className="attr-list-grid">
+          <AttributeSlider path="record.experienceOverride"
+            label={EXPERIENCE_META.experienceOverride.label}
+            help={EXPERIENCE_META.experienceOverride.help}
+            value={r.experienceOverride ?? 50}
+            onChange={onNumber} invalid={bad?.has('record.experienceOverride')} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * INJURIES AND HISTORY (01 §8.3, §8.4).
+ *
+ * The body carries its past. Everything on this tab lowers something: a
+ * reconstructed knee costs balance, foot speed and the kick it can no longer
+ * commit to; a walk-around mass twenty kilos above the limit costs residual
+ * dehydration; ten years of hard sparring costs chin. Nothing here is
+ * flavour — the derived panel shows exactly what each entry took.
+ */
+function HistorySection({ draft, onNumber, onField, bad }: SectionProps): JSX.Element {
+  const b = draft.body;
+  const h = draft.history ?? {};
+  const injuries = h.injuries ?? [];
+  const cut = h.weightCutHistory ?? { hardCuts: 0, worstCutPct: 0, missedWeight: 0 };
+  const cardio = h.cardioBackground ?? { sport: 'none' as EnduranceSportId, years: 0 };
+  const asym = b.limbAsymmetry ?? { armPct: 0, legPct: 0 };
+
+  const setInjuries = (next: InjuryEntry[]): void => onField('history.injuries', next);
+  const patch = (i: number, key: keyof InjuryEntry, value: unknown): void => {
+    const next = injuries.slice();
+    next[i] = { ...next[i], [key]: value };
+    setInjuries(next);
+  };
+
+  return (
+    <div className="fc-section">
+      <h3 className="fc-h">Injuries and history</h3>
+      <p className="fc-blurb">
+        The body a fighter brings to the cage is the one his career left him. Every field here is
+        read by the derivation &mdash; injuries take attribute points and can cap a capability
+        outright, the cut history costs cardio and dehydration, and the endurance background gives
+        some of it back.
+      </p>
+
+      <h4 className="fc-h fc-h--sub">Natural size and asymmetry</h4>
+      <div className="fc-grid fc-grid--tight">
+        <NumberField path="body.naturalWeightKg" meta={HISTORY_META.naturalWeightKg}
+          value={b.naturalWeightKg ?? b.weighInKg ?? b.massKg} step={0.5}
+          onChange={onNumber} invalid={bad?.has('body.naturalWeightKg')}
+          suffix={dualMass(b.naturalWeightKg ?? b.weighInKg ?? b.massKg)} />
+        <NumberField path="body.limbAsymmetry.armPct" meta={HISTORY_META.armAsymmetryPct}
+          value={asym.armPct} step={0.1}
+          onChange={(p, val) => onField('body.limbAsymmetry', { ...asym, armPct: val })}
+          invalid={bad?.has('body.limbAsymmetry.armPct')} />
+        <NumberField path="body.limbAsymmetry.legPct" meta={HISTORY_META.legAsymmetryPct}
+          value={asym.legPct} step={0.1}
+          onChange={(p, val) => onField('body.limbAsymmetry', { ...asym, legPct: val })}
+          invalid={bad?.has('body.limbAsymmetry.legPct')} />
+      </div>
+      <div className="attr-list-grid">
+        <AttributeSlider path="body.handStrengthSplit" label={HISTORY_META.handStrengthSplit.label}
+          help={HISTORY_META.handStrengthSplit.help} value={b.handStrengthSplit ?? 50}
+          onChange={onNumber} invalid={bad?.has('body.handStrengthSplit')} />
+      </div>
+
+      <h4 className="fc-h fc-h--sub">Conditioning background and weight-cut history</h4>
+      <div className="fc-grid fc-grid--tight">
+        <SelectField path="history.cardioBackground.sport" meta={HISTORY_META.cardioSport}
+          value={cardio.sport} options={ENDURANCE_SPORTS}
+          onChange={(p, val) => onField('history.cardioBackground', { ...cardio, sport: val })} />
+        <NumberField path="history.cardioBackground.years" meta={HISTORY_META.cardioYears}
+          value={cardio.years} step={0.5}
+          onChange={(p, val) => onField('history.cardioBackground', { ...cardio, years: val })}
+          invalid={bad?.has('history.cardioBackground.years')} />
+        <NumberField path="history.weightCutHistory.hardCuts" meta={HISTORY_META.hardCuts}
+          value={cut.hardCuts}
+          onChange={(p, val) => onField('history.weightCutHistory', { ...cut, hardCuts: val })}
+          invalid={bad?.has('history.weightCutHistory.hardCuts')} />
+        <NumberField path="history.weightCutHistory.worstCutPct" meta={HISTORY_META.worstCutPct}
+          value={cut.worstCutPct} step={0.5}
+          onChange={(p, val) => onField('history.weightCutHistory', { ...cut, worstCutPct: val })}
+          invalid={bad?.has('history.weightCutHistory.worstCutPct')} />
+        <NumberField path="history.weightCutHistory.missedWeight" meta={HISTORY_META.missedWeight}
+          value={cut.missedWeight}
+          onChange={(p, val) => onField('history.weightCutHistory', { ...cut, missedWeight: val })}
+          invalid={bad?.has('history.weightCutHistory.missedWeight')} />
+        <NumberField path="history.surgeries" meta={HISTORY_META.surgeries} value={h.surgeries ?? 0}
+          onChange={onNumber} invalid={bad?.has('history.surgeries')} />
+      </div>
+
+      <h4 className="fc-h fc-h--sub">Injury history</h4>
+      <p className="fc-blurb">
+        Each entry costs the attributes of its region, scaled by severity and decayed by
+        e<sup>-months/18</sup>. An operated or recurrent injury never fully goes: it keeps a floor
+        of 25 % or 35 % forever. A hand, shoulder, hip, knee or ankle injury additionally caps
+        punch power, kick power or the head kick once it is bad enough.
+      </p>
+      <ul className="injury-list">
+        {injuries.map((inj, i) => (
+          <li className="injury-row" key={`${inj.region}:${i}`}>
+            <SelectField path={`history.injuries.${i}.region`} meta={HISTORY_META.injuryRegion}
+              value={inj.region} options={INJURY_REGIONS}
+              onChange={(p, val) => patch(i, 'region', val as InjuryRegion)} />
+            <NumberField path={`history.injuries.${i}.severity`} meta={HISTORY_META.injurySeverity}
+              value={inj.severity} onChange={(p, val) => patch(i, 'severity', val)}
+              invalid={bad?.has(`history.injuries.${i}.severity`)} />
+            <NumberField path={`history.injuries.${i}.monthsAgo`} meta={HISTORY_META.injuryMonthsAgo}
+              value={inj.monthsAgo} onChange={(p, val) => patch(i, 'monthsAgo', val)}
+              invalid={bad?.has(`history.injuries.${i}.monthsAgo`)} />
+            <div className="fc-field fc-field--checkbox">
+              <input id={fieldIdForPath(`history.injuries.${i}.surgery`)} type="checkbox"
+                checked={inj.surgery ?? false}
+                aria-describedby={describedByIdForPath(`history.injuries.${i}.surgery`)}
+                onChange={(e) => patch(i, 'surgery', e.target.checked)} />
+              <label htmlFor={fieldIdForPath(`history.injuries.${i}.surgery`)}>{HISTORY_META.injurySurgery.label}</label>
+              <p className="fc-help" id={describedByIdForPath(`history.injuries.${i}.surgery`)}>
+                {HISTORY_META.injurySurgery.help}
+              </p>
+            </div>
+            <div className="fc-field fc-field--checkbox">
+              <input id={fieldIdForPath(`history.injuries.${i}.recurrent`)} type="checkbox"
+                checked={inj.recurrent ?? false}
+                aria-describedby={describedByIdForPath(`history.injuries.${i}.recurrent`)}
+                onChange={(e) => patch(i, 'recurrent', e.target.checked)} />
+              <label htmlFor={fieldIdForPath(`history.injuries.${i}.recurrent`)}>{HISTORY_META.injuryRecurrent.label}</label>
+              <p className="fc-help" id={describedByIdForPath(`history.injuries.${i}.recurrent`)}>
+                {HISTORY_META.injuryRecurrent.help}
+              </p>
+            </div>
+            <button type="button" className="btn btn--quiet"
+              onClick={() => setInjuries(injuries.filter((_, j) => j !== i))}>
+              Remove
+            </button>
+          </li>
+        ))}
+        {injuries.length === 0 ? <li className="fc-note">No injuries recorded. A healthy fighter.</li> : null}
+      </ul>
+      <button
+        type="button"
+        className="btn"
+        onClick={() => setInjuries([...injuries, { region: 'knee', severity: 40, monthsAgo: 12 }])}
+      >
+        Add injury
+      </button>
     </div>
   );
 }
