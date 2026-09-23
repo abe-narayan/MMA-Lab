@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Character lookdev</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; height: 100%; background: #070708; color: #ddd; font: 12px/1.4 system-ui, sans-serif; overflow: hidden; }
+  #app { position: fixed; inset: 0; }
+  #ui { position: fixed; top: 8px; left: 8px; background: rgba(10,10,12,0.72); padding: 8px 10px; border-radius: 6px; max-width: 300px; }
+  #ui label { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #ui input[type=range] { flex: 1; }
+  #ui select { background: #222; color: #ddd; border: 1px solid #444; }
+  #stats { position: fixed; bottom: 8px; left: 8px; background: rgba(10,10,12,0.7); padding: 4px 8px; border-radius: 4px; white-space: pre; }
+  body.clean #ui, body.clean #stats { display: none; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="ui"></div>
+<div id="stats">loading…</div>
+<script type="module" src="./character.ts"></script>
+</body>
+</html>
