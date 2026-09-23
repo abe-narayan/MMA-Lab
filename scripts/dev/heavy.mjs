@@ -20,18 +20,31 @@
  *   4. releases the slot however the child exits, and reclaims slots left by a
  *      crashed holder after `STALE_MS`.
  *
+ * CPU: the cap covers CPU as well as memory, and the jobs that spike it
+ * (headless Chromium compiling shaders, esbuild, tsc) are multi-threaded. So
+ * the wrapper also
+ *   5. waits until machine-wide CPU use is below `CPU_START` before starting;
+ *   6. on Windows, confines itself to `AFFINITY` cores (default 6 of 8, mask
+ *      0x3F) at below-normal priority before spawning; both are inherited by
+ *      every child process (Chromium's GPU and renderer processes included),
+ *      so one heavy job can never take more than 75 % of the CPU, and the
+ *      desktop keeps two cores even while two jobs run.
+ *
  * Environment: HEAVY_SLOTS (default 2), HEAVY_NEED_GB (default 1.6),
- * HEAVY_HEAP_MB (default 2048), HEAVY_CAP (default 0.93).
+ * HEAVY_HEAP_MB (default 2048), HEAVY_CAP (default 0.93),
+ * HEAVY_CPU_START (default 0.70), HEAVY_AFFINITY (hex mask, default 3F).
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { freemem, totalmem, tmpdir } from 'node:os';
+import { constants, cpus, freemem, setPriority, totalmem, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const SLOTS = Number(process.env.HEAVY_SLOTS ?? 2);
 const NEED_GB = Number(process.env.HEAVY_NEED_GB ?? 1.6);
 const HEAP_MB = Number(process.env.HEAVY_HEAP_MB ?? 2048);
 const CAP = Number(process.env.HEAVY_CAP ?? 0.93);
+const CPU_START = Number(process.env.HEAVY_CPU_START ?? 0.70);
+const AFFINITY = process.env.HEAVY_AFFINITY ?? '3F';
 const STALE_MS = 30 * 60 * 1000;
 const POLL_MS = 3000;
 const LOCK_ROOT = join(tmpdir(), 'boutlab-heavy-locks');
@@ -50,6 +63,22 @@ function memoryAllows() {
   const free = freemem();
   const afterStart = free - NEED_GB * 1024 ** 3;
   return afterStart >= total * (1 - CAP);
+}
+
+/** Machine-wide CPU busy fraction over a short window, from os.cpus() tick deltas. */
+async function cpuBusy(windowMs = 1200) {
+  const snap = () => cpus().map((c) => c.times);
+  const a = snap();
+  await sleep(windowMs);
+  const b = snap();
+  let idle = 0, total = 0;
+  for (let i = 0; i < a.length; i++) {
+    const da = Object.values(a[i]).reduce((x, y) => x + y, 0);
+    const db = Object.values(b[i]).reduce((x, y) => x + y, 0);
+    total += db - da;
+    idle += b[i].idle - a[i].idle;
+  }
+  return total > 0 ? 1 - idle / total : 0;
 }
 
 function tryTakeSlot() {
@@ -71,7 +100,7 @@ function tryTakeSlot() {
 let slot = null;
 let waitedMs = 0;
 for (;;) {
-  if (memoryAllows()) {
+  if (memoryAllows() && (await cpuBusy()) < CPU_START) {
     slot = tryTakeSlot();
     if (slot) break;
   }
@@ -96,6 +125,20 @@ const env = {
   ...process.env,
   NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=${HEAP_MB}`.trim(),
 };
+// Confine THIS process before spawning: Windows children inherit the parent's
+// CPU affinity mask, and a below-normal parent's priority class, so the whole
+// job tree (shell, npx, node, Chromium's GPU and renderer processes) runs on
+// `AFFINITY` cores at below-normal priority. The job itself is spawned exactly
+// as before, so its exit code reaches the caller unchanged. (A `start /affinity`
+// wrapper was tried and rejected: `start /wait` swallows the exit code, which
+// would make a failing typecheck look green.)
+if (process.platform === 'win32') {
+  try {
+    setPriority(process.pid, constants.priority.PRIORITY_BELOW_NORMAL);
+    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `(Get-Process -Id ${process.pid}).ProcessorAffinity = 0x${AFFINITY}`], { stdio: 'ignore' });
+  } catch { /* best effort: the memory and slot gates still apply */ }
+}
 const child = spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', env, shell: process.platform === 'win32' });
 child.on('exit', (code, signal) => {
   release();
