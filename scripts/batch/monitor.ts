@@ -7,8 +7,8 @@
  *     `os.freemem()`.
  *   - `Throttle`: the pure pause / resume / shrink state machine, fed one
  *     sample at a time so the tests can drive it with synthetic numbers.
- *       pause   when CPU > cap or RAM > cap (cap 0.93)
- *       resume  when CPU < 0.85 and RAM < 0.85 (hysteresis)
+ *       pause   when CPU > cap or RAM > cap (cap 0.88: 5 points of headroom under the 93 % rule for load outside the batch)
+ *       resume  when CPU < 0.80 and RAM < 0.80 (hysteresis)
  *       shrink  one worker for every 30 s the pause persists (never below 1)
  *       relaxed resume: once the pool is down to one worker and has been
  *         paused for 60 s, resume below cap − 2 pp instead of 85 %, so a
@@ -71,8 +71,8 @@ export interface ThrottleOptions {
 }
 
 export const DEFAULT_THROTTLE: ThrottleOptions = {
-  cap: 0.93,
-  resumeBelow: 0.85,
+  cap: 0.88,
+  resumeBelow: 0.80,
   shrinkAfterMs: 30_000,
   relaxedAfterMs: 60_000,
   relaxedMargin: 0.02,

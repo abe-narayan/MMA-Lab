@@ -25,7 +25,7 @@ import { runBatch } from '../scripts/batch/batch';
 import { PLANS, buildJob } from '../scripts/batch/plans';
 import { runQaBout, summarizeRun } from '../scripts/batch/summarize';
 import { executeJob } from '../scripts/batch/execute';
-import { Throttle, poolBudget, type Sample } from '../scripts/batch/monitor';
+import { DEFAULT_THROTTLE, Throttle, poolBudget, type Sample } from '../scripts/batch/monitor';
 import type { FighterRow, ResultRow } from '../scripts/batch/types';
 import { Dataset, ptLA } from '../scripts/calibrate/data';
 import { MASTER_ROWS, evaluateAll, evaluateRow, judgeComp } from '../scripts/calibrate/metrics';
@@ -320,8 +320,10 @@ describe('the §6.6 pass rule', () => {
 describe('resource monitor', () => {
   const s = (t: number, cpu: number, ram: number): Sample => ({ t, cpu, ram });
 
+  // Explicit 0.93 / 0.85 thresholds: the state machine under test, not the defaults.
+  const OPTS = { ...DEFAULT_THROTTLE, cap: 0.93, resumeBelow: 0.85 };
   it('pauses above the cap, holds through the hysteresis band, resumes below 85 %', () => {
-    const th = new Throttle();
+    const th = new Throttle(OPTS);
     expect(th.update(s(0, 0.5, 0.80), 2)).toEqual([]);
     expect(th.update(s(2000, 0.5, 0.94), 2)).toEqual(['pause']);
     expect(th.update(s(4000, 0.5, 0.88), 2)).toEqual([]);
@@ -331,7 +333,7 @@ describe('resource monitor', () => {
   });
 
   it('shrinks the pool every 30 s of persistent pressure, never below one worker, then relaxes', () => {
-    const th = new Throttle();
+    const th = new Throttle(OPTS);
     th.update(s(0, 0.5, 0.95), 3);
     expect(th.update(s(20_000, 0.5, 0.95), 3)).toEqual([]);
     expect(th.update(s(30_000, 0.5, 0.95), 3)).toEqual(['shrink']);

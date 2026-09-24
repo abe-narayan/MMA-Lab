@@ -3,7 +3,7 @@
  *
  *   npx tsx scripts/batch/run.ts --plan baseline,tier_matrix,identical --n 40 \
  *       --seed cal-2026-09 --out runs/pre-tuning [--max-workers 2] [--resume]
- *       [--params overrides.json] [--filter cell=LW] [--cap 0.93] [--resume-below 0.85]
+ *       [--params overrides.json] [--filter cell=LW] [--cap 0.88] [--resume-below 0.80]
  *       [--affinity 3F] [--per-worker-mb 200] [--sample-ms 2000] [--list]
  *
  *   --plan         plan id(s), comma-separated (see --list)
@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     : undefined;
   if (args.has('record-golden')) console.warn('[batch] --record-golden is not implemented yet; rows only (no frames)');
 
-  const cap = Number(str(args, 'cap', '0.93'));
+  const cap = Number(str(args, 'cap', '0.88'));
   const summary = await runBatch({
     plans,
     n,
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
     resume: args.has('resume'),
     overrides,
     filter,
-    throttle: { cap, resumeBelow: Number(str(args, 'resume-below', '0.85')) },
+    throttle: { cap, resumeBelow: Number(str(args, 'resume-below', '0.80')) },
     sampleMs: Number(str(args, 'sample-ms', '2000')),
     perWorkerMB: Number(str(args, 'per-worker-mb', '200')),
     affinity: str(args, 'affinity', '1F'),
