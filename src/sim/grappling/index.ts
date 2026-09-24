@@ -19,3 +19,5 @@ export * from './engagement';
 export * from './resolve';
 export * from './cage';
 export * from './gnp';
+export * from './takedowns';
+export * from './subOffers';

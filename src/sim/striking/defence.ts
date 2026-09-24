@@ -836,8 +836,9 @@ export function rankDefences(
     const score = (d: DefenceSpec): number =>
       defenceSuccessFor(d, spec) * (1 + d.counter.bonus);
     const diff = score(b) - score(a);
-    // Ties break by id so the policy is deterministic across builds.
-    return diff !== 0 ? diff : a.id.localeCompare(b.id);
+    // Ties break by id — plain code-unit order, never localeCompare, whose ICU
+    // collation can differ between machines (audit C2).
+    return diff !== 0 ? diff : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   });
 }
 

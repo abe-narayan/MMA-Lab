@@ -455,6 +455,11 @@ export interface FoulOccurrence {
   positionGained?: boolean;
   /** Flagrant fouls end the fight on the spot regardless of the ladder. */
   flagrant?: boolean;
+  /**
+   * The resolver already put a `foul` event on the log for this technique
+   * (I6); the referee then rules on it without logging it a second time.
+   */
+  announced?: boolean;
 }
 
 /**
@@ -599,6 +604,8 @@ interface FighterRecord {
   markedInjury: { byFoul: FoulId; intentional: boolean } | null;
   slipCommands: number;
   cutWatched: boolean;
+  /** Worst cut severity at the last in-round doctor check (-1: never). */
+  examinedCutSeverity: number;
   holdingWarnings: number;
 }
 
@@ -626,6 +633,21 @@ export interface RefereeOptions {
   experience?: RefereeExperience;
   doctorLeniency?: number;
 }
+
+/**
+ * Damaging head strikes a grounded fighter must have gone without answering
+ * before a static cover counts as "not intelligently defending" [E: Phase 9].
+ */
+export const COVERING_MIN_UNANSWERED = 2;
+
+/** 05 §2.7 / §22: seconds of static cover under fire that count as not defending. */
+export const COVERING_STATIC_S = 3;
+
+/**
+ * Damaging head strikes a visibly hurt fighter (05 limpness 1) may go without
+ * answering before the referee steps in [E: Phase 9].
+ */
+export const HURT_TKO_UNANSWERED = 2;
 
 export class Referee {
   readonly cfg: RefereeConfig;
@@ -662,7 +684,7 @@ export class Referee {
       r = {
         warnings: new Map(), deductionsByRound: new Map(), totalDeductions: 0,
         kdRound: 0, kdBout: 0, nonEngagementS: 0, timidityWarnings: 0,
-        markedInjury: null, slipCommands: 0, cutWatched: false, holdingWarnings: 0,
+        markedInjury: null, slipCommands: 0, cutWatched: false, examinedCutSeverity: -1, holdingWarnings: 0,
       };
       this.records.set(id, r);
     }
@@ -696,6 +718,20 @@ export class Referee {
 
   get boutEnding(): BoutEnding | null {
     return this.ended;
+  }
+
+  /**
+   * QA-1 (Phase 9): a stoppage in a bout with more than two fighters takes one
+   * fighter out, not the bout. The bout flow calls this after it has marked
+   * the loser out, and the referee goes back to officiating everyone else —
+   * before, `ended` stayed latched, `tick` returned it every tick (the same
+   * fighter was re-stopped each tick) and nothing else was ever officiated.
+   */
+  resumeAfterStoppage(loser: number | null): void {
+    this.ended = null;
+    this.pauseKind = null;
+    this.pending = this.pending.filter((p) => p.loser !== loser);
+    if (this.count && this.count.fighter === loser) this.count = null;
   }
 
   /** Called by the bout flow at the horn: the per-round knockdown tally resets. */
@@ -793,7 +829,7 @@ export class Referee {
     const o = f.obs;
     switch (pnd.kind) {
       case 'ko':
-        return o.ko || o.limp;
+        return o.ko || o.limpness >= 2;
       case 'tap':
         return o.tapped || o.verbalTap || o.screams;
       case 'loc':
@@ -837,9 +873,24 @@ export class Referee {
 
   // ---- §2.3.3 stoppage checks ------------------------------------------
 
+  /**
+   * Phase 9: the KO stoppage is for a fighter who is out or fully limp (05
+   * `limpness` 2: KO, or acute head >= 85 for over a second). 05's limpness 1
+   * — arms dropped, head lolling, which a `knockdown_hurt` sets — used to be
+   * enough on its own, so every hurt knockdown was stopped on the spot as a KO
+   * (two thirds of all bouts ended "KO" against a real 11.5 %, FIGHT_DATA §3
+   * #90). A hurt fighter is instead stopped on a *lowered* strike count
+   * ("the going-limp signal referees use to stop even when the strike count is
+   * low", 05 §2.7): see `HURT_TKO_UNANSWERED` in `checkTKOStrikes`.
+   */
   private checkKO(f: RefFighterInput, oppId: number, input: RefTickInput): void {
-    if (f.obs.ko || f.obs.limp) {
+    if (f.obs.ko) {
       this.queueStoppage('ko', oppId, f.id, 'strikes', 'ko', input);
+    } else if (f.obs.limpness >= 2) {
+      // Limp but conscious (acute >= 85 for over a second, 05 §2.7): the
+      // referee is stopping a barrage, which the record books as a TKO; a KO
+      // is the fighter being put out (FIGHT_DATA §3 #90's split).
+      this.queueStoppage('tko_strikes', oppId, f.id, 'limp under strikes', 'ko', input);
     }
   }
 
@@ -853,6 +904,11 @@ export class Referee {
       this.queueStoppage('tko_strikes', oppId, f.id,
         'not intelligently defending (ground)', 'tko', input);
     }
+    // A hurt fighter (05 limpness 1: arms dropped, head lolling) is stopped on
+    // far fewer unanswered strikes.
+    if (o.limp && !o.intelligentDefence && o.unansweredHead >= HURT_TKO_UNANSWERED) {
+      this.queueStoppage('tko_strikes', oppId, f.id, 'hurt and not defending', 'tko', input);
+    }
     // A static double-forearm cover is not defence: the fighter has to change
     // something. This is the rule the 2026 ABC text makes explicit.
     //
@@ -864,7 +920,12 @@ export class Referee {
     // head strikes are going unanswered, or the fighter is blocking and doing
     // nothing else (`coveringStaticS`, which §05 accrues on a glove block and
     // clears on any answer).
-    const underFire = o.unansweredHead >= 1 || o.coveringStaticS > 0;
+    // Phase 9: "under fire" is a string of strikes, not one: at least two
+    // damaging head strikes unanswered, or a static cover being hit.
+    // A static cover counts after 05 §2.7's three seconds of it, not on the
+    // first blocked punch.
+    const underFire = o.unansweredHead >= COVERING_MIN_UNANSWERED
+      || o.coveringStaticS >= COVERING_STATIC_S;
     if (o.grounded && !o.intelligentDefence && underFire
       && o.tSinceDefenceS >= c.tkoNoDefenceS) {
       this.queueStoppage('tko_strikes', oppId, f.id,
@@ -985,7 +1046,7 @@ export class Referee {
           { count: cs.count }, `${cs.count}!`);
         if (cs.count === this.rs.knockdown.mandatoryCount && f) {
           // Eyes closed or spasms: there is no point in counting to ten.
-          if (f.obs.ko || f.obs.limp) {
+          if (f.obs.ko || f.obs.limpness >= 2) {
             this.count = null;
             this.pauseKind = null;
             return this.endBout('ko', opp(cs.fighter), cs.fighter,
@@ -1093,9 +1154,11 @@ export class Referee {
 
     this.pauseKind = 'foul';
     this.pauseUntilS = input.t;
-    this.emit('foul', occ.fouler, occ.victim,
-      { foul: occ.foul, detected: true, effect: occ.effect } as RefereeEvent['detail'],
-      `Foul: ${occ.foul}.`);
+    if (!occ.announced) {
+      this.emit('foul', occ.fouler, occ.victim,
+        { foul: occ.foul, detected: true, effect: occ.effect } as RefereeEvent['detail'],
+        `Foul: ${occ.foul}.`);
+    }
 
     const priorWarnings = r.warnings.get(occ.foul) ?? 0;
     const intentional = occ.intent === 'intentional'
@@ -1284,6 +1347,13 @@ export class Referee {
     // else waits for the break.                                [S: RULES §2.2]
     const inRoundAllowed = laceration || eyelid;
     if (!inRoundAllowed) return null;
+    // Phase 9: once the doctor has looked at a cut and let it go on, the same
+    // cut is not re-examined until it gets worse. The trigger used to stay
+    // true, so a new exam started on the tick the last one ended and the
+    // bout sat in a doctor pause ("separating") until the final bell.
+    const r = this.rec(f.id);
+    if (cut !== null && cut.severity <= r.examinedCutSeverity) return null;
+    if (cut !== null) r.examinedCutSeverity = cut.severity;
 
     const trigger: DoctorExam['trigger'] = vision ? 'vision'
       : fracture ? 'fracture' : 'laceration';

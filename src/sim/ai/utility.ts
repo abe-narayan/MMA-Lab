@@ -235,10 +235,21 @@ function mustNotCurve(isMustNot: boolean, effectiveIqTier: number): number {
  */
 export const CURVE_FLOOR = 0.15;
 
-function paceCurve(family: ActionFamily, ratio: number): number {
+/**
+ * Phase 9 [E: tuned Phase 9, PHASE4_FINDINGS C-9]: the linear brake above let
+ * the landed rate run to two or three times the target before it bit (a
+ * bang-bang controller: an unbraked 15-20 attempts a minute, then nothing),
+ * because the unbraked selection rate of a strike at range is far above any
+ * real pace. The brake is now proportional: flat to `r0` of the target, then
+ * `(r0 / ratio)^n`, so the landed rate settles a little above the target
+ * instead of oscillating around three times it.
+ */
+export const PACE_CURVE = Object.freeze({ r0: 0.85, n: 2.0 });
+
+export function paceCurve(family: ActionFamily, ratio: number): number {
   if (!STRIKE_FAMILIES.has(family)) return 1;
-  if (ratio <= 1) return 1;
-  return clamp01(1 - 0.5 * (ratio - 1));
+  if (ratio <= PACE_CURVE.r0) return 1;
+  return clamp01(Math.pow(PACE_CURVE.r0 / ratio, PACE_CURVE.n));
 }
 
 /**
@@ -307,7 +318,11 @@ export function considerationValue(
     case 'c.mustnot':
       return mustNotCurve(a.isMustNot, x.effectiveIqTier);
     case 'c.pace':
-      return paceCurve(a.family, Math.max(0, x.paceRatio));
+      // Phase 9: applied outside the compensated product (`paceCurve` in the
+      // policy), because compensation across nineteen axes diluted the brake
+      // to a third of its strength. Reported as 1 here so it is not counted
+      // twice.
+      return 1;
     case 'c.dwell':
       // Exit families x2 when the dwell limit is exceeded; expressed as the
       // others being halved, because considerations live in [0, 1].
@@ -357,6 +372,23 @@ export function scoreAction<T extends ScorableAction>(
 // ---------------------------------------------------------------------------
 // §2.2.4 — softmax with tier temperature
 // ---------------------------------------------------------------------------
+
+/**
+ * Phase 9: `BASE_PRIOR` is a *family* prior (jab 1.5, cross 1.0, ...), but the
+ * candidate list has one entry per technique, edge or submission — nine jab
+ * variants, a dozen RNC-family and back attacks, six ground strikes. Scoring
+ * each with the full family prior made a family's weight proportional to how
+ * many variants the catalogue happens to list (the jab took more than half of
+ * all strikes; the back, which offers nine submissions, produced 50 attempts
+ * per 15 minutes). Weighting each candidate by 1 / (candidates in its family)
+ * inside the softmax makes the choice "family first, then variant", which is
+ * what the priors were written for.
+ */
+export function familyShares(families: readonly string[]): number[] {
+  const count = new Map<string, number>();
+  for (const f of families) count.set(f, (count.get(f) ?? 0) + 1);
+  return families.map((f) => 1 / (count.get(f) ?? 1));
+}
 
 /** `ai.temp.tier`: T0 near-lottery, T5 close to argmax without reaching it. */
 export const TAU_BY_TIER: readonly number[] = [1.00, 0.80, 0.60, 0.45, 0.35, 0.28];
@@ -424,7 +456,29 @@ export function effectiveTau(tauTier: number, q: DecisionQuality): number {
  * (exponent 3.6) cannot overflow on a large prior, and the ordering is
  * unchanged because the normaliser is common to every term.
  */
-export function softmaxSelect(scores: readonly number[], tau: number, u: number): number {
+/**
+ * Phase 9 pace governor: an upper bound on the probability that the choice
+ * this tick is a strike. `mask[i]` marks the strike candidates; when their
+ * natural share of the softmax mass exceeds `cap`, their weights are scaled so
+ * the share is exactly `cap`. Deterministic and draw-free — the same single
+ * uniform picks from the rescaled mass — so the 09 §2.7 schedule is unchanged.
+ */
+export interface MassCap {
+  mask: readonly boolean[];
+  cap: number;
+  /**
+   * `exact`: the masked share is set to `cap` whenever any masked candidate
+   * has weight, raising it as well as lowering it — a hazard rather than a
+   * ceiling, for rare deliberate actions (takedown attempts) whose natural
+   * share depends on how many other options the node happens to list.
+   */
+  exact?: boolean;
+}
+
+export function softmaxSelect(
+  scores: readonly number[], tau: number, u: number, share?: readonly number[],
+  massCaps?: readonly MassCap[],
+): number {
   const n = scores.length;
   if (n === 0) return -1;
   if (n === 1) return 0;
@@ -436,11 +490,29 @@ export function softmaxSelect(scores: readonly number[], tau: number, u: number)
   const weights = new Array<number>(n);
   let total = 0;
   for (let i = 0; i < n; i++) {
-    const w = scores[i] <= 0 ? 0 : Math.pow(scores[i] / max, exponent);
+    // `share` (Phase 9): each candidate's share of its family, so a family's
+    // mass does not grow with the number of variants it lists (see
+    // `familyShares`).
+    const w = scores[i] <= 0 ? 0 : Math.pow(scores[i] / max, exponent) * (share ? share[i] : 1);
     weights[i] = w;
     total += w;
   }
   if (total <= 0) return 0;
+  // Caps are applied in order over disjoint masks.
+  for (const massCap of massCaps ?? []) {
+    let capped = 0;
+    for (let i = 0; i < n; i++) if (massCap.mask[i]) capped += weights[i];
+    const other = total - capped;
+    const cap = clamp01(massCap.cap);
+    if (capped > 0 && other > 0 && (capped / total > cap || (massCap.exact === true && capped / total < cap))) {
+      const k = (cap * other) / ((1 - cap) * capped);
+      total = other;
+      for (let i = 0; i < n; i++) {
+        if (massCap.mask[i]) weights[i] *= k;
+        if (massCap.mask[i]) total += weights[i];
+      }
+    }
+  }
 
   let r = clamp01(u) * total;
   for (let i = 0; i < n; i++) {

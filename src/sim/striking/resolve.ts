@@ -496,6 +496,14 @@ export const FORCE = Object.freeze({
   /** Checked kicks send 60 % of the raw force back into the kicker's shin. */
   checkedShinFrac: 0.60,
   knockdownKneeBlockFrac: 0.40,
+  /**
+   * Phase 9: delivered-force multiplier for female strikers, on top of mass.
+   * Morris, Link & Martin (2020, J Exp Biol) measured male punch power ~2.6x
+   * female; upper-body strength differs far more than mass does. Without it the
+   * women's divisions knocked each other down 3-4x as often per landed head strike
+   * as UFC data (0.3 KD / 100 head sig landed vs ~0.9 for men). [E: tuned Phase 9]
+   */
+  femaleMult: 0.72,
 });
 
 export type CommitMode = 'planted' | 'retreating' | 'armPunch' | 'touch' | 'instep';
@@ -528,6 +536,8 @@ export interface ForceContext {
   shift?: boolean;
   /** Counter force multipliers from the §2.5.2 table (check hook x1.5, knee x1.3). */
   counterForceMult?: number;
+  /** Striker's sex — female strikers take `FORCE.femaleMult` (Phase 9). */
+  female?: boolean;
 }
 
 /** Force tier multiplier for this technique family (§2.6.4). */
@@ -592,7 +602,8 @@ export function forceScale(spec: TechniqueSpec, ctx: ForceContext): number {
     * (ctx.rangeFitMult ?? 1)
     * Math.max(0.1, closing)
     * (ctx.shift ? 1.15 : 1)
-    * (ctx.counterForceMult ?? 1);
+    * (ctx.counterForceMult ?? 1)
+    * (ctx.female ? FORCE.femaleMult : 1);
 }
 
 // ---------------------------------------------------------------------------

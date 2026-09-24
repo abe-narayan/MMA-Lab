@@ -20,6 +20,7 @@
  */
 import type { PositionId, SubmissionId } from '../core/ids';
 import type { EngagementRole, EngagementSnapshot, Posture } from '../record/snapshot';
+import { subOfferedAt } from './subOffers';
 import {
   complementaryNode, positionNode, roleFor,
   type EdgeId, type GrapplingEdge,
@@ -146,7 +147,10 @@ export function nodeAllowsSubmission(
 ): boolean {
   const n = positionNode(node);
   const list = slot === 'a' ? n.subThreats.top : n.subThreats.bottom;
-  return list.includes(submission);
+  // The node's threat list names families (`sub.arm_triangle`); the catalogue
+  // attacks are variants (`sub.arm_triangle_mount`). Either source counts.
+  if (list.some((x) => submission === x || submission.startsWith(`${x}_`))) return true;
+  return subOfferedAt(node, slot, submission);
 }
 
 // ---------------------------------------------------------------------------
@@ -409,19 +413,19 @@ export class EngagementSet {
    */
   contestInflight(
     engagementId: number, tick: number, commitOffsetMs: number,
-  ): { verdict: 'free' | 'blocked' | 'displace'; incumbentId: number; edge: EdgeId | null } {
+  ): { verdict: 'free' | 'blocked' | 'displace'; incumbentId: number; edge: EdgeId | null; simultaneous: boolean } {
     const e = this.byId.get(engagementId);
-    if (!e || !e.inflight) return { verdict: 'free', incumbentId: -1, edge: null };
+    if (!e || !e.inflight) return { verdict: 'free', incumbentId: -1, edge: null, simultaneous: false };
     const held = e.inflight;
     // An edge committed on an earlier tick is already in motion: it is not a
     // simultaneous claim and cannot be displaced.
     if (held.tStart !== tick) {
-      return { verdict: 'blocked', incumbentId: held.actorId, edge: held.edge };
+      return { verdict: 'blocked', incumbentId: held.actorId, edge: held.edge, simultaneous: false };
     }
     if (commitOffsetMs >= held.commitOffsetMs) {
-      return { verdict: 'blocked', incumbentId: held.actorId, edge: held.edge };
+      return { verdict: 'blocked', incumbentId: held.actorId, edge: held.edge, simultaneous: true };
     }
-    return { verdict: 'displace', incumbentId: held.actorId, edge: held.edge };
+    return { verdict: 'displace', incumbentId: held.actorId, edge: held.edge, simultaneous: true };
   }
 
   /** Clear the in-flight edge once it has resolved. */
@@ -590,7 +594,11 @@ export class EngagementSet {
       // I3 Free implies standing: a fighter in no engagement is in a standing
       // free node, down, or out — never a clinch or ground node.
       if (!this.byFighter.has(f.id)) {
-        const standing = positionNode(f.position).family === 'standingFree';
+        // Phase 9: `pos.ground_knockdown` is the trigger node of the fighter
+        // standing over a knocked-down opponent (`tech.knockdown_follow`
+        // leaves from it); he is on his feet and in no engagement.
+        const standing = positionNode(f.position).family === 'standingFree'
+          || f.position === 'pos.ground_knockdown';
         const excused = f.posture === 'down' || f.posture === 'out' || f.out;
         if (!standing && !excused) {
           push('I3', `free fighter ${f.id} is in ${f.position}`, [f.id]);

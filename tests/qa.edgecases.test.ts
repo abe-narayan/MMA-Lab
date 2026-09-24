@@ -191,12 +191,15 @@ describe('QA 1: 1vN, teams, ffa and crowd complete cleanly', () => {
   // bout with more than two fighters (src/sim/rules/referee.ts:726), so bind.ts
   // (~1580) re-marks the same loser out and re-emits `fighterOut` every tick,
   // and no later KO/TKO/count/stand-up is ever officiated.
-  it.fails('QA-1: a fighter is stopped at most once, and later stoppages still happen', () => {
+  it('QA-1: a fighter is stopped at most once, and later stoppages still happen', () => {
     let checked = false;
     for (let s = 0; s < 4 && !checked; s++) {
       const fs = [0, 1, 2, 3, 4, 5].map((i) => withId(RPA, `t${i}`));
-      const sim = createSim(config(`qa-multi-3v3-${s}`, fs, { mode: 'teams', teamOf: [0, 0, 0, 1, 1, 1] }), { maxTicks: 2500 });
-      sim.runToEnd(2500);
+      // Full length (Phase 9): after the calibration pass a 3v3 of regional
+      // pros rarely has two stoppages inside the first 2,500 ticks, so the
+      // cap is the full three rounds; the assertions are unchanged.
+      const sim = createSim(config(`qa-multi-3v3-${s}`, fs, { mode: 'teams', teamOf: [0, 0, 0, 1, 1, 1] }), { maxTicks: 10200 });
+      sim.runToEnd(10200);
       const outs = sim.events.filter((e) => e.kind === 'fighterOut');
       if (outs.length === 0) continue;
       checked = true;
@@ -213,7 +216,7 @@ describe('QA 1: 1vN, teams, ffa and crowd complete cleanly', () => {
   // QA-3 (major): an untimed crowd/street bout that reaches the cap is recorded
   // as "separated" (09 §3.1: an indecisive ending) but `decideIfUnfinished`
   // (src/sim/core/bind.ts ~1640) awards it to the side with more live fighters.
-  it.fails('QA-3: a crowd bout that ends "separated" has no winning side', () => {
+  it('QA-3: a crowd bout that ends "separated" has no winning side', () => {
     const fs = [withId(RPA, 'def'), withId(RPA, 'a1'), withId(RPA, 'a2')];
     const c = config('qa-crowd-sep', fs, { mode: 'crowd', teamOf: [0, 1, 1], settings: { maxSeconds: 30 } });
     const r = createSim(c).runToEnd();
@@ -224,7 +227,7 @@ describe('QA 1: 1vN, teams, ffa and crowd complete cleanly', () => {
   // QA-2 (major): `streetTick` (src/sim/rules/referee.ts:1557) is never called
   // and the street ruleset has no referee, so under `street` a knocked-out
   // fighter is never stopped: crowd bouts always run to the cap.
-  it.fails('QA-2: street / crowd bouts can end by incapacitation or flight', () => {
+  it('QA-2: street / crowd bouts can end by incapacitation or flight', () => {
     const methods: string[] = [];
     for (let s = 0; s < 4; s++) {
       const fs = [withId(arch('arch.champion_complete'), 'def'), withId(arch('arch.brand_new_brawler'), 'a1'), withId(arch('arch.brand_new_brawler'), 'a2')];
@@ -234,7 +237,17 @@ describe('QA 1: 1vN, teams, ffa and crowd complete cleanly', () => {
     expect(methods.some((m) => m === 'allOpponentsStopped' || m === 'escaped')).toBe(true);
   });
 
-  it.todo('QA-4: teams on the bell are judged on team scoring (09 §4.3), not headcount x1000 + sig strikes (bind.ts decideIfUnfinished)');
+  // QA-4 (fixed in Phase 9): teams on the bell are judged on 09 §4.3 team
+  // scoring (summed §06 effective-scoring counters per round), not
+  // "headcount x 1000 + sig strikes".
+  it('QA-4: teams on the bell are judged on team scoring (09 §4.3)', () => {
+    const fs = [0, 1, 2, 3].map((i) => withId(RPA, `q4${i}`));
+    const c = config('qa-4-bell', fs, { mode: 'teams', teamOf: [0, 0, 1, 1], settings: { rounds: 1, roundSeconds: 45 } });
+    const r = simulate(c).result;
+    if (r.method === 'timeLimit' || r.method === 'draw') {
+      expect(['team scoring', 'team scores level']).toContain(r.detail);
+    }
+  });
   it.todo('QA-9: a submission in a bout with >2 fighters marks the loser out instead of ending the whole bout (bind.ts resolveSubmissionContact finishBout)');
 });
 
@@ -385,15 +398,37 @@ describe('QA 5: rules edge cases', () => {
   // QA-5 (major): grappling rulesets map to the MMA striking family in
   // src/sim/ai/actions.ts:171-173, so the AI throws punches under IBJJF/ADCC/
   // judo; bind.ts (~967) records each as a `foul` and drops it.
-  it.fails('QA-5: nobody throws strikes under IBJJF rules', () => {
+  it('QA-5: nobody throws strikes under IBJJF rules', () => {
     const c = config('qa-ibjjf', [withId(arch('arch.bjj_guard_player'), 'a'), withId(arch('arch.thai_striker'), 'b')], { ruleset: 'grappling.ibjjf', arena: 'mat_ibjjf' });
     const sim = createSim(c, { maxTicks: 3000 });
     sim.runToEnd(3000);
     expect(sim.events.filter((e) => e.kind === 'foul').length).toBe(0);
   });
 
-  it.todo('QA-6: detected fouls are never passed to the referee (RefTickInput.fouls is never populated in bind.ts refereePhase), so warnings, point deductions and DQ are unreachable');
-  it.todo('QA-11: grappling.subonly ends a sub-less bout as method "timeLimit" with winner "draw" (should be a draw method / overtime)');
+  // QA-6 (fixed in Phase 9): detected fouls reach the referee's ladder.
+  it('QA-6: a foul in a boxing bout draws a warning or a deduction', () => {
+    let fouls = 0;
+    let sanctions = 0;
+    for (let s = 0; s < 8; s++) {
+      const fs = [withId(arch('arch.champion_complete'), 'a'), withId(arch('arch.brand_new_brawler'), 'b')];
+      const sim = createSim(config(`qa6-${s}`, fs, { ruleset: 'boxing.pro', arena: 'ring_20' }));
+      sim.runToEnd();
+      fouls += sim.events.filter((e) => e.kind === 'foul').length;
+      sanctions += sim.events.filter((e) => e.kind === 'refereeWarning' || e.kind === 'deduction').length;
+    }
+    expect(fouls).toBeGreaterThan(0);
+    expect(sanctions).toBeGreaterThan(0);
+  });
+  // QA-11 (fixed in Phase 9): a sub-only bout without a submission is a draw.
+  it('QA-11: grappling.subonly ends a sub-less bout as a draw, not "timeLimit"', () => {
+    const fs = [withId(RPA, 'a'), withId(RPA, 'b')];
+    const sim = createSim(config('qa-11', fs, { ruleset: 'grappling.subonly', arena: 'mat_ibjjf' }), { maxTicks: 300 });
+    const r = sim.runToEnd(300);
+    if (r.method !== 'submission') {
+      expect(r.method).toBe('draw');
+      expect(r.winner).toBe('draw');
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -447,14 +482,14 @@ describe('QA 6: fighter validation', () => {
 
   // QA-12 (minor): style.pacing outputMult / riskAppetite are only checked for
   // finiteness (src/app/store/validate.ts ~948), so 1e9 or -5 is accepted.
-  it.fails('QA-12: pacing multipliers are range-checked', () => {
+  it('QA-12: pacing multipliers are range-checked', () => {
     const f = withId(RPA, 'p');
     f.style.pacing = [{ round: 1, outputMult: -5, riskAppetite: 1e9 }];
     expect(validateFighter(f).ok).toBe(false);
   });
 
   // QA-13 (minor): body sizes the sim cannot mean (1 cm, 10 g) pass as warnings only.
-  it.fails('QA-13: a 1 cm, 10 g fighter is refused rather than warned about', () => {
+  it('QA-13: a 1 cm, 10 g fighter is refused rather than warned about', () => {
     const f = withId(RPA, 't');
     Object.assign(f.body, { heightM: 0.01, reachM: 0.01, legReachM: 0.01, massKg: 0.01 });
     delete f.body.weighInKg; delete f.body.fightNightKg; delete f.body.naturalWeightKg;

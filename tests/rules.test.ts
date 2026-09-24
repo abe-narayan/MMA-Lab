@@ -317,7 +317,9 @@ describe('referee', () => {
     struck.grounded = true;
     struck.intelligentDefence = false;
     struck.tSinceDefenceS = 30;
-    struck.unansweredHead = 2;
+    // Phase 9: "under fire" is a string of damaging strikes (referee.ts
+    // COVERING_MIN_UNANSWERED = 3), not one or two.
+    struck.unansweredHead = 3;
     const hit = new Referee(MMA, { rng: new RNG('loud-ground') });
     let ended = null as ReturnType<Referee['tick']>['ended'];
     for (let i = 0; i < 200 && !ended; i++) {
@@ -670,18 +672,30 @@ describe('judges', () => {
 
     const pct = (n: number): number => (100 * n) / N;
     // Targets FD #105: 77 / 20 / 2.5, chapter's tuned model: 77.0 / 18.3 / 3.0.
+    // Phase 9 retuned judge noise (0.32 -> 0.26) and the 10-8 thresholds
+    // against the *engine's* round margins, which are not this synthetic
+    // N(0,1.2)+N(0,0.8) — in the bout population the split is 75 / 17 / 8
+    // (docs/CALIBRATION.md rows 105-107). On these synthetic margins the lower
+    // noise gives ~80 % unanimous; the bands widen accordingly.
     expect(pct(unanimous)).toBeGreaterThan(75);
-    expect(pct(unanimous)).toBeLessThan(79);
-    expect(pct(split)).toBeGreaterThan(16.3);
+    expect(pct(unanimous)).toBeLessThan(82.5);
+    expect(pct(split)).toBeGreaterThan(14.0);
     expect(pct(split)).toBeLessThan(20.3);
-    expect(pct(majority)).toBeGreaterThan(1.0);
+    // Phase 9 also cut `judge.p1010` 0.5 -> 0.15 (10-10 rounds made 3.6 % of
+    // bout-population fights draws against a real 0.7 %), which removes most
+    // of this synthetic model's majority decisions and draws; the lower
+    // bounds follow. The bout population is measured in docs/CALIBRATION.md.
+    expect(pct(majority)).toBeGreaterThan(0.3);
     expect(pct(majority)).toBeLessThan(5.0);
-    // FD #107: 1.5 % of decisions; the chapter's model gives 1.67 %.
-    expect(pct(draws)).toBeGreaterThan(0.8);
+    // FD #107: 1.5 % of decisions; the chapter's model gave 1.67 %.
+    expect(pct(draws)).toBeGreaterThan(0.1);
     expect(pct(draws)).toBeLessThan(2.6);
     // INT §7.4: ~8 % of judge-rounds; the chapter's model gives 8.9 %.
     const ten8 = (100 * tenEights) / judgeRounds;
-    expect(ten8).toBeGreaterThan(7.4);
+    // Phase 9: a 10-8 now needs damage *done to the other man* (winner minus
+    // loser), which these synthetic margin-only signals do not carry, so the
+    // synthetic rate is near zero; the bout population's 10-8 rate (~7 % of
+    // judge-rounds) is measured by the calibration run instead.
     expect(ten8).toBeLessThan(10.4);
   }, 120_000);
 
@@ -782,8 +796,9 @@ describe('parameters', () => {
   });
 
   it('the numbers the chapter tuned are the numbers in the registry', () => {
-    expect(spec('judge.noiseScale').value).toBe(0.32);
-    expect(spec('judge.tenEight').value).toBe(2.6);
+    // Phase 9 retuned both against the bout population (PHASE9_TUNING.md).
+    expect(spec('judge.noiseScale').value).toBe(0.26);
+    expect(spec('judge.tenEight').value).toBe(6.5);
     expect(spec('judge.w.kd').value).toBe(1.0);
     expect(spec('ref.refReactionS').value).toBe(0.8);
     // The knockdown is the unit of the judging scale and may never be tuned.

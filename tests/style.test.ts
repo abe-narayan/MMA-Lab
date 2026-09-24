@@ -669,13 +669,16 @@ interface Usage {
   strikeHits: number;
   subStages: number;
   subHits: number;
+  /** Attempts started (stage 0, the attacker's own event). */
+  subStarts: number;
+  subStartHits: number;
 }
 
 const SPARRING_FOE = def(ARCH_REGIONAL_PRO_ALLROUNDER, (d) => { d.id = 'foe'; });
 
 function usage(self: FighterDefinition, watch: readonly string[], n: number, tag: string): Usage {
   const set = new Set(watch);
-  const out: Usage = { strikes: 0, strikeHits: 0, subStages: 0, subHits: 0 };
+  const out: Usage = { strikes: 0, strikeHits: 0, subStages: 0, subHits: 0, subStarts: 0, subStartHits: 0 };
   for (let i = 0; i < n; i++) {
     const run = simulate(fullConfig(boutSeed(tag, '1v1', i), [self, SPARRING_FOE]));
     for (const e of run.events) {
@@ -684,7 +687,11 @@ function usage(self: FighterDefinition, watch: readonly string[], n: number, tag
         out.strikes += 1;
         if (set.has((e as { detail: { technique: string } }).detail.technique)) out.strikeHits += 1;
       } else if (e.kind === 'submissionStage') {
-        const d = (e as { detail: { technique: string; stage: number } }).detail;
+        const d = (e as { detail: { technique: string; stage: number; defence?: string } }).detail;
+        if (d.stage === 0 && d.defence === undefined) {
+          out.subStarts += 1;
+          if (set.has(d.technique)) out.subStartHits += 1;
+        }
         if (d.stage < 1) continue;
         out.subStages += 1;
         if (set.has(d.technique)) out.subHits += 1;
@@ -728,7 +735,12 @@ describe("F-3: an authored preference raises its own technique's usage", () => {
   });
 
   it('a strangler attacks a larger share of strangles', () => {
-    const off = usage(CONTROL, STRANGLE_WATCH, 30, 'style.sub');
+    // Phase 9: measured on the attempts he *starts* (stage 0), over 60 bouts.
+    // The later-stage events follow the defender as much as the attacker
+    // (who escapes, who regresses), and since submissions finish at real
+    // rates they are few enough that the stage-1+ share sat at 59 % with or
+    // without the preference; the attack share rises 46 -> 54 %.
+    const off = usage(CONTROL, STRANGLE_WATCH, 60, 'style.sub');
     const on = usage(
       def(ARCH_REGIONAL_PRO_ALLROUNDER, (d) => {
         blank(d);
@@ -738,10 +750,10 @@ describe("F-3: an authored preference raises its own technique's usage", () => {
           { subId: 'sub.guillotine', weight: 2 },
         ];
       }),
-      STRANGLE_WATCH, 30, 'style.sub',
+      STRANGLE_WATCH, 60, 'style.sub',
     );
-    expect(off.subStages).toBeGreaterThan(100);
-    expect(on.subHits / on.subStages).toBeGreaterThan(off.subHits / off.subStages);
+    expect(off.subStarts).toBeGreaterThan(100);
+    expect(on.subStartHits / on.subStarts).toBeGreaterThan(off.subStartHits / off.subStarts);
   });
 
   it('two specialists in the same family diverge on their own submissions', () => {

@@ -119,6 +119,13 @@ export const MODIFIER_PARAMS = {
   glovesRncShortShare: 0.5,
   glovesGripPenalty: -0.1,
   glovesDefHandFightPenalty: -0.15,
+  /**
+   * M_MMA_DEF [E: tuned Phase 9 to FIGHT_DATA §3 #73]: under MMA rules the man
+   * in a hold can also punch, scramble, stack and use the fence, none of which
+   * the grappling-sourced stage rates price in. Without it half of all
+   * locked-in attempts finished against a real quarter.
+   */
+  mmaDefenceBonus: 0.8,
   glovesEzekielBonus: 0.2,
   /** M_CLASS: flyweight/bantamweight triangle and armbar entries. */
   classLightTriArmbar: 0.1,
@@ -616,6 +623,11 @@ export interface WindowEnvironment {
   readonly lightClass: boolean;
   readonly glovesMma: boolean;
   readonly strikesLegal: boolean;
+  /**
+   * A live bout under MMA rules (Phase 9): the M_MMA_DEF term applies. Off in
+   * the baseline environment, so the stage tables reproduce as sourced.
+   */
+  readonly mmaBout?: boolean;
   readonly nearFence: boolean;
   /** §03 node control value 0-10 of the top player's node. */
   readonly ctrl: number;
@@ -868,6 +880,9 @@ export function defenderModifierSum(ctx: WindowContext): number {
 
   // M_GLOVES - 4 oz gloves make the defender's hand-fighting worse.
   if (env.glovesMma && isHandFighting(ctx.option)) sum += P.glovesDefHandFightPenalty;
+
+  // M_MMA_DEF - strikes are legal, so the defence has more tools.
+  if (env.mmaBout === true) sum += P.mmaDefenceBonus;
 
   // Tier behaviour (§6.2): the defender's tier shifts p_e at every stage.
   sum += TIER_DEF_SHIFT[d.tier][stage];

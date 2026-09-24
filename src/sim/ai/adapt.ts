@@ -660,7 +660,9 @@ export function finisherWeights(
   oppDowned: boolean,
 ): Partial<Record<ActionFamily, number>> {
   const base: Partial<Record<ActionFamily, number>> = oppDowned
-    ? { groundStrike: GROUND_STRIKE_ON_DOWNED }
+    // Phase 9: following him down (`tech.knockdown_follow`, a 'ride') is how
+    // the ground strikes on a downed man start.
+    ? { groundStrike: GROUND_STRIKE_ON_DOWNED, ride: GROUND_STRIKE_ON_DOWNED }
     : {};
   if (profile === 'reckless') {
     return {

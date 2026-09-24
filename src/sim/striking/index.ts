@@ -19,7 +19,7 @@ export type {
   TechniqueFlag, Commitment, TechniqueSpec, GloveType, GloveModifiers, StrikingRulesetFlags,
 } from './catalogue';
 export {
-  TECHNIQUES, REFERENCE_MASS_KG, BAND_ORDER, GLOVE_MODIFIERS,
+  TECHNIQUES, GROUND_TECHNIQUES, REFERENCE_MASS_KG, BAND_ORDER, GLOVE_MODIFIERS,
   technique, hasTechnique, techniquesInBand, techniquesForTier, totalMs,
   isRotational, isKickFamily, skillGapK, isBoxingGlove, gloveLandLogit, techniqueLegal,
 } from './catalogue';

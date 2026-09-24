@@ -322,7 +322,7 @@ export function bestCounterFor(
 ): CounterSpec | null {
   const candidates = countersAgainst(spec, classes, tier)
     .filter((c) => c.defence === defenceId)
-    .sort((a, b) => (b.bonus - a.bonus) || a.id.localeCompare(b.id));
+    .sort((a, b) => (b.bonus - a.bonus) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return candidates[0] ?? null;
 }
 

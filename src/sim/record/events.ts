@@ -73,6 +73,8 @@ export interface StrikeEvent extends SimEventBase {
     unseen?: boolean;
     counter?: boolean;
     combinationIndex?: number;
+    /** A short clinch/ground strike: not significant (09 §4.1). */
+    short?: boolean;
   };
 }
 
@@ -87,6 +89,14 @@ export interface GrappleEvent extends SimEventBase {
     cage?: boolean;
     /** Referee-initiated stand-ups and breaks say why. */
     reason?: string;
+    /**
+     * The fighter in slot `a` (top / attacker / controlling) of `to` after the
+     * transition. Edges can hand slot `a` to either fighter (a sweep, a
+     * sprawl, a failed escape that leaves the top where he was), so the
+     * event's `actor` does not say who is on top. Absent on events that
+     * changed no engagement.
+     */
+    a?: number;
   };
 }
 

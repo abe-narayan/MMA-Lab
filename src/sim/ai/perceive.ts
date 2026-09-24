@@ -334,6 +334,14 @@ interface LedgerEntry {
 
 /** `ai.ledger.window`. */
 export const LEDGER_WINDOW_S = 30;
+/**
+ * The pace estimate's own window and its pseudo-observation seconds
+ * [E: Phase 9]. Short on purpose: a striker is braked within an exchange, the
+ * way a real one resets after two or three shots, rather than half a minute
+ * after the flurry started.
+ */
+export const PACE_WINDOW_S = 12;
+export const PACE_PRIOR_S = 8;
 
 /**
  * The 30 s sliding window the adjustment signals read. Kept as a flat ring of
@@ -477,6 +485,26 @@ export class ExchangeLedger {
   pacePerMin(): number {
     const span = Math.min(LEDGER_WINDOW_S, Math.max(1, this.nowS));
     return (this.countStrikes('attempt') * 60) / span;
+  }
+
+  /**
+   * Phase 9: the `c.pace` numerator. Strikes *thrown* per minute over the
+   * last `spanS` seconds of this round, shrunk toward `targetPerMin` by a
+   * `PACE_PRIOR_S`-second pseudo-observation, so the estimate starts every
+   * round at the plan's rate instead of at zero (the empty window used to
+   * leave the brake off for the first half-minute of every round, and the
+   * opening flurries ran at 20-25 strikes a minute).
+   */
+  paceEstimate(targetPerMin: number, spanS: number): number {
+    const span = Math.max(0, Math.min(PACE_WINDOW_S, spanS));
+    const since = this.nowS - span;
+    let n = 0;
+    for (const e of this.entries) {
+      if (e.kind !== 'attempt' || e.tS < since) continue;
+      if (e.family === null || !STRIKE_FAMILIES.has(e.family)) continue;
+      n++;
+    }
+    return (n * 60 + targetPerMin * PACE_PRIOR_S) / (span + PACE_PRIOR_S);
   }
 
   /** Strikes *landed* per minute: P-6 says pressure without landing wins nothing. */

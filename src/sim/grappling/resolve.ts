@@ -117,6 +117,11 @@ export interface GrappleWorld {
   sideMatch: 'same' | 'kenka' | 'cross' | 'none';
   /** Which finish attempt this is, for the open/cage attempt caps. */
   attemptIndex: number;
+  /**
+   * Phase 9: an extra named logit term the bout adds (the MMA takedown-chain
+   * calibration, `grap.tdChainLogit`). Absent in the unit-level resolvers.
+   */
+  extraLogit?: ModifierTerm;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +497,11 @@ export function edgeProbability(
     terms.push({ code: chain.label, logit: chain.logit });
   }
   if (chain.mult !== 1) multipliers.push({ code: chain.label, mult: chain.mult });
+
+  if (w.extraLogit && w.extraLogit.logit !== 0) {
+    sum += w.extraLogit.logit;
+    terms.push(w.extraLogit);
+  }
 
   let prob = sigmoid(sum);
 

@@ -539,7 +539,16 @@ export interface EdgeDestination {
   node: DestinationNode;
   /** Weights within one cell sum to 1 (§2.3 column header). */
   weight: number;
-  /** The "(def)" marker: the defender becomes slot `a` of the destination. */
+  /**
+   * The engagement's slots flip: whoever was in slot `b` takes slot `a` of the
+   * destination (`EngagementSet.transition`). For an edge whose actor is slot
+   * `a` this is exactly the §2.3 "(def)" marker. For an actor-`b` edge (sweeps,
+   * escapes) it means the *actor* ends up in slot `a` — a reversal — so a
+   * §2.3 "(bottom)" destination of an escape carries no swap. (Phase 9: three
+   * escape rows — underhook turn, north-south escape, kesa escape to turtle —
+   * had transcribed "(bottom)" as a swap and handed the escaping fighter the
+   * top of the turtle.)
+   */
   swap?: boolean;
   /** Chapter 04 entry instead of, or alongside, a node change. */
   submission?: SubmissionId;
@@ -2859,7 +2868,7 @@ const EDGES_I: readonly GrapplingEdge[] = [
   edge({
     id: 'tech.escape_side_underhook_turn', name: 'Underhook and turn from side', group: 'I', kind: 'escape', actor: 'b',
     from: ['pos.ground_side', 'pos.ground_side_kesa', 'pos.ground_north_south'],
-    to: [d('pos.ground_turtle', 0.50, true), d('pos.ground_half_dogfight', 0.30),
+    to: [d('pos.ground_turtle', 0.50), d('pos.ground_half_dogfight', 0.30),
       d('pos.ground_wall_walk', 0.20)],
     toOnFailure: [d('pos.ground_side', 0.65), d('pos.ground_back_seatbelt', 0.25),
       d('same', 0.10)],
@@ -2901,7 +2910,7 @@ const EDGES_I: readonly GrapplingEdge[] = [
   edge({
     id: 'tech.escape_north_south', name: 'Escape north-south', group: 'I', kind: 'escape', actor: 'b',
     from: ['pos.ground_north_south'],
-    to: [d('pos.ground_turtle', 0.50, true), d('pos.ground_half_flat', 0.25),
+    to: [d('pos.ground_turtle', 0.50), d('pos.ground_half_flat', 0.25),
       d('pos.ground_open_kneeling_top', 0.25)],
     toOnFailure: [d('pos.ground_north_south', 1)],
     requirements: 'hands on the hips, hip escape, roll to the knees',
@@ -2970,7 +2979,7 @@ const EDGES_I: readonly GrapplingEdge[] = [
     id: 'tech.escape_kesa', name: 'Escape kesa gatame', group: 'I', kind: 'escape', actor: 'b',
     from: ['pos.ground_side_kesa'],
     to: [d('pos.ground_half_flat', 0.50), d('pos.ground_side', 0.20, true),
-      d('pos.ground_turtle', 0.30, true)],
+      d('pos.ground_turtle', 0.30)],
     toOnFailure: [d('pos.ground_side_kesa', 0.7), d('pos.ground_mount_low', 0.3)],
     requirements: 'trap the near leg or frame under the jaw',
     durationMs: [3000, 8000], baseP: 0.25, kSkill: 2.0,

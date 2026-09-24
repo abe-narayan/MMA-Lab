@@ -15,7 +15,7 @@
  */
 import {
   POSITIONS, SIM_ENGINE_VERSION, TECHNIQUES, SUBMISSIONS, createSim, checkWorldInvariants,
-  computeStats, deriveRuntime, hashParams, resolveParams, resolveRuleset,
+  computeStats, deriveRuntime, hashParams, isSignificantStrike, isStatLanded, resolveParams, resolveRuleset,
   type BoutRun, type FighterDefinition, type SimConfig, type SimEvent,
 } from '../../src/sim';
 import type {
@@ -49,9 +49,9 @@ function targetBucket(region: string): TargetBucket | null {
   return null;
 }
 
-/** §4.1 significance, as `stats.ts` applies it. */
-function isSignificant(technique: string, phase: Phase): boolean {
-  return phase === 'distance' || !technique.startsWith('tech.jab');
+/** §4.1 significance: the sim's one shared definition (`isSignificantStrike`). */
+function isSignificant(technique: string, phase: Phase, short = false): boolean {
+  return isSignificantStrike(technique, phase, short);
 }
 
 /** Weapon class for rows 27–29: punch / kick / knee / elbow / other. */
@@ -180,6 +180,7 @@ export function summarizeRun(
   }
 
   const pairOf = new Map<number, PairState>();
+  const clearAfterTick: number[] = [];
   const clearPair = (id: number): void => {
     const p = pairOf.get(id);
     if (!p) return;
@@ -222,12 +223,14 @@ export function summarizeRun(
         break;
       case 'roundEnd':
         isLive = false;
+        // The engine separates every pair for the break.
+        pairOf.clear();
         break;
       case 'strike': {
         const d = e.detail;
         const pair = pairOf.get(e.actor);
         const ph = phaseOfNode(pair ? pair.node : null);
-        const landed = d.result === 'landed';
+        const landed = isStatLanded(d.result);
         lastStrikeTick = e.tick;
         if (e.actor >= 0 && e.actor < n) lastContactTick[e.actor] = e.tick;
         if (e.target >= 0 && e.target < n) lastContactTick[e.target] = e.tick;
@@ -238,7 +241,7 @@ export function summarizeRun(
           hd[e.actor][1]++;
           if (landed) hd[e.actor][0]++;
         }
-        if (!isSignificant(d.technique, ph)) break;
+        if (!isSignificant(d.technique, ph, d.short === true)) break;
         const bucket = targetBucket(d.target);
         if (!bucket) break;
         const k = (PHASES.indexOf(ph) * 3 + TARGETS.indexOf(bucket)) * 2;
@@ -259,34 +262,37 @@ export function summarizeRun(
           e.round, round1((e.tick - roundStartTick) * dt), e.actor, e.target,
           String(d.cause ?? ''), String(d.kind ?? ''),
         ]);
-        clearPair(e.target);
+        // As in stats.ts: the causing strike is logged after its knockdown on
+        // the same tick; clear the pair once the tick is done.
+        clearAfterTick.push(e.target);
         break;
       }
-      case 'takedown': {
-        const d = e.detail;
-        const edge = d.edge ?? '';
-        const toClinch = d.to !== undefined && phaseOfNode(d.to) === 'clinch';
-        if (e.actor >= 0 && e.actor < n && (edge.includes('clinch_entry') || toClinch)) cle[e.actor]++;
-        if (d.result === 'success' && edge.includes('slam')) slam++;
-        if (d.result === 'success' && d.to) setPair(e.actor, e.target, d.to, e.actor);
-        break;
-      }
+      case 'takedown':
       case 'clinch':
       case 'engagementJoin':
       case 'positionChange':
       case 'scramble':
-      case 'reversal': {
-        const d = e.detail;
-        if (d.result === 'success' && (d.edge ?? '').includes('slam')) slam++;
-        if (d.to) setPair(e.actor, e.target, d.to, e.actor);
-        break;
-      }
+      case 'reversal':
       case 'standUp':
       case 'clinchBreak':
-      case 'disengage':
-        clearPair(e.actor);
-        clearPair(e.target);
+      case 'disengage': {
+        const d = e.detail;
+        if (d.reason === 'contested') break;
+        const edge = d.edge ?? '';
+        const toClinch = d.to !== undefined && phaseOfNode(d.to) === 'clinch';
+        if (e.kind === 'takedown' && e.actor >= 0 && e.actor < n && (edge.includes('clinch_entry') || toClinch)) cle[e.actor]++;
+        if (e.kind !== 'engagementJoin' && d.result === 'success' && edge.includes('slam')) slam++;
+        // Slot `a` of the destination (who is on top) is `detail.a`; the
+        // event's actor is only the fighter who attempted the edge.
+        const slotA = d.a ?? e.actor;
+        const other = slotA === e.actor ? e.target : e.actor;
+        if (d.to) setPair(slotA, other, d.to, e.actor);
+        else if (d.result === 'success' && (e.kind === 'standUp' || e.kind === 'clinchBreak' || e.kind === 'disengage')) {
+          clearPair(e.actor);
+          clearPair(e.target);
+        }
         break;
+      }
       case 'submissionFinish': {
         const pair = pairOf.get(e.actor);
         fin = {
@@ -317,7 +323,11 @@ export function summarizeRun(
   for (const e of byTick.get(0) ?? []) apply(e);
   for (let tick = 1; tick <= lastTick; tick++) {
     const here = byTick.get(tick);
-    if (here) for (const e of here) apply(e);
+    if (here) {
+      for (const e of here) apply(e);
+      for (const id of clearAfterTick) clearPair(id);
+      clearAfterTick.length = 0;
+    }
     if (!isLive) continue;
     ensureRound(round);
     live[round - 1] += dt;

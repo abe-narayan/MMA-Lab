@@ -116,6 +116,8 @@ export interface AlphaContext {
   headStructural: number;
   /** `state.neck_cranked` raises kBrace for the rest of the bout (§2.3.8). */
   neckCranked: boolean;
+  /** The struck fighter's body mass, kg (head-neck inertia, Phase 9). */
+  targetMassKg?: number;
 }
 
 export interface AlphaBreakdown {
@@ -164,6 +166,15 @@ export function alphaEquivalent(
     t.n('dmg.head.kPriorCap'),
   );
   const kGround = imp.targetState.grounded ? t.n('ko.kGround') : 1;
+  // Phase 9: the head and neck that have to be accelerated grow with the
+  // fighter. Delivered force scales with the puncher's mass (02 massMult,
+  // m^0.5), so without this a heavyweight's head took the same angular
+  // acceleration per newton as a flyweight's and knockdowns per landed head
+  // strike ran ten times higher at HW than at FLW — the data are flat across
+  // the men's classes (FIGHT_DATA §3 #37: FLW 0.87, HW 0.92 per 100). The
+  // weight-class gradient stays where §2.4.2 puts it, in severity (kKO).
+  const kInertia = ctx.targetMassKg === undefined ? 1
+    : Math.pow(Math.max(30, ctx.targetMassKg) / t.n('dmg.massRef'), -t.n('ko.targetMassExp'));
 
   if (imp.rotProxy !== undefined) {
     // 02 may one day compute head kinematics explicitly; when it does, its
@@ -174,7 +185,7 @@ export function alphaEquivalent(
   const alphaEq = t.n('ko.alphaRef')
     * (front.fDel / t.n('ko.forceRef'))
     * kWeapon * kLever * kGlove * kUnseen * kBrace * kRelaxed * kClosing
-    * kFatigue * kPrior * kGround * t.n('ko.alphaCal');
+    * kFatigue * kPrior * kGround * kInertia * t.n('ko.alphaCal');
   return { alphaEq, kWeapon, kLever, kPrior };
 }
 

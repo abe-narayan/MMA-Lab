@@ -24,7 +24,7 @@ export { loadReplay, verifyReplay } from './record/replay';
 export type { LoadedReplay, VerifyResult, VerifyReason } from './record/replay';
 
 // ---- records ---------------------------------------------------------------
-export { computeStats, TD_HOLD_SECONDS, SUB_REGRIP_SECONDS } from './record/stats';
+export { computeStats, isSignificantStrike, isStatLanded, TD_HOLD_SECONDS, SUB_REGRIP_SECONDS } from './record/stats';
 export type {
   BoutStats, RoundStats, FighterRoundStats, FighterStatBlock, LandedAttempted, StrikePosition,
 } from './record/stats';

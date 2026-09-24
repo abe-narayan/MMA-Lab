@@ -28,18 +28,21 @@ import type { LoopModules } from './loop';
 import type { ContactKind, ScheduledContact } from './scheduler';
 import type { PositionId, SubmissionId, TechniqueId } from './ids';
 import { refereeRuntime, judgeRuntime, matchClock } from './build';
+import { clampToArena } from '../rules/arenas/types';
 
 import {
   BAND_ORDER, DRAWS_PER_STRIKE, arrivalLogit, bandFor, bandReachable, baseDefenceSuccess, defence, guard,
   guardLogit, hasDefence, hasTechnique, passiveBlockP, reachProfile, resolveStrike, skillGapK,
-  strikeClasses, technique, TECHNIQUES, totalMs as techniqueTotalMs,
+  strikeClasses, technique, TECHNIQUES, GROUND_TECHNIQUES, totalMs as techniqueTotalMs,
   type ForceContext, type GuardId, type GuardSpec, type ImpactPosture, type RangeBand,
   type ResolvedDefence,
   type CommitMode, type StrikeResolveInput, type TargetRegion, type TechniqueSpec,
 } from '../striking';
 import {
-  GRAPPLE_EDGE_DRAWS, hasGrapplingEdge, grapplingEdge, isGroundedNode, kindForNode,
-  positionNode, resolveEdge, roleFor,
+  GRAPPLE_EDGE_DRAWS, hasGrapplingEdge, grapplingEdge, isGroundedNode, isReversal,
+  isMatNode, isTakedownAttempt, isTakedownLanding, kindForNode, nodeAllowsSubmission, positionNode, hasPositionNode,
+  gnpProfile,
+  resolveEdge, roleFor,
   type EdgeOutcome, type GrappleActor, type GrappleWorld, type GrapplingEdge, type Kuzushi,
 } from '../grappling';
 import {
@@ -50,10 +53,12 @@ import {
   S, type RefObservables as DamageObservables, type TechClass,
 } from '../damage';
 import {
+  decideSubOnly, effectiveScore, mmaWeights, streetTick, type FoulId, type FoulOccurrence,
   emptyLedger, isGrounded, isLegal, scoreRound, decide, STANDING_CONTACT,
   type RefEngagementInput, type RefFighterInput, type RoundLedger,
 } from '../rules';
 import type { DamageEvent, GrappleEvent, SimEvent, StrikeEvent } from '../record/events';
+import { isSignificantStrike, isStatLanded } from '../record/stats';
 
 // ---------------------------------------------------------------------------
 // Payloads the scheduler carries between P3 and P4
@@ -66,7 +71,24 @@ interface StrikePayload {
   posture: ImpactPosture;
   /** Node the attacker was in at commit; P4 re-checks it (09 §2.3 rule 3). */
   node: PositionId | null;
+  /** A short clinch/ground strike (non-significant, 09 §4.1). */
+  short?: boolean;
 }
+
+/**
+ * The short strike [E: Phase 9]: an arm-only punch or a knee to the thigh in
+ * the clinch, a short punch on the ground. UFCStats' non-significant strikes
+ * land at about 83 % (FIGHT_DATA §3 #5-#7: total 5.4 landed / 10.2 thrown vs
+ * significant 3.9 / 8.4 a minute) and carry little force.
+ */
+export const SHORT_STRIKE_MODEL = Object.freeze({
+  /** Logit added to arrival: nobody slips a short punch from inside a tie. */
+  arrivalLogit: 1.4,
+  /** Delivered force multiplier (passed as 02's `rangeFitMult`). */
+  forceMult: 0.30,
+  /** Startup / active / recovery multiplier. */
+  timeMult: 0.70,
+});
 
 interface GrapplePayload {
   kind: 'grapple';
@@ -88,6 +110,14 @@ type Payload = StrikePayload | GrapplePayload | SubmissionPayload;
 // ---------------------------------------------------------------------------
 // Small shared helpers
 // ---------------------------------------------------------------------------
+
+const GRAPPLE_EVENT_KINDS: ReadonlySet<string> = new Set([
+  'takedown', 'clinch', 'clinchBreak', 'positionChange', 'scramble', 'reversal',
+  'standUp', 'engagementJoin', 'disengage',
+]);
+function isGrappleEventKind(kind: string): boolean {
+  return GRAPPLE_EVENT_KINDS.has(kind);
+}
 
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
 
@@ -117,11 +147,124 @@ export function postureOf(w: World, f: FighterWorldState): ImpactPosture {
 function freeNodeFor(w: World, f: FighterWorldState): PositionId {
   const opp = w.nearestOpponent(f);
   const d = opp ? w.distance(f, opp) : 3;
-  const near = w.params.get('core.engagedMaxDistanceM');
-  if (d < 0.7 + near) return 'pos.standing_close';
-  if (d < 2.0) return 'pos.standing_mid';
+  // Phase 9: a knocked-down opponent within a step or two is the §03
+  // `pos.ground_knockdown` trigger node, the only node `tech.knockdown_follow`
+  // leaves from. Nothing ever put a fighter there, so the follow-up edge was
+  // unreachable and a knockdown could only be followed by standing punches at
+  // a man on the floor — 19 of 20 flash knockdowns went unpunished.
+  if (opp && opp.posture === 'down' && !w.engagements.of(opp.id)
+    && w.ruleset.ground.strikesAllowed && d <= KNOCKDOWN_FOLLOW_RANGE_M) {
+    return 'pos.ground_knockdown';
+  }
+  // Phase 9: the same band ladder the AI enumerates from (07 `standingNodeFor`,
+  // 02 §2.1.1 bands on the fighter's own reach). The fixed 1.3 / 2.0 m cut-offs
+  // this used disagreed with it across most of the mid band, and
+  // `commitGrapple` silently drops an edge whose `from` does not list the
+  // fighter's current node — so shots the AI chose at mid range vanished.
+  const band = bandFor(d, reachProfile(f.runtime.effectiveReachM, f.runtime.effectiveKickReachM));
+  if (band === 'clinch' || band === 'close') return 'pos.standing_close';
+  if (band === 'mid') return 'pos.standing_mid';
   return 'pos.standing_long';
 }
+
+/**
+ * 05 §2.5.1 action class for a grappling edge [E: Phase 9]. Every edge used to
+ * be charged as a takedown attempt (10 PCr, 0.8 mmol/L) — a pummel, a grip
+ * exchange, a posture-up, a hip escape — so a minute of grappling cost more
+ * than a round of striking and fighters were at fatigue 0.7-0.8 by round 2
+ * (FIGHT_DATA #128: real output falls only ~8 % from R1 to R3). A shot, a
+ * throw or the finish of one is still a takedown attempt; the rest pay the
+ * §2.5.1 class that describes them.
+ */
+export function edgeEnergy(edge: GrapplingEdge, from: PositionId): { cls: TechClass; scale: number } {
+  if (isTakedownAttempt(edge.id, from) || edge.kind === 'capture' || edge.kind === 'throw'
+    || edge.kind === 'counter' || edge.kind === 'finish' || edge.kind === 'chain') {
+    return { cls: 'takedownAttempt', scale: 1 };
+  }
+  switch (edge.kind) {
+    case 'setup': return { cls: 'feint', scale: 1 };
+    case 'defence': return { cls: 'sprawl', scale: 1 };
+    case 'getup': return { cls: 'wallWalk', scale: 1 };
+    case 'gnp': return { cls: 'groundTopPassAttempt', scale: 0.25 };
+    case 'pass': case 'advance': case 'sweep': case 'escape': case 'scramble':
+      return { cls: 'groundTopPassAttempt', scale: 1 };
+    case 'subEntry': return { cls: 'submissionSqueeze', scale: 0.3 };
+    default: return { cls: 'groundTopPassAttempt', scale: 0.75 };
+  }
+}
+
+/** Unseen-strike share by exposure [E: tuned Phase 9] — see `unseenByUnfamiliarity`. */
+export const UNFAMILIAR = Object.freeze({ p0: 0.45, floor: 0.06, tau: 35, tierSlope: 0.50 });
+
+/**
+ * Defence-success multiplier by striking posture [E: tuned Phase 9 to
+ * FIGHT_DATA §3 #16/#18/#19]: the stand-up block and parry rates do not carry
+ * to a tie-up or a pin — a man tied up or flat on his back cannot shell up
+ * behind a guard the way he can at distance. With the arrival term alone,
+ * clinch and ground accuracy sat at ~60 % (target 72 %); the losses were
+ * blocks, which arrival does not touch.
+ */
+export const POSITIONAL_DEFENCE = Object.freeze({ clinch: 0.5, groundTop: 0.7 });
+
+function positionalDefenceMult(posture: ImpactPosture): number {
+  if (posture === 'clinch' || posture === 'wallPinned') return POSITIONAL_DEFENCE.clinch;
+  if (posture === 'groundTop') return POSITIONAL_DEFENCE.groundTop;
+  return 1;
+}
+
+function scaledDefence(d: ResolvedDefence | null, mult: number): ResolvedDefence | null {
+  return d === null || mult === 1 ? d : { ...d, successP: d.successP * mult };
+}
+
+/** Arrival logit by striking posture [E: tuned Phase 9] — see `positionalArrivalLogit`. */
+export const POSITIONAL_ARRIVAL = Object.freeze({ clinch: 1.6, groundTop: 1.6, groundBottom: 0.3 });
+
+/**
+ * Arrival logit by target region [E: tuned Phase 9 to FIGHT_DATA §3 #15/#17]:
+ * a body or leg strike lands far more often than a head strike (sig
+ * accuracy head 38 %, body 70 %, legs 81 %) — the head is the target a
+ * fighter's whole defence is built around, and the legs and body are big,
+ * slow targets he mostly accepts being hit on. The §02 per-technique rows
+ * carry part of this; in the bout the difference was a third of the real one.
+ */
+export const TARGET_ARRIVAL: Readonly<Partial<Record<TargetRegion, number>>> = Object.freeze({
+  head: -0.7, body: 2.2, leadLeg: 0.7, rearLeg: 0.7,
+});
+
+/**
+ * Phase 9: the shooter's side of a takedown chain — the attempt itself (from
+ * the feet or the clinch) and the finish / chain / cage edges he runs from
+ * inside a shot (`attack` family, slot `a`). `grap.tdChainLogit` applies here.
+ */
+function tdChainEdge(edge: GrapplingEdge, from: PositionId, slot: 'a' | 'b' | null): boolean {
+  if (isTakedownAttempt(edge.id, from)) return true;
+  if (slot === 'b' || !hasPositionNode(from) || positionNode(from).family !== 'attack') return false;
+  return edge.actor !== 'b' && (edge.kind === 'finish' || edge.kind === 'chain' || edge.kind === 'cage')
+    && edge.to.some((d) => d.node !== 'same' && isMatNode(d.node));
+}
+
+/**
+ * Phase 9: the bottom man's way back to his feet — an edge he starts from
+ * underneath on the mat that ends standing or in the clinch. `grap.getUpLogit`
+ * applies here.
+ */
+function getUpEdge(edge: GrapplingEdge, from: PositionId, slot: 'a' | 'b' | null): boolean {
+  if (slot !== 'b' || edge.actor !== 'b' || !isMatNode(from)) return false;
+  return edge.to.some((d) => d.node !== 'same' && hasPositionNode(d.node)
+    && (positionNode(d.node).family === 'standingFree' || positionNode(d.node).family === 'clinch'));
+}
+
+/** How close a fighter must be to a downed opponent to follow him down [E: Phase 9]. */
+export const KNOCKDOWN_FOLLOW_RANGE_M = 2.4;
+
+/** 03 §5.1 damage fraction for a top node with no GnP row [E]. */
+export const GNP_DEFAULT_DMG = 0.6;
+
+/** Node families whose bottom slot defends by being there (guards, turtle). */
+const GUARD_DEFENCE_FAMILIES: ReadonlySet<string> = new Set(['closedGuard', 'openGuard']);
+
+/** Above this fatigue index a guard player stops counting as defending [E]. */
+export const GUARD_DEFENCE_MAX_FATIGUE = 0.8;
 
 /** 05 §2.5.1 action class for a standing technique. */
 export function techClassFor(spec: TechniqueSpec, posture: ImpactPosture): TechClass {
@@ -136,10 +279,10 @@ export function techClassFor(spec: TechniqueSpec, posture: ImpactPosture): TechC
  * 09 §4.1: every strike landed at distance is significant; in clinch and on the
  * ground only power strikes are (non-jab punches, kicks, knees, elbows).
  */
-export function isSignificant(spec: TechniqueSpec, posture: ImpactPosture): boolean {
-  if (posture === 'distance') return true;
-  if (spec.weapon !== 'fist' && spec.weapon !== 'backfist' && spec.weapon !== 'hammerfist') return true;
-  return !spec.id.startsWith('tech.jab');
+export function isSignificant(spec: TechniqueSpec, posture: ImpactPosture, short = false): boolean {
+  const position = posture === 'distance' ? 'distance'
+    : posture === 'clinch' || posture === 'wallPinned' ? 'clinch' : 'ground';
+  return isSignificantStrike(spec.id, position, short);
 }
 
 /** 06's weapon vocabulary from 02's. */
@@ -388,7 +531,7 @@ function commitModeOf(
   return 'planted';
 }
 
-const TECHNIQUE_BY_ID = new Map<string, TechniqueSpec>(TECHNIQUES.map((t) => [t.id, t]));
+const TECHNIQUE_BY_ID = new Map<string, TechniqueSpec>([...TECHNIQUES, ...GROUND_TECHNIQUES].map((t) => [t.id, t]));
 
 export function createModules(world: World, opts: BindOptions = {}): BoundModules {
   const policy = opts.policy ?? new MmaPolicy();
@@ -434,8 +577,35 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
   // P2 — upkeep
   // =========================================================================
 
+  /**
+   * Phase 9 (I2/I3/I5): take a fighter out of his engagement and bring his
+   * former partner's reported node, posture and hold into line on the same
+   * tick. Leaving the partner to his next upkeep left one to two ticks in
+   * which he reported a clinch or ground node while free, or held a
+   * submission on nobody.
+   */
+  function leaveAndSync(w: World, f: FighterWorldState): void {
+    const partner = w.engagements.partnerOf(f.id);
+    w.engagements.leave(f.id, w.tick);
+    if (partner !== null && partner !== f.id) {
+      const pf = w.fighters[partner];
+      if (pf && !pf.out) syncEngagement(w, pf);
+    }
+  }
+
   function syncEngagement(w: World, f: FighterWorldState): void {
     const e = w.engagements.of(f.id);
+    // I5: a submission lives in the position it was offered from. When the
+    // engagement dissolves or moves to a node that does not offer it to this
+    // fighter's slot, the hold is gone. (Phase 9: `f.sub` used to outlive the
+    // position, so a fighter could "hold" a choke from the feet or from the
+    // bottom of a position that never offered it — invariant I5.)
+    if (f.sub.technique !== null) {
+      const slot = e ? w.engagements.slotOf(f.id) : null;
+      if (!e || slot === null || e.b < 0 || !nodeAllowsSubmission(e.node, slot, f.sub.technique)) {
+        f.sub = { technique: null, stage: 0, progress: 0, lockedAtMs: null };
+      }
+    }
     if (!e) {
       f.partnerId = null;
       if (f.posture !== 'down' && f.posture !== 'out') {
@@ -502,7 +672,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         f.downTicks = Math.max(f.downTicks, 10);
         f.knockdowns++;
         w.scheduler.queue.cancelFor(f.id, 'knockdown');
-        w.engagements.leave(f.id, w.tick);
+        leaveAndSync(w, f);
       }
     }
   }
@@ -530,7 +700,32 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     f.damage.spendSustained(sustainedClassFor(w, f, posture), dtS);
 
     const obs = refereeRuntime(w).obs;
-    const grounded = f.posture === 'down' || isGroundedNode(f.position);
+    // Phase 9: "grounded" for 06's stoppage tests is the fighter who is down
+    // or underneath — the top of a mount is on the mat too, and was being
+    // treated as a grounded fighter who could be stopped for "covering".
+    const engagedRole = w.engagements.of(f.id) ? w.engagements.roleOf(f.id) : 'none';
+    const grounded = f.posture === 'down'
+      || (isGroundedNode(f.position) && engagedRole !== 'top' && engagedRole !== 'attacker');
+    // A bottom fighter working an escape, a sweep or a get-up is defending
+    // intelligently for as long as the attempt is in motion (06 §2.3.3: "not
+    // improving position" is the test), not only on the tick he started it.
+    if (grounded && f.action !== null && hasGrapplingEdge(f.action)
+      && w.nowMs < f.actionCommitMs + f.actionTotalMs) {
+      f.damage.noteAnswer();
+    }
+    // A fighter playing full guard (closed or open) who is not hurt and not
+    // spent is defending the whole time — legs between him and the puncher,
+    // tying up, controlling posture — whether or not he attempts a sweep this
+    // second (06 §2.3.3: the test is "not intelligently defending"). In half
+    // guard, the turtle, under mount or side control, with his back taken or
+    // in a crucifix — the ground-and-pound stoppage positions — he has to *do*
+    // something (an escape in motion, a strike back) to count. [E: Phase 9]
+    if (grounded && engagedRole === 'bottom' && f.posture !== 'down' && hasPositionNode(f.position)
+      && GUARD_DEFENCE_FAMILIES.has(positionNode(f.position).family)
+      && !f.damage.has(S.rocked) && !f.damage.has(S.knockdownHurt)
+      && f.energy.f < GUARD_DEFENCE_MAX_FATIGUE) {
+      f.damage.noteAnswer();
+    }
     const events = f.damage.upkeep(ms, {
       tick: w.tick,
       round: w.round,
@@ -603,6 +798,10 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
 
   function canAct(w: World, f: FighterWorldState): boolean {
     if (f.out) return false;
+    // Phase 9: time is out while the referee counts, the doctor looks at a
+    // cut or a foul is being dealt with. Fighters used to keep fighting
+    // through every pause.
+    if (refereeRuntime(w).ref.isPaused) return false;
     if (f.posture === 'down' || f.posture === 'out') return false;
     if (f.downTicks > 0) return false;
     if (!f.damage.conscious) return false;
@@ -614,9 +813,13 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     if (w.scheduler.queue.pendingFor(f.id) !== null) return false;
     // 04: a fighter held at `secure` or deeper cannot choose a new action; the
     // submission battle is resolved by its own windows.
+    // The attacker holding such a submission *can* act, but only to work it:
+    // `commitDecision` turns whatever he chose into the next window of the
+    // same submission. (Phase 9: returning false here froze the attacker too,
+    // so no window after `secure` was ever scheduled — every submission stalled
+    // at stage 2 and the sim produced no submission finishes at all.)
     const partner = f.partnerId === null ? null : w.fighters[f.partnerId];
     if (partner && partner.sub.technique !== null && partner.sub.stage >= 2) return false;
-    if (f.sub.technique !== null && f.sub.stage >= 2) return false;
     return true;
   }
 
@@ -668,12 +871,23 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     } else if (d.moveX !== 0 || d.moveZ !== 0) {
       f.facing = Math.atan2(d.moveX, d.moveZ);
     }
-    if (d.kind === 'wait' || d.kind === 'move' || d.kind === 'defend' || d.what === null) {
+    const holdingSub = f.sub.technique !== null && f.sub.stage >= 2 && f.partnerId !== null;
+    if (!holdingSub && (d.kind === 'wait' || d.kind === 'move' || d.kind === 'defend' || d.what === null)) {
       f.action = null;
       f.actionResult = 'none';
       return;
     }
     if (!target) return;
+
+    // 04: a submission at `secure` or deeper is resolved window by window
+    // until it ends; the attacker's only choice is to keep working it.
+    if (f.sub.technique !== null && f.sub.stage >= 2) {
+      const partner = f.partnerId === null ? null : w.fighters[f.partnerId];
+      if (partner && !partner.out) {
+        commitSubmission(w, f, partner, { ...d, kind: 'submission', what: f.sub.technique }, jitter);
+        return;
+      }
+    }
 
     if (d.kind === 'strike') commitStrike(w, f, target, d, jitter);
     else if (d.kind === 'grapple') commitGrapple(w, f, target, d, jitter);
@@ -710,10 +924,12 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const mult = spec.weapon === 'fist' || spec.weapon === 'backfist' || spec.weapon === 'hammerfist'
       ? f.runtime.execTimeMultPunch
       : f.runtime.execTimeMultKick;
-    const contactMs = Math.max(1, Math.round(spec.contactMs * mult));
-    const total = Math.max(contactMs, Math.round(techniqueTotalMs(spec) * mult));
+    const short = (d.payload as { short?: boolean } | undefined)?.short === true && posture !== 'distance';
+    const tMult = short ? SHORT_STRIKE_MODEL.timeMult : 1;
+    const contactMs = Math.max(1, Math.round(spec.contactMs * mult * tMult));
+    const total = Math.max(contactMs, Math.round(techniqueTotalMs(spec) * mult * tMult));
 
-    f.damage.spendAction(techClassFor(spec, posture), { skill: f.runtime.strikingMean });
+    f.damage.spendAction(short ? 'lightStrike' : techClassFor(spec, posture), { skill: f.runtime.strikingMean });
     // 05 §2.7: a strike thrown back is an "answer". Without this the referee
     // never sees intelligent defence and stops every fight for repetitive
     // strikes.
@@ -722,11 +938,11 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const region: TargetRegion = (d.payload as { region?: TargetRegion } | undefined)?.region
       ?? spec.targets[0];
     f.totalAttempted++;
-    if (isSignificant(spec, posture)) f.sigAttempted++;
+    if (isSignificant(spec, posture, short)) f.sigAttempted++;
 
     const contact = schedule(w, f, target, 'strike', id, contactMs, total, {
-      kind: 'strike', technique: id, region, posture, node: f.position,
-    }, jitter, Math.round(spec.startupMs * mult), Math.round(spec.activeMs * mult));
+      kind: 'strike', technique: id, region, posture, node: f.position, ...(short ? { short: true } : {}),
+    }, jitter, Math.round(spec.startupMs * mult * tMult), Math.round(spec.activeMs * mult * tMult));
     // I-2/I-3: the shot that follows a strike is the one that works.
     openSetupWindow(w, f, contact.commitMs + contactMs);
   }
@@ -741,11 +957,13 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     w: World, loser: FighterWorldState, winner: FighterWorldState | undefined,
     edge: GrapplingEdge,
   ): void {
-    loser.damage.spendAction('takedownAttempt');
+    const cost = edgeEnergy(edge, loser.position);
+    loser.damage.spendAction(cost.cls, { scale: cost.scale });
+    const kind = edgeEventKind(edge) === 'reversal' ? 'positionChange' : edgeEventKind(edge);
     emit(w, {
-      ...base(w, edgeEventKind(edge), loser.id, winner?.id ?? -1,
+      ...base(w, kind, loser.id, winner?.id ?? -1,
         `${loser.runtime.def.short} is beaten to the ${edge.name}`),
-      kind: edgeEventKind(edge),
+      kind,
       detail: { edge: edge.id, from: loser.position, result: 'stuffed', reason: 'contested' },
     } as GrappleEvent);
   }
@@ -774,7 +992,16 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       // therefore the only one who can ever be displaced — a ~3 pp win-rate
       // edge to the higher id in a mirror match.
       if (contest.verdict === 'blocked') {
-        if (contest.edge !== null) beatenToIt(w, f, w.fighters[contest.incumbentId], edge);
+        // Only a *simultaneous* claim is a race someone lost. An edge the
+        // opponent committed on an earlier tick is already in motion: this
+        // fighter never got his own attempt started, so nothing is charged
+        // and nothing goes on the books. (Phase 9: charging it re-billed the
+        // blocked fighter a takedown attempt's energy and a stuffed event on
+        // every tick of the opponent's 2-8 s edge — ~300 phantom attempts a
+        // bout, a large hidden fatigue drain on whoever was on top.)
+        if (contest.edge !== null && contest.simultaneous) {
+          beatenToIt(w, f, w.fighters[contest.incumbentId], edge);
+        }
         return;
       }
       if (contest.verdict === 'displace' && contest.edge !== null) {
@@ -793,7 +1020,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const dur = Math.round((edge.durationMs[0] + edge.durationMs[1]) / 2);
     const stage: 'single' | 'capture' = typeof edge.baseP === 'number' ? 'single' : 'capture';
 
-    f.damage.spendAction('takedownAttempt');
+    const cost = edgeEnergy(edge, f.position);
+    f.damage.spendAction(cost.cls, { scale: cost.scale });
     f.damage.noteAnswer();
     if (edge.kind === 'entry' || edge.kind === 'capture' || edge.kind === 'throw') {
       f.takedownsAttempted++;
@@ -876,6 +1104,90 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     return r;
   }
 
+  /**
+   * 03 §5.1 "dmg": a strike from the top of a ground position carries this
+   * fraction of the same fighter's standing power (no legs under it, a
+   * shortened arc — 0.8 from high mount, 0.5 from the back, 0.3 against a
+   * knee shield). The table was data only; ground strikes landed at full
+   * standing force (Phase 9). The bottom strikes carry their scale in the
+   * technique row already.
+   */
+  function gnpDamageMult(posture: ImpactPosture, node: PositionId, spec: TechniqueSpec): number {
+    if (posture !== 'groundTop') return 1;
+    const prof = gnpProfile(node);
+    const key = spec.weapon === 'elbow' || spec.weapon === 'elbow_point' ? 'elbow'
+      : spec.weapon === 'knee' ? 'knee' : spec.weapon === 'hammerfist' ? 'hammerfist' : 'fist';
+    return prof?.dmg[key] ?? GNP_DEFAULT_DMG;
+  }
+
+  /**
+   * Phase 9 [E: tuned to FIGHT_DATA §3 #16-#19]: at grappling range the
+   * target cannot slip, roll or step off a strike — he is tied up or pinned —
+   * so significant accuracy is 72 % in the clinch and on the ground against
+   * 42 % at distance. The §02 defence tables are the stand-up ones; this is
+   * the positional term they lack.
+   */
+  function positionalArrivalLogit(posture: ImpactPosture): number {
+    if (posture === 'clinch' || posture === 'wallPinned') return POSITIONAL_ARRIVAL.clinch;
+    if (posture === 'groundTop') return POSITIONAL_ARRIVAL.groundTop;
+    if (posture === 'groundBottom') return POSITIONAL_ARRIVAL.groundBottom;
+    return 0;
+  }
+
+  /** Strikes each fighter has thrown at each opponent so far (attacker*64+target). */
+  const exposure = new Map<number, number>();
+
+  /**
+   * Phase 9 [E: tuned to FIGHT_DATA §3 #38 / #125]: the punch that drops a
+   * man is the one he did not see (05 kUnseen, DAMAGE §3.2 — Eckner 2014,
+   * Mihalik 2010), and he sees fewer of them once he has read his opponent's
+   * timing, range and habits. The share of strikes that arrive unseen starts
+   * at `UNFAMILIAR.p0` and decays with the number of strikes this attacker
+   * has thrown at him to `UNFAMILIAR.floor`. This is why knockdowns per
+   * landed power head strike fall from 5.3 % in round 1 to 1.5 % in round 3
+   * in the data, which a force- or damage-only model cannot produce (both
+   * push the other way). The per-strike choice is a deterministic hash of
+   * the contact, so it takes no draw from the bout stream (09 §2.7).
+   */
+  function unseenByUnfamiliarity(
+    w: World, actor: FighterWorldState, target: FighterWorldState, subMs: number,
+  ): boolean {
+    const key = actor.id * 64 + target.id;
+    const n = exposure.get(key) ?? 0;
+    exposure.set(key, n + 1);
+    // A less skilled defender reads less and sees fewer punches coming at any
+    // point of the fight (x3 at T0 .. x0.7 at T5): the finishing rate of
+    // regional bouts (09 §7.3 T7) comes from exactly this.
+    const tierMult = Math.max(0.7, 1 + UNFAMILIAR.tierSlope * (4 - target.runtime.strikingTier));
+    const p = tierMult
+      * (UNFAMILIAR.floor + (UNFAMILIAR.p0 - UNFAMILIAR.floor) * Math.exp(-n / UNFAMILIAR.tau));
+    let h = 2166136261 ^ w.tick;
+    h = Math.imul(h ^ subMs, 16777619);
+    h = Math.imul(h ^ (actor.id + 1), 16777619);
+    h = Math.imul(h ^ (target.id + 7), 16777619);
+    h ^= h >>> 13;
+    h = Math.imul(h, 0x5bd1e995);
+    h ^= h >>> 15;
+    return (h >>> 0) / 4294967296 < p;
+  }
+
+  /** Fouls raised in P4 this tick, handed to the referee in P6 (QA-6). */
+  let pendingFouls: FoulOccurrence[] = [];
+
+  /** The §06 foul an illegal strike is (the catalogue's closest entry). */
+  function foulIdFor(w: World, spec: TechniqueSpec, targetDown: boolean): FoulId {
+    const fam = w.ruleset.family;
+    if (targetDown && (fam === 'boxing' || fam === 'kickboxing' || fam === 'muay_thai')) return 'hit_downed';
+    if (spec.weapon === 'elbow' || spec.weapon === 'elbow_point') return 'elbow_illegal';
+    if (targetDown && (spec.weapon === 'knee' || isKickWeapon(spec))) return 'grounded_head_kick_knee';
+    return 'disregard';
+  }
+
+  function isKickWeapon(spec: TechniqueSpec): boolean {
+    return spec.weapon === 'shin' || spec.weapon === 'instep' || spec.weapon === 'ball_of_foot'
+      || spec.weapon === 'heel';
+  }
+
   function resolveStrikeContact(
     w: World, contact: ScheduledContact, p: StrikePayload,
     actor: FighterWorldState, target: FighterWorldState,
@@ -922,11 +1234,19 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     if (legality !== 'legal') {
       // I6: an illegal technique is emitted as a foul, never silently dropped.
       actor.actionResult = 'missed';
+      const foulId = foulIdFor(w, spec, onFloor);
       emit(w, {
         ...base(w, 'foul', actor.id, target.id,
           `${actor.runtime.def.short} lands an illegal ${spec.name}`, contact.subMs),
         kind: 'foul',
-        detail: { foul: 'disregard', reason: `${rulesWeapon(spec)} to ${p.region}`, detected: true },
+        detail: { foul: foulId, reason: `${rulesWeapon(spec)} to ${p.region}`, detected: true },
+      });
+      // QA-6 (Phase 9): the foul goes to the referee's ladder (warning,
+      // deduction, DQ) in P6 of this tick. Nothing ever reached it before.
+      pendingFouls.push({
+        foul: foulId, fouler: actor.id, victim: target.id,
+        intent: legality === 'foul_hard' ? 'intentional' : 'accidental',
+        detected: true, effect: 'minor', announced: true,
       });
       return;
     }
@@ -940,6 +1260,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       weaponSpeedAttr: spec.weapon === 'fist' ? actor.runtime.effective.handSpeed : actor.runtime.effective.kickSpeed,
       fatigue: actor.energy.f,
       commit: commitModeOf(w, actor, target, spec),
+      rangeFitMult: (p.short ? SHORT_STRIKE_MODEL.forceMult : 1) * gnpDamageMult(posture, actor.position, spec),
+      female: actor.runtime.body.sex === 'female',
     };
     const attackerSkill = actor.runtime.strikingMean;
     const defenderSkill = target.runtime.strikingMean;
@@ -947,7 +1269,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const targetMidAction = target.action !== null
       && w.nowMs < target.actionCommitMs + target.actionTotalMs;
     // A spinning technique arrives with the attacker's back turned: 02 §2.2.4.
-    const seen = !spec.flags.includes('spinning');
+    const seen = !spec.flags.includes('spinning') && !unseenByUnfamiliarity(w, actor, target, contact.subMs);
     const input: StrikeResolveInput = {
       tick: w.tick,
       subTickMs: contact.subMs,
@@ -992,8 +1314,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         grounded: onFloor,
       },
       guard: g,
-      defence: resolvedDefenceOf(target, spec, attackerSkill, defenderSkill),
-      passiveBlockP: passiveBlockP(g, spec, defenderSkill),
+      defence: scaledDefence(resolvedDefenceOf(target, spec, attackerSkill, defenderSkill), positionalDefenceMult(posture)),
+      passiveBlockP: passiveBlockP(g, spec, defenderSkill) * positionalDefenceMult(posture),
       arrivalLogit: arrivalLogit(spec, {
         attackerSkill,
         defenderSkill,
@@ -1011,7 +1333,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         defenderBackTurned: w.nowMs < target.tells.backTurnedUntilMs,
         defenderVisionBlocked: w.nowMs < target.tells.eyesShutUntilMs,
         guardLogit: guardLogit(g, spec),
-      }),
+      }) + (p.short ? SHORT_STRIKE_MODEL.arrivalLogit : 0) + positionalArrivalLogit(posture)
+        + (TARGET_ARRIVAL[p.region] ?? 0),
     };
     const res = resolveStrike(w.rng, input);
     if (res.draws !== DRAWS_PER_STRIKE) {
@@ -1062,7 +1385,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
 
     if (res.statLanded) {
       actor.totalLanded++;
-      if (isSignificant(spec, posture)) actor.sigLanded++;
+      if (isSignificant(spec, posture, p.short === true)) actor.sigLanded++;
     }
 
     // Feed the outcome back to chapter 07's ledger. Only P4 knows whether a
@@ -1088,6 +1411,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         damage: damageDetail,
         defence: res.defence ?? undefined,
         unseen: !seen,
+        ...(p.short ? { short: true } : {}),
       },
     };
     emit(w, e);
@@ -1129,6 +1453,16 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       stuffed('node changed');
       return;
     }
+    // Phase 9 (I3): an edge started on a free opponent who has since been
+    // tied up by a third fighter (two men following the same knockdown down)
+    // no longer has him to take; joining would silently strip the first pair.
+    if (p.engagementId === null) {
+      const held = w.engagements.of(target.id);
+      if (held !== null && held.a !== actor.id && held.b !== actor.id) {
+        stuffed('target engaged');
+        return;
+      }
+    }
 
     const kuzushi: Kuzushi = engagement?.kuzushi ?? { dir: 0, mag: 0 };
     const gw: GrappleWorld = {
@@ -1150,6 +1484,10 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       gripDominance: 'neutral',
       sideMatch: 'none',
       attemptIndex: 0,
+      ...(tdChainEdge(edge, actor.position, w.engagements.slotOf(actor.id))
+        ? { extraLogit: { code: 'tdMMA', logit: w.params.get('grap.tdChainLogit') } }
+        : getUpEdge(edge, actor.position, w.engagements.slotOf(actor.id))
+          ? { extraLogit: { code: 'getUpMMA', logit: w.params.get('grap.getUpLogit') } } : {}),
     };
     const outcome = resolveEdge(edge, grappleActorOf(w, actor), grappleActorOf(w, target), gw, w.rng);
     if (outcome.draws !== GRAPPLE_EDGE_DRAWS) {
@@ -1194,9 +1532,15 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       // A free standing node: the engagement dissolves.
       if (engagementId !== null) w.engagements.dissolve(engagementId, w.tick);
       for (const f of [actor, target]) {
+        // Phase 9 (I2): in a multi-fighter bout the target of a free-standing
+        // edge (a level change, a feint step) may be locked up with someone
+        // else; that engagement is not this edge's to dissolve or overwrite.
+        if (w.engagements.of(f.id) !== null) continue;
         f.partnerId = null;
         f.posture = 'standing';
         f.position = to;
+        // Phase 9 (I5): a hold does not survive the pair coming apart.
+        f.sub = { technique: null, stage: 0, progress: 0, lockedAtMs: null };
       }
     } else if (engagementId !== null) {
       w.engagements.transition(engagementId, to, w.tick, { swap: outcome.swap });
@@ -1230,7 +1574,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         ...base(w, 'engagementJoin', actor.id, target.id,
           `${actor.runtime.def.short} ties up`, contact.subMs),
         kind: 'engagementJoin',
-        detail: { edge: edge.id, from, to, result: 'success' },
+        detail: { edge: edge.id, from, to, result: 'success', a: e.a },
       } as GrappleEvent);
       void e;
     }
@@ -1239,22 +1583,66 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       actor.takedownsLanded++;
     }
     if (engagementId !== null) w.engagements.markWork(engagementId, true);
+    const after = w.engagements.of(actor.id);
+    // Phase 9: a `reversal` event is a reversal — the bottom man came out on
+    // top. A failed sweep, or a sweep-table row that only changes guards, is
+    // a position change (it used to be logged, commentated and replayed as a
+    // reversal every time it was attempted).
+    let evKind = edgeEventKind(edge);
+    if (evKind === 'reversal' && !(outcome.success && after !== null && after.a === actor.id
+      && roleFor(after.node, 'a') === 'top')) {
+      evKind = 'positionChange';
+    }
 
     const ev: GrappleEvent = {
-      ...base(w, edgeEventKind(edge), actor.id, target.id,
+      ...base(w, evKind, actor.id, target.id,
         `${actor.runtime.def.short} ${outcome.success ? 'completes' : 'fails'} ${edge.name}`,
         contact.subMs),
-      kind: edgeEventKind(edge),
+      kind: evKind,
       detail: {
         edge: edge.id,
         from,
         to,
         result: outcome.success ? 'success' : outcome.counter.fired ? 'countered' : 'stuffed',
-        cage: w.engagements.of(actor.id)?.cage ?? false,
+        cage: after?.cage ?? false,
+        ...(after && after.b >= 0 ? { a: after.a } : {}),
       },
     };
     emit(w, ev);
   }
+
+  /**
+   * QA-9 / QA-10 (Phase 9): a submission ends the bout only when the tapping
+   * fighter's side has nobody else standing — the same multi-opponent rule the
+   * referee path applies. Otherwise the victim is out (already marked by the
+   * caller), leaves the engagement, and the bout goes on. A team win carries
+   * `winner: 'none'` and the team, as a team KO does.
+   */
+  function submissionStops(
+    w: World, actor: FighterWorldState, target: FighterWorldState, subId: string,
+  ): void {
+    w.engagements.leave(target.id, w.tick);
+    w.scheduler.queue.cancelFor(target.id, 'out');
+    actor.sub = { technique: null, stage: 0, progress: 0, lockedAtMs: null };
+    syncEngagement(w, actor);
+    const teams = w.liveTeams();
+    if (w.fighters.length > 2 && teams.length > 1) {
+      emit(w, {
+        ...base(w, 'fighterOut', target.id, -1, `${target.runtime.def.short} is out: submission`),
+        kind: 'fighterOut',
+        detail: { reason: `submission:${subId}`, method: 'submission' },
+      });
+      return;
+    }
+    finishBout(w, {
+      winner: w.fighters.length <= 2 ? actor.id : 'none', winningTeam: actor.team, method: 'submission',
+      detail: subId, round: w.round, timeSeconds: w.roundTick * dtMs / 1000,
+      totalSeconds: w.nowMs / 1000, scorecards: [], judgeTotals: [],
+    });
+  }
+
+  /** When the current stage of each fighter's hold began (04 §2.4.4 dMax). */
+  const subStageSince = new Map<number, { tech: string; stage: string; sinceMs: number }>();
 
   function resolveSubmissionContact(
     w: World, contact: ScheduledContact, p: SubmissionPayload,
@@ -1298,6 +1686,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         fightTimeS: w.nowMs / 1000,
         glovesMma: w.ruleset.gloves.oz <= 6,
         strikesLegal: w.ruleset.ground.strikesAllowed,
+        mmaBout: w.ruleset.family === 'mma',
         nearFence: w.engagements.of(actor.id)?.cage ?? false,
         ctrl: positionNode(actor.position).controlRating,
       }),
@@ -1307,6 +1696,20 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       chained: false,
     };
     const res = resolveWindow(w.rng, ctx);
+    // 04 §2.4.4: an attack stalled past dMax (= dMaxFactor x the stage's mean
+    // duration) without advancing is let go. Phase 9: with the windows now
+    // resolved to the end, a hold could otherwise be worked indefinitely, and
+    // every stage became a matter of when, not whether — half of all
+    // locked-in attempts finished against a real quarter (FIGHT_DATA §3 #73).
+    const held = subStageSince.get(actor.id);
+    if (!held || held.tech !== spec.id || held.stage !== p.stage) {
+      subStageSince.set(actor.id, { tech: spec.id, stage: p.stage, sinceMs: w.nowMs });
+    } else if (res.outcome === 'hold'
+      && w.nowMs - held.sinceMs > STAGE_PARAMS.dMaxFactor * stageSpec.dMeanMs) {
+      subStageSince.delete(actor.id);
+      abandon('stalled');
+      return;
+    }
 
     const stageNow: StageIndex = (p.stage === 'entry' ? 1 : p.stage === 'secure' ? 2 : 3) as StageIndex;
     switch (res.outcome) {
@@ -1334,11 +1737,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
             kind: 'submissionFinish',
             detail: { technique: spec.id, type: 'tap', lockedSeconds: 0 },
           });
-          finishBout(w, {
-            winner: actor.id, winningTeam: actor.team, method: 'submission',
-            detail: spec.id, round: w.round, timeSeconds: w.roundTick * dtMs / 1000,
-            totalSeconds: w.nowMs / 1000, scorecards: [], judgeTotals: [],
-          });
+          submissionStops(w, actor, target, spec.id);
         }
         break;
       }
@@ -1351,11 +1750,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
           kind: 'submissionFinish',
           detail: { technique: spec.id, type: 'tap', lockedSeconds: 0 },
         });
-        finishBout(w, {
-          winner: actor.id, winningTeam: actor.team, method: 'submission',
-          detail: spec.id, round: w.round, timeSeconds: w.roundTick * dtMs / 1000,
-          totalSeconds: w.nowMs / 1000, scorecards: [], judgeTotals: [],
-        });
+        submissionStops(w, actor, target, spec.id);
         break;
       }
       case 'escape':
@@ -1425,10 +1820,158 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     }
   }
 
+  /**
+   * 06 §2.3.6b: the referee's stand-up and clinch break. The referee module
+   * decides *when*; this applies it — the pair is separated to a neutral
+   * standing restart, anything in flight is cancelled and a `disengage` event
+   * records it. (Phase 9: the `refereeBreak` event used to be emitted and never
+   * applied, so a stalled pair stayed on the mat or on the fence until the
+   * bell, the referee repeating "stand them up" every tick.)
+   */
+  function refereeSeparate(w: World, fighterId: number, reason: string): void {
+    const f = w.fighters[fighterId];
+    if (!f) return;
+    const e = w.engagements.of(f.id);
+    if (!e || e.b < 0) return;
+    const fa = w.fighters[e.a];
+    const fb = w.fighters[e.b];
+    if (!fa || !fb) return;
+    const from = e.node;
+    const edgeId = e.kind === 'clinch' ? 'ref.clinch_break' : 'ref.standup';
+    w.engagements.dissolve(e.id, w.tick);
+    // A stand-up restarts at a neutral distance; a clinch break steps them
+    // apart to about striking range.
+    const gap = reason === 'clinch' ? 1.6 : 2.4;
+    const mx = (fa.x + fb.x) / 2;
+    const mz = (fa.z + fb.z) / 2;
+    let ux = fb.x - fa.x;
+    let uz = fb.z - fa.z;
+    const len = Math.hypot(ux, uz);
+    if (len > 1e-6) { ux /= len; uz /= len; } else { ux = Math.sin(fa.facing); uz = Math.cos(fa.facing); }
+    const pa = clampToArena(w.arena, mx - ux * gap / 2, mz - uz * gap / 2, 0.35);
+    const pb = clampToArena(w.arena, mx + ux * gap / 2, mz + uz * gap / 2, 0.35);
+    fa.x = pa.x; fa.z = pa.z;
+    fb.x = pb.x; fb.z = pb.z;
+    for (const x of [fa, fb]) {
+      w.scheduler.queue.cancelFor(x.id, 'referee.break');
+      x.action = null;
+      x.actionResult = 'none';
+      x.sub = { technique: null, stage: 0, progress: 0, lockedAtMs: null };
+      x.partnerId = null;
+      x.vx = 0;
+      x.vz = 0;
+      if (x.posture !== 'down' && x.posture !== 'out') x.posture = 'standing';
+    }
+    fa.facing = Math.atan2(fb.x - fa.x, fb.z - fa.z);
+    fb.facing = Math.atan2(fa.x - fb.x, fa.z - fb.z);
+    syncEngagement(w, fa);
+    syncEngagement(w, fb);
+    emit(w, {
+      ...base(w, 'disengage', fa.id, fb.id,
+        reason === 'clinch' ? 'The referee breaks the clinch' : 'The referee stands them up'),
+      kind: 'disengage',
+      // No `edge`: the referee's restart is not a fighter's action (the §2.3 L
+      // `ref.*` rows are chapter 06's), so the log names it by reason only.
+      detail: { from, to: fa.position, result: 'success', reason },
+    } as GrappleEvent);
+    void edgeId;
+  }
+
+  /** Per-fighter state the street ending rules need (QA-2). */
+  const streetState = new Map<number, { downSinceS: number | null }>();
+
+  /**
+   * QA-2 (Phase 9): the street ruleset has no referee; 06 §2.3.11's
+   * `streetTick` — incapacitation, flight, surrender, bystander separation, a
+   * weapon, the police — is how a street fight ends, and nothing called it.
+   * An incapacitated or fled fighter is out; a hazard ending separates the
+   * fight (no winner). Fleeing is a win for the one who gets away (RULES §2.8).
+   */
+  function streetPhase(w: World): void {
+    const rt = refereeRuntime(w);
+    const nowS = w.nowMs / 1000;
+    const live = w.live();
+    const participants = live.map((f) => {
+      const o = refCues(rt.obs[f.id]);
+      let st = streetState.get(f.id);
+      if (!st) {
+        st = { downSinceS: null };
+        streetState.set(f.id, st);
+      }
+      const down = f.posture === 'down' || (o.grounded && !o.attemptingToRise);
+      if (down) st.downSinceS ??= nowS;
+      else st.downSinceS = null;
+      return {
+        id: f.id,
+        side: f.team,
+        obs: o,
+        mobility: f.damage.caps.movement,
+        cannotStandForS: st.downSinceS === null ? 0 : nowS - st.downSinceS,
+        wantsToFlee: /flee|flight/.test(f.intentTag),
+        wantsToSurrender: false,
+      };
+    });
+    const res = streetTick(participants, w.rng, nowS, dtMs / 1000,
+      w.ruleset.street?.bystanders ?? 0);
+    let fled: FighterWorldState | null = null;
+    for (const ch of res.changes) {
+      const f = w.fighters[ch.participant];
+      if (!f || f.out) continue;
+      f.out = true;
+      f.outReason = `street:${ch.state}`;
+      f.sub = { technique: null, stage: 0, progress: 0, lockedAtMs: null };
+      leaveAndSync(w, f);
+      w.scheduler.queue.cancelFor(f.id, 'out');
+      if (ch.state === 'fled') fled = f;
+      emit(w, {
+        ...base(w, 'fighterOut', f.id, -1, `${f.runtime.def.short} is ${ch.state}`),
+        kind: 'fighterOut',
+        detail: { reason: `street:${ch.state}`, method: ch.state === 'fled' ? 'flight' : 'incapacitation' },
+      });
+    }
+    const meta = {
+      round: w.round, timeSeconds: (w.roundTick * dtMs) / 1000, totalSeconds: nowS,
+      scorecards: [], judgeTotals: [],
+    };
+    if (fled !== null) {
+      const team = fled.team;
+      if (!w.live().some((f) => f.team === team)) {
+        finishBout(w, {
+          winner: w.fighters.filter((f) => f.team === team).length === 1 ? fled.id : 'none',
+          winningTeam: team, method: 'escaped', detail: 'fled', ...meta,
+        });
+        return;
+      }
+    }
+    if (res.ended) {
+      finishBout(w, { winner: 'none', winningTeam: null, method: 'separated', detail: res.ended.reason, ...meta });
+    }
+  }
+
   function refereePhase(w: World): void {
     const rt = refereeRuntime(w);
     if (rt.result) {
       w.finished = true;
+      return;
+    }
+    if (!w.ruleset.referee.present || !w.ruleset.stoppage.refereeStops) {
+      streetPhase(w);
+      if (rt.result) return;
+      const teamsLeft = w.liveTeams();
+      if (teamsLeft.length <= 1 && !w.finished) {
+        const survivors = w.live();
+        finishBout(w, {
+          winner: survivors.length === 1 && w.fighters.length <= 2 ? survivors[0].id : 'none',
+          winningTeam: teamsLeft[0] ?? null,
+          method: 'allOpponentsStopped',
+          detail: 'no live opponent',
+          round: w.round,
+          timeSeconds: (w.roundTick * dtMs) / 1000,
+          totalSeconds: w.nowMs / 1000,
+          scorecards: [],
+          judgeTotals: [],
+        });
+      }
       return;
     }
     const live = w.live();
@@ -1465,14 +2008,22 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       fighters,
       engagements,
       roundsCompleted: w.round - 1,
+      fouls: pendingFouls,
       opponentOf: (id: number): number => {
         const f = w.fighters[id];
         const opp = f ? w.nearestOpponent(f) : null;
         return opp ? opp.id : -1;
       },
     });
+    pendingFouls = [];
     for (const e of outcome.events) {
       emit(w, { ...e, tick: w.tick, round: w.round });
+      if (e.kind === 'refereeBreak') {
+        const reason = (e.detail as { reason?: string } | undefined)?.reason ?? '';
+        if (reason === 'stand-up' || reason === 'clinch' || reason === 'restart-neutral') {
+          refereeSeparate(w, e.target, reason);
+        }
+      }
     }
     rt.display = outcome.paused === 'count'
       ? { state: 'counting' }
@@ -1484,10 +2035,12 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       const ended = outcome.ended;
       if (ended.loser !== null) {
         const loser = w.fighters[ended.loser];
-        if (loser) {
+        if (loser && !loser.out) {
           loser.out = true;
           loser.outReason = ended.reason;
-          w.engagements.leave(loser.id, w.tick);
+          // Phase 9 (I5): a fighter stopped while holding a submission lets go.
+          loser.sub = { technique: null, stage: 0, progress: 0, lockedAtMs: null };
+          leaveAndSync(w, loser);
           w.scheduler.queue.cancelFor(loser.id, 'out');
           emit(w, {
             ...base(w, 'fighterOut', ended.loser, -1, `${loser.runtime.def.short} is out: ${ended.reason}`),
@@ -1516,6 +2069,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         });
         return;
       }
+      // QA-1: one fighter is out, the bout goes on; the referee resumes.
+      rt.ref.resumeAfterStoppage(ended.loser);
     }
 
     // A side with no live fighter has lost, whatever the referee said.
@@ -1549,20 +2104,37 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       const d = ledgers[e.target];
       if (e.kind === 'strike' && a) {
         const det = e.detail;
-        a.sigAttempted++;
-        if (det.result === 'landed') {
-          if (det.target === 'head') a.sigHead++;
-          else if (det.target === 'body') a.sigBody++;
-          else a.sigLeg++;
+        // The judges see significance the way the stats do (09 §4.1): a short
+        // clinch or ground strike, or a punch off the back, is volume, not a
+        // significant strike (Phase 9; they used to be scored as sig).
+        const nonSig = det.short === true || det.technique === 'tech.bottom_punch'
+          || (det.technique.startsWith('tech.jab') && w.fighters[e.actor]?.posture !== 'standing');
+        if (nonSig) {
+          if (isStatLanded(det.result)) a.nonSigLanded++;
+        } else {
+          a.sigAttempted++;
+          if (isStatLanded(det.result)) {
+            if (det.target === 'head') a.sigHead++;
+            else if (det.target === 'body') a.sigBody++;
+            else a.sigLeg++;
+          }
         }
       } else if (e.kind === 'knockdown' && a) {
         a.kd++;
         a.hurtEvents++;
-      } else if (e.kind === 'takedown' && a) {
-        if (e.detail.result === 'success') a.tdLanded++;
-        else a.tdMissed++;
-      } else if (e.kind === 'reversal' && a) {
-        a.reversals++;
+      } else if (isGrappleEventKind(e.kind) && a) {
+        // One definition with the §4.1 stats (grappling/takedowns.ts). The
+        // judges used to score every `takedown`-kind event — clinch entries
+        // and guard pulls included — as a takedown, and every sweep attempt
+        // as a reversal.
+        const g = e as GrappleEvent;
+        const det = g.detail;
+        const success = det.result === 'success';
+        if (det.reason !== 'contested' && g.kind !== 'engagementJoin') {
+          if (isTakedownLanding(det.from, det.to, success, g.actor, det.a)) a.tdLanded++;
+          else if (!success && isTakedownAttempt(det.edge, det.from)) a.tdMissed++;
+          if (isReversal(det.edge, det.from, det.to, success, g.actor, det.a)) a.reversals++;
+        }
       } else if (e.kind === 'submissionStage' && a) {
         if (e.detail.stage >= 4) a.subLocked++;
         else if (e.detail.stage >= 2) a.subEarly++;
@@ -1640,32 +2212,71 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       });
       return;
     }
-    // No panel (teams, ffa, crowd, sub-only): the side with the most live
-    // fighters, then the most significant strikes landed, takes it.
-    const teams = w.liveTeams();
-    const scoreOf = (team: number): number => w.fighters
-      .filter((f) => f.team === team && !f.out)
-      .reduce((n, f) => n + f.sigLanded, 0);
-    let bestTeam: number | null = null;
-    let best = -Infinity;
-    let tied = false;
-    for (const t of teams) {
-      const s = w.live().filter((f) => f.team === t).length * 1000 + scoreOf(t);
-      if (s > best) {
-        best = s;
-        bestTeam = t;
-        tied = false;
-      } else if (s === best) tied = true;
-    }
-    const winners = bestTeam === null ? [] : w.live().filter((f) => f.team === bestTeam);
-    finishBout(w, {
-      winner: tied ? 'draw' : winners.length === 1 ? winners[0].id : bestTeam === null ? 'none' : 'none',
-      winningTeam: tied ? null : bestTeam,
-      method: clock.untimed ? 'separated' : 'timeLimit',
-      detail: 'time limit',
+    const meta = {
       round: w.round,
       timeSeconds: (w.roundTick * dtMs) / 1000,
       totalSeconds: w.nowMs / 1000,
+    };
+    // QA-3 (Phase 9): an untimed bout (street, crowd) that reaches its cap is
+    // `separated` — 09 §3.1's indecisive ending — and nobody wins it. It used
+    // to go to the side with more fighters standing.
+    if (clock.untimed) {
+      finishBout(w, {
+        winner: 'none', winningTeam: null, method: 'separated', detail: 'separated',
+        ...meta, scorecards: [], judgeTotals: [],
+      });
+      return;
+    }
+    // QA-11: a two-fighter bout with no judges (sub-only) that ends without a
+    // submission is a draw (EBI escape-time overtime is not modelled).
+    if (w.fighters.length <= 2) {
+      finishBout(w, decideSubOnly(null, meta));
+      return;
+    }
+    // QA-4: teams and ffa on the bell are judged (09 §4.3): per round, each
+    // side's effective score is the sum of its fighters' §06 counters; teams
+    // take 10 for the round (9 for a lower total, 10-10 when level) and the
+    // most points wins; ffa ranks by total effective score. It used to be
+    // "live headcount x 1000 + sig strikes landed".
+    const weights = mmaWeights();
+    const rounds = [...jr.history];
+    if (jr.ledgers.some((l) => l.roundSecondsElapsed > 0)) rounds.push(jr.ledgers);
+    const sides = [...new Set(w.fighters.map((f) => f.team))].sort((a, b) => a - b);
+    const total = new Map<number, number>(sides.map((t) => [t, 0]));
+    const points = new Map<number, number>(sides.map((t) => [t, 0]));
+    for (const ledgers of rounds) {
+      const perSide = new Map<number, number>(sides.map((t) => [t, 0]));
+      for (const f of w.fighters) {
+        const l = ledgers[f.id];
+        if (!l) continue;
+        perSide.set(f.team, (perSide.get(f.team) ?? 0) + effectiveScore(l, weights, clock.roundSeconds));
+      }
+      const top = Math.max(...perSide.values());
+      for (const t of sides) {
+        total.set(t, (total.get(t) ?? 0) + (perSide.get(t) ?? 0));
+        points.set(t, (points.get(t) ?? 0) + ((perSide.get(t) ?? 0) >= top - 1e-9 ? 10 : 9));
+      }
+    }
+    const ffa = w.config.mode === 'ffa';
+    const key = (t: number): number => (ffa ? total.get(t) ?? 0 : (points.get(t) ?? 0) * 1e6 + (total.get(t) ?? 0));
+    let bestTeam: number | null = null;
+    let best = -Infinity;
+    let tied = false;
+    for (const t of sides) {
+      const v = key(t);
+      if (v > best + 1e-9) {
+        best = v;
+        bestTeam = t;
+        tied = false;
+      } else if (Math.abs(v - best) <= 1e-9) tied = true;
+    }
+    const members = bestTeam === null ? [] : w.fighters.filter((f) => f.team === bestTeam);
+    finishBout(w, {
+      winner: tied ? 'draw' : members.length === 1 ? members[0].id : 'none',
+      winningTeam: tied ? null : bestTeam,
+      method: tied ? 'draw' : 'timeLimit',
+      detail: tied ? 'team scores level' : 'team scoring',
+      ...meta,
       scorecards: [],
       judgeTotals: [],
     });

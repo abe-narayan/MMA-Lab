@@ -848,10 +848,95 @@ const KICKS: readonly TechniqueSpec[] = [
 /** All 54 standing techniques of chapter 02 §2.2, in table order. */
 export const TECHNIQUES: readonly TechniqueSpec[] = [...PUNCHES, ...ELBOWS_KNEES, ...KICKS];
 
-const BY_ID = new Map<TechniqueId, TechniqueSpec>(TECHNIQUES.map((t) => [t.id, t]));
+// ---------------------------------------------------------------------------
+// Ground strikes — chapter 03 §5.1.1 ids, resolved through this chapter's
+// pipeline (Phase 9)
+// ---------------------------------------------------------------------------
+
+/**
+ * The §03 §5.1.1 ground-and-pound and bottom strikes as full technique rows,
+ * so the chapter 02 resolution and the chapter 05 impact model can take them.
+ * Kept out of `TECHNIQUES` (the standing catalogue the stand-up AI, the
+ * creator and the animation timing iterate); `technique()` finds them.
+ *
+ * Forces follow §03 §5.1.1's "force row x scale" column (gnp punch = cross,
+ * hammerfist = lead hook x 0.6, elbow = horizontal elbow, knee to the body =
+ * straight knee x 0.5, bottom punch = jab x 0.5, bottom elbow = elbow x 0.4);
+ * chapter 05's `kGround` (x0.7 on a grounded target) applies on top.
+ *
+ * `baseLand` [E: tuned Phase 9]: UFC ground significant-strike accuracy is
+ * 72 % (head 67 %, body 94 %) [S: FIGHT_DATA §3 #16, #19] and the §03 §5.1
+ * per-node land column runs 0.40-0.85; the rows sit where the pooled ground
+ * accuracy lands on the target once the bottom's defence is applied.
+ * Timings [E]: a ground punch is a short, arm-and-shoulder action, slower to
+ * reset than a standing jab because the puncher is posting and re-basing.
+ */
+export const GROUND_TECHNIQUES: readonly TechniqueSpec[] = [
+  tech({
+    id: 'tech.gnp_punch', name: 'Ground punch', weapon: 'fist', band: ['clinch', 'close'], targets: ['head', 'body'],
+    startupMs: 220, activeMs: 60, recoveryMs: 320,
+    baseLand: 0.62, telegraph: 40, commitment: { balance: 4, guard: 'M' },
+    forceMedianN: 1400, forceCapN: 4800, effMassFrac: 0.038, vRefMs: 7.8, rotationalFactor: 1.0,
+    followUps: ['tech.gnp_punch', 'tech.gnp_elbow'], beatenBy: ['def.block_high', 'def.frame'],
+    family: 'straight', limb: 'rearHand', skill: 'boxing.power', minTier: 0, flags: [],
+    tag: '[S: BJJ_POSITIONS §4 58.6 % land; 03 §5.1.1 force row tech.cross x1] timings [E]',
+  }),
+  tech({
+    id: 'tech.gnp_hammerfist', name: 'Hammerfist', weapon: 'hammerfist', band: ['clinch', 'close'], targets: ['head'],
+    startupMs: 200, activeMs: 50, recoveryMs: 260,
+    baseLand: 0.66, telegraph: 30, commitment: { balance: 3, guard: 'L-M' },
+    forceMedianN: 900, forceCapN: 2650, effMassFrac: 0.022, vRefMs: 9.0, rotationalFactor: 1.2,
+    followUps: ['tech.gnp_hammerfist', 'tech.gnp_punch'], beatenBy: ['def.block_high', 'def.frame'],
+    family: 'hook', limb: 'rearHand', skill: 'boxing.power', minTier: 0, flags: [],
+    tag: '[S: BJJ_POSITIONS §4; 03 §5.1.1 tech.hook_lead x0.6] timings [E]',
+  }),
+  tech({
+    id: 'tech.gnp_elbow', name: 'Ground elbow', weapon: 'elbow', band: ['clinch', 'close'], targets: ['head'],
+    startupMs: 250, activeMs: 50, recoveryMs: 330,
+    baseLand: 0.56, telegraph: 50, commitment: { balance: 5, guard: 'M' },
+    forceMedianN: 1400, forceCapN: 4400, effMassFrac: 0.045, vRefMs: 8.0, rotationalFactor: 1.4,
+    followUps: ['tech.gnp_punch'], beatenBy: ['def.block_high', 'def.frame'],
+    family: 'elbow', limb: 'leadHand', skill: 'muayThai.elbows', minTier: 0,
+    flags: ['cutChannel', 'requiresElbowsLegal', 'illegalUnderBoxing', 'illegalUnderKickboxing'],
+    tag: '[S: BJJ_POSITIONS §4; 03 §5.1.1 tech.elbow_horizontal x1] cut channel; timings [E]',
+  }),
+  tech({
+    id: 'tech.gnp_knee_body', name: 'Knee to the body (ground)', weapon: 'knee', band: ['clinch', 'close'], targets: ['body'],
+    startupMs: 300, activeMs: 80, recoveryMs: 380,
+    baseLand: 0.80, telegraph: 60, commitment: { balance: 7, guard: 'M' },
+    forceMedianN: 1100, forceCapN: 4100, effMassFrac: 0.05, vRefMs: 5.5, rotationalFactor: 1.0,
+    followUps: ['tech.gnp_punch'], beatenBy: ['def.frame'],
+    family: 'knee', limb: 'rearLeg', skill: 'muayThai.knees', minTier: 0, flags: ['illegalUnderBoxing'],
+    tag: '[S: BJJ_POSITIONS §4; 03 §5.1.1 tech.knee_straight x0.5; FD #19 body 94 %] timings [E]',
+  }),
+  tech({
+    id: 'tech.bottom_punch', name: 'Punch from the bottom', weapon: 'fist', band: ['clinch', 'close'], targets: ['head'],
+    startupMs: 200, activeMs: 50, recoveryMs: 260,
+    baseLand: 0.45, telegraph: 30, commitment: { balance: 2, guard: 'L' },
+    forceMedianN: 450, forceCapN: 1400, effMassFrac: 0.015, vRefMs: 6.0, rotationalFactor: 1.0,
+    followUps: ['tech.bottom_elbow'], beatenBy: ['def.block_high'],
+    family: 'straight', limb: 'leadHand', skill: 'boxing.jab', minTier: 0, flags: [],
+    tag: '[S: BJJ_POSITIONS §4; 03 §5.1.1 tech.jab x0.5] timings [E]',
+  }),
+  tech({
+    id: 'tech.bottom_elbow', name: 'Elbow from the bottom', weapon: 'elbow', band: ['clinch', 'close'], targets: ['head'],
+    startupMs: 220, activeMs: 50, recoveryMs: 300,
+    baseLand: 0.42, telegraph: 40, commitment: { balance: 3, guard: 'M' },
+    forceMedianN: 560, forceCapN: 1760, effMassFrac: 0.018, vRefMs: 6.0, rotationalFactor: 1.2,
+    followUps: ['tech.bottom_punch'], beatenBy: ['def.block_high'],
+    family: 'elbow', limb: 'leadHand', skill: 'muayThai.elbows', minTier: 0,
+    flags: ['cutChannel', 'requiresElbowsLegal', 'illegalUnderBoxing', 'illegalUnderKickboxing'],
+    tag: '[S: BJJ_POSITIONS §4; 03 §5.1.1 tech.elbow_horizontal x0.4] timings [E]',
+  }),
+];
+
+const BY_ID = new Map<TechniqueId, TechniqueSpec>(
+  [...TECHNIQUES, ...GROUND_TECHNIQUES].map((t) => [t.id, t]),
+);
 
 /** Register every id in the global table (ids.ts owns the dense indices). */
 TECHNIQUE_IDS.addAll(TECHNIQUES.map((t) => t.id));
+TECHNIQUE_IDS.addAll(GROUND_TECHNIQUES.map((t) => t.id));
 
 export function technique(id: TechniqueId): TechniqueSpec {
   const spec = BY_ID.get(id);

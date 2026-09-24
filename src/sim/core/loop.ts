@@ -232,7 +232,7 @@ export class BoutLoop {
           ? Math.min(1, (w.nowMs - f.actionCommitMs) / f.actionTotalMs)
           : 0,
         stance: f.stance,
-        visiblyHurt: f.damage.has('rocked') || f.damage.has('stunned'),
+        visiblyHurt: f.damage.has('state.rocked') || f.damage.has('state.stunned'),
         visiblyTired: f.energy.f > 0.65,
         handsDropped: f.energy.f > 0.75,
         balance: f.balance,
@@ -275,11 +275,21 @@ export class BoutLoop {
         const dz = b.z - a.z;
         const d = Math.hypot(dx, dz);
         if (d >= min || d < 1e-4) continue;
-        const push = (min - d) / 2;
-        a.x -= (dx / d) * push;
-        a.z -= (dz / d) * push;
-        b.x += (dx / d) * push;
-        b.z += (dz / d) * push;
+        // Phase 9: a fighter locked up with someone else is anchored to his
+        // partner (I4: an engaged pair stays within engagedMaxDistance and
+        // does not drift). A third fighter who walks into him gives way;
+        // pushing both let a bystander shove one half of a clinch out of it
+        // (hundreds of I4 ticks a bout in 1v2 / 2v2).
+        const aHeld = !engaged && a.partnerId !== null;
+        const bHeld = !engaged && b.partnerId !== null;
+        if (aHeld && bHeld) continue;
+        const wa = aHeld ? 0 : bHeld ? 1 : 0.5;
+        const wb = 1 - wa;
+        const overlap = min - d;
+        a.x -= (dx / d) * overlap * wa;
+        a.z -= (dz / d) * overlap * wa;
+        b.x += (dx / d) * overlap * wb;
+        b.z += (dz / d) * overlap * wb;
       }
     }
     for (const f of fighters) {

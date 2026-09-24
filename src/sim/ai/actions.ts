@@ -19,13 +19,14 @@ import type { DefenceId, PositionId, TechniqueId } from '../core/ids';
 import type { Ruleset } from '../rules/types';
 import type { FighterRuntime } from '../fighter';
 import {
-  TECHNIQUES, techniqueLegal, type StrikingRulesetFlags, type TechniqueSpec,
+  TECHNIQUES, hasTechnique, technique, techniqueLegal, type StrikingRulesetFlags, type TechniqueSpec,
   type GloveType as StrikeGloveType,
 } from '../striking/catalogue';
 import { bandFor, rangeFit, reachProfile, MOVEMENTS, type ReachProfile } from '../striking/range';
 import { feintsForTier, type FeintSpec } from '../striking/combos';
-import { edgesFrom, type GrapplingEdge } from '../grappling/graph';
-import { SUBMISSION_CATALOGUE, type SubmissionSpec } from '../submissions/catalogue';
+import { edgesFrom, hasPositionNode, positionNode, roleFor, type GrapplingEdge } from '../grappling/graph';
+import { BOTTOM_GNP, gnpProfile } from '../grappling/gnp';
+import { subOffers } from '../grappling/subOffers';
 import { isLegalUnderRuleset } from '../submissions/legality';
 import type { ActionFamily } from './contracts';
 import { tierBehaviourFor, techniqueBlockedBy, type TierBehaviour } from './behaviour';
@@ -57,6 +58,11 @@ export interface Candidate extends ScorableAction {
   targetRegion?: 'head' | 'body' | 'leadLeg' | 'rearLeg' | 'arms';
   /** Set for strikes: the §02 spec, so the execution layer need not look it up. */
   spec?: TechniqueSpec;
+  /**
+   * A short, arm-only strike in the clinch or on the ground: fast, accurate,
+   * light, and not significant under the UFCStats definition (09 §4.1).
+   */
+  short?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,16 +76,21 @@ export interface Candidate extends ScorableAction {
  * FIGHT_DATA target/position shares.
  */
 export const BASE_PRIOR: Readonly<Partial<Record<ActionFamily, number>>> = Object.freeze({
-  jab: 1.50, cross: 1.00, hook: 0.70, leadHook: 0.70, uppercut: 0.45,
-  overhand: 0.40, bodyHook: 0.50, spinning: 0.12,
-  teep: 0.60, lowKick: 0.65, leadLowKick: 0.55, bodyKick: 0.42,
+  // Phase 9 [E: tuned to FIGHT_DATA §3 #20-#21, target shares of sig
+  // attempts head 77 / body 13.5 / legs 9 %]: leg kicks x4, body shots x2.4;
+  // the jab x2.3 (FD #36: knockdowns per landed *power* head strike 3.9 %
+  // at 0.30 KD per 15 min implies about half a power head strike landed per
+  // minute — most distance head strikes are jabs).
+  jab: 3.40, cross: 1.00, hook: 0.70, leadHook: 0.70, uppercut: 0.45,
+  overhand: 0.40, bodyHook: 1.60, spinning: 0.12,
+  teep: 0.60, lowKick: 3.00, leadLowKick: 2.20, bodyKick: 1.30,
   headKick: 0.28, rearKick: 0.40, knee: 0.45, elbow: 0.35,
   feint: 0.55, slipEntry: 0.30, parryCross: 0.35, levelChange: 0.40,
   baitCross: 0.25, inOut: 0.45,
   shoot: 0.50, nakedShot: 0.20, shootOffStrikes: 0.55, bodylockTd: 0.40,
   trip: 0.35, sprawl: 0.60, cagePin: 0.40,
   clinchEntry: 0.45, clinchStrike: 0.55, breakClinch: 0.50, wallWalk: 0.70,
-  groundStrike: 0.80, pass: 0.60, ride: 0.45, sweep: 0.55,
+  groundStrike: 0.80, pass: 0.60, ride: 0.45, sweep: 0.30,
   submission: 0.50, bottomSubmission: 0.35, guardPull: 0.08,
   backTake: 0.65, frontHeadlock: 0.40, standUp: 0.75,
   advance: 0.60, retreat: 0.50, circle: 0.55, circleAway: 0.50,
@@ -152,7 +163,17 @@ export interface EnumerationContext {
   mustNots: readonly string[];
   /** §2.7.3 `c.shield`: 1 when a clinch would occlude another hostile's line. */
   shield: number;
+  /** Phase 9: the opponent has a strike in the air (the "on the strike" edges). */
+  oppStriking?: boolean;
 }
+
+/**
+ * Phase 9: edges whose §2.3 requirement is "with a strike in flight". The
+ * requirement was text only, so `tech.sweep_on_strike` was on offer on every
+ * free tick under a postured top — from side control and low mount too — and
+ * made 0.5 reversals a fight on its own (real total 0.26).
+ */
+const ON_THE_STRIKE_EDGES: ReadonlySet<string> = new Set(['tech.sweep_on_strike']);
 
 // ---------------------------------------------------------------------------
 // Ruleset translation
@@ -264,8 +285,18 @@ function profileOf(rt: FighterRuntime): ReachProfile {
  * its band is available but unattractive rather than forbidden — the chapter's
  * replacement for the old hard distance gates.
  */
+/**
+ * QA-5 (Phase 9): the grappling and judo rulesets have no striking at all.
+ * `strikingFlagsFor` maps them onto the MMA striking family for the glove and
+ * legality tables, which left every punch and kick in the candidate set; each
+ * was then refused at contact and logged as a foul.
+ */
+export function strikingAllowed(ruleset: Ruleset): boolean {
+  return ruleset.family !== 'grappling' && ruleset.family !== 'judo';
+}
+
 export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
-  if (!ctx.hasTarget) return [];
+  if (!ctx.hasTarget || !strikingAllowed(ctx.ruleset)) return [];
   if (ctx.posture === 'ground' || ctx.posture === 'down' || ctx.posture === 'out') return [];
   const flags = strikingFlagsFor(ctx.ruleset);
   const profile = profileOf(ctx.self);
@@ -310,13 +341,104 @@ export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
       targetRegion: spec.targets[0],
       spec,
     }));
+    // UFCStats' non-significant strikes are mostly these: short punches and
+    // thigh/body knees in the clinch that carry no power (09 §4.1).
+    if (inClinch && homeInClinch && (spec.weapon === 'fist' || spec.weapon === 'knee')) {
+      out.push(mk(ctx, {
+        kind: 'strike',
+        id: spec.id,
+        family: 'clinchStrike',
+        defence: 'def.neutral',
+        moveX: 0,
+        moveZ: 0,
+        intentTag: `${spec.id}#short`,
+        rangeError: 0,
+        targetRegion: spec.weapon === 'knee' ? 'body' : spec.targets[0],
+        spec,
+        short: true,
+        base: basePrior('clinchStrike') * SHORT_STRIKE.clinchPriorMult,
+        risk: 0.10,
+      }));
+    }
+  }
+  return out;
+}
+
+/**
+ * Short-strike and ground-strike priors [E: Phase 9]. `clinchPriorMult` and
+ * `groundPriorMult` scale the short variant against the power one inside the
+ * same family (so with the family normalisation of the softmax they set the
+ * short share of clinch and ground strikes); `bottomMult` is the bottom
+ * fighter's striking against the top's.
+ */
+export const SHORT_STRIKE = Object.freeze({
+  // FIGHT_DATA §3 #5-#7, #23-#24: ~1.8 non-significant attempts a minute
+  // against 8.4 significant, living mostly in the clinch and on the mat —
+  // about 55 % of clinch strikes and 65 % of ground strikes are short.
+  clinchPriorMult: 1.2,
+  groundPriorMult: 1.8,
+  bottomMult: 0.35,
+});
+
+/**
+ * Ground-and-pound (03 §5.1): the strikes the node's GnP row lists for the
+ * top slot, and the §5.1 bottom row for a fighter on his back in a guard.
+ * Phase 9: the stand-up enumeration returned nothing on the ground, so the
+ * sim had no ground-and-pound at all — the "groundStrike" family was the
+ * posture/settle edges.
+ */
+export function groundStrikeCandidates(ctx: EnumerationContext): Candidate[] {
+  if (!ctx.hasTarget || ctx.posture !== 'ground' || !strikingAllowed(ctx.ruleset)) return [];
+  const node = ctx.node;
+  if (node === null || ctx.slot === null || !hasPositionNode(node)) return [];
+  if (!ctx.ruleset.ground.strikesAllowed) return [];
+  const role = roleFor(node, ctx.slot);
+  const fam = positionNode(node).family;
+  let ids: readonly string[];
+  let bottom = false;
+  if (role === 'top' || role === 'attacker') {
+    const prof = gnpProfile(node);
+    if (!prof) return [];
+    ids = prof.strikes;
+  } else if (role === 'bottom' && (fam === 'closedGuard' || fam === 'openGuard' || fam === 'half')) {
+    ids = BOTTOM_GNP.strikes.filter((x) => x !== 'tech.upkick');
+    bottom = true;
+  } else {
+    return [];
+  }
+  const flags = strikingFlagsFor(ctx.ruleset);
+  const behaviour = tierBehaviourFor(ctx.self);
+  if (!repertoireAllows(behaviour, 'groundStrike')) return [];
+  const out: Candidate[] = [];
+  const side = bottom ? SHORT_STRIKE.bottomMult : 1;
+  for (const id of ids) {
+    if (!hasTechnique(id as TechniqueId)) continue;
+    const spec = technique(id as TechniqueId);
+    if (!techniqueLegal(spec, flags)) continue;
+    for (const short of [false, true]) {
+      out.push(mk(ctx, {
+        kind: 'strike',
+        id: spec.id,
+        family: 'groundStrike',
+        defence: 'def.neutral',
+        moveX: 0,
+        moveZ: 0,
+        intentTag: short ? `${spec.id}#short` : spec.id,
+        rangeError: 0,
+        targetRegion: spec.targets[0],
+        spec,
+        ...(short ? { short: true } : {}),
+        base: basePrior('groundStrike') * side * (short ? SHORT_STRIKE.groundPriorMult : 1),
+        ...(short ? { risk: 0.10 } : {}),
+      }));
+    }
   }
   return out;
 }
 
 /** §2.4.5: feints unlock at T2 ("1 kind"), layered feints at T4. */
 export function feintCandidates(ctx: EnumerationContext): Candidate[] {
-  if (!ctx.hasTarget || ctx.posture !== 'standing') return [];
+  if (!ctx.hasTarget || ctx.posture !== 'standing' || !strikingAllowed(ctx.ruleset)) return [];
   const tier = ctx.self.strikingTier;
   if (tier < 2) return [];
   const out: Candidate[] = [];
@@ -467,10 +589,34 @@ export function defensiveCandidates(ctx: EnumerationContext): Candidate[] {
 // Grappling (§03)
 // ---------------------------------------------------------------------------
 
+const FEET_FAMILIES: ReadonlySet<string> = new Set(['standingFree', 'clinch']);
+
+/**
+ * Phase 9: does this edge, started on the feet, take the opponent down (to a
+ * mat node or into a leg attack)? Such edges spend the takedown budget
+ * whatever §2.3 table they sit in — a snap-down or an arm drag to the back
+ * puts a man on the mat as surely as a double leg (`grappling/takedowns.ts`
+ * counts them as attempts for the same reason).
+ */
+function takesDown(e: GrapplingEdge): boolean {
+  if (!e.from.some((n) => hasPositionNode(n) && FEET_FAMILIES.has(positionNode(n).family))) return false;
+  return e.to.some((d) => d.node !== 'same' && hasPositionNode(d.node)
+    && !FEET_FAMILIES.has(positionNode(d.node).family) && positionNode(d.node).family !== 'transient');
+}
+
 /** Map a §03 edge onto the family the plan weights. */
 export function familyForEdge(e: GrapplingEdge): ActionFamily {
+  if (e.id === 'tech.pull_guard') return 'guardPull';
+  if (e.kind === 'clinch' && takesDown(e)) return 'trip';
   switch (e.kind) {
     case 'entry': case 'capture':
+      if (e.id === 'tech.pull_guard') return 'guardPull';
+      // Phase 9: an entry that only ties up (cold entry, entry off strikes,
+      // hook into a body lock) is a clinch entry, not a shot.
+      if (e.kind === 'entry' && e.to.every((d) => d.node === 'same'
+        || (hasPositionNode(d.node) && positionNode(d.node).family === 'clinch'))) {
+        return 'clinchEntry';
+      }
       return e.id.includes('body_lock') ? 'bodylockTd'
         : e.id.includes('trip') || e.id.includes('sweep_single') ? 'trip'
           : 'shoot';
@@ -483,13 +629,23 @@ export function familyForEdge(e: GrapplingEdge): ActionFamily {
     case 'sweep': return 'sweep';
     case 'escape': return 'standUp';
     case 'getup': return e.id.includes('wall') ? 'wallWalk' : 'standUp';
-    case 'strike': case 'gnp': return 'groundStrike';
+    // Phase 9: the posture/settle edges are the top's control choice, not a
+    // strike; the ground strikes themselves are `groundStrikeCandidates`.
+    // The §2.3 `strike` rows (strike in the tie, sprawl knees, cage-pin
+    // strikes) are clinch work.
+    case 'gnp': return 'ride';
+    case 'strike': return 'clinchStrike';
     case 'defence': return 'sprawl';
     case 'subEntry': return 'submission';
     case 'counter': return 'counterWindow';
     case 'scramble': return 'sweep';
     case 'finish': return 'bodylockTd';
-    case 'chain': return 'pass';
+    // Phase 9: a chain inside a shot (single to double, double to high
+    // crotch, the re-shot) is one of the ways to finish that shot, so it
+    // shares the finishes' family. Filed as 'pass' it got a whole family's
+    // share of the choice to itself and was taken as often as all the
+    // finishes together — and most chains fail into the sprawl.
+    case 'chain': return 'bodylockTd';
     default: return 'clinchEntry';
   }
 }
@@ -504,6 +660,7 @@ function edgeAvailable(e: GrapplingEdge, ctx: EnumerationContext): boolean {
   // from a free node is the actor, so the slot is `a`.
   const slot = ctx.slot ?? 'a';
   if (e.actor !== slot) return false;
+  if (ON_THE_STRIKE_EDGES.has(e.id) && !ctx.oppStriking) return false;
   const r = e.requirements;
   if (r.cage === 'required' && !ctx.atCage) return false;
   if (r.cage === 'forbidden' && ctx.atCage) return false;
@@ -549,6 +706,7 @@ export function grapplingCandidates(ctx: EnumerationContext): Candidate[] {
       continue;
     }
     if (family === 'groundStrike' && !ctx.ruleset.ground.strikesAllowed) continue;
+    if (family === 'clinchStrike' && !strikingAllowed(ctx.ruleset)) continue;
     if (!repertoireAllows(behaviour, family)) continue;
     out.push(mk(ctx, {
       kind: 'grapple',
@@ -568,31 +726,32 @@ export function grapplingCandidates(ctx: EnumerationContext): Candidate[] {
 // Submissions (§04)
 // ---------------------------------------------------------------------------
 
-const SUBS_BY_POSITION = new Map<string, SubmissionSpec[]>();
-for (const s of SUBMISSION_CATALOGUE) {
-  for (const entry of s.entryPositions) {
-    const list = SUBS_BY_POSITION.get(entry.pos);
-    if (list) list.push(s);
-    else SUBS_BY_POSITION.set(entry.pos, [s]);
-  }
-}
+/**
+ * §04 §2.4.1 opportunity weights [E: Phase 9]. The catalogue marks each entry
+ * `continuous` (re-evaluated every decision: the RNC from back control), gated
+ * on a `trigger` event (`evt.hand_posted`, `evt.turn_away`) or neither. The
+ * trigger events are not tracked as such, so a triggered entry is offered at
+ * a fraction of the prior, standing in for the share of time the opening is
+ * actually there.
+ */
+export const SUB_OPPORTUNITY = Object.freeze({ continuous: 1.0, plain: 0.6, triggered: 0.25 });
 
 /**
- * §04's availability at this node, filtered by the ruleset legality matrix and
- * the fighter's own selection gates. `pos.*` ids are shared with §03, so the
- * node is the key.
+ * §04's availability at this node for this fighter's slot (the catalogue's
+ * own entry positions and roles, `grappling/subOffers.ts`), filtered by the
+ * ruleset legality matrix and the fighter's own selection gates.
  */
 export function submissionCandidates(ctx: EnumerationContext): Candidate[] {
   if (!ctx.ruleset.submissions.allowed) return [];
   const node = ctx.node;
-  if (node === null) return [];
+  if (node === null || ctx.slot === null) return [];
   if (ctx.outnumbered) return [];
-  const here = SUBS_BY_POSITION.get(node);
-  if (!here) return [];
+  const here = subOffers(node, ctx.slot);
+  if (here.length === 0) return [];
   const bjj = ctx.self.disciplines.bjj;
   const flex = ctx.self.effective.flexibility;
   const out: Candidate[] = [];
-  for (const s of here) {
+  for (const { spec: s, entry } of here) {
     if (!isLegalUnderRuleset(ctx.ruleset, s.id)) continue;
     const gates = s.gates;
     if (gates) {
@@ -602,7 +761,9 @@ export function submissionCandidates(ctx: EnumerationContext): Candidate[] {
       if (gates.explosivenessMin !== undefined && ctx.self.effective.explosiveness < gates.explosivenessMin) continue;
       if (gates.requiresGloves && ctx.ruleset.gloves.bareKnuckle) continue;
     }
-    const bottom = s.role === 'bottom';
+    const bottom = entry.role === 'bottom' || (entry.role === 'either' && ctx.slot === 'b');
+    const opportunity = entry.continuous ? SUB_OPPORTUNITY.continuous
+      : entry.trigger ? SUB_OPPORTUNITY.triggered : SUB_OPPORTUNITY.plain;
     out.push(mk(ctx, {
       kind: 'submission',
       id: s.id,
@@ -614,7 +775,7 @@ export function submissionCandidates(ctx: EnumerationContext): Candidate[] {
       rangeError: 0,
       // The catalogue's own finish-share target is the natural per-technique
       // prior: an RNC is chosen more often than a gogoplata because it works.
-      base: basePrior(bottom ? 'bottomSubmission' : 'submission') * (0.5 + 4 * s.finishShareTarget),
+      base: basePrior(bottom ? 'bottomSubmission' : 'submission') * (0.5 + 4 * s.finishShareTarget) * opportunity,
     }));
   }
   return out;
@@ -650,6 +811,7 @@ export function enumerateActions(
 ): Candidate[] {
   const out: Candidate[] = [];
   out.push(...strikeCandidates(ctx));
+  out.push(...groundStrikeCandidates(ctx));
   out.push(...feintCandidates(ctx));
   out.push(...grapplingCandidates(ctx));
   out.push(...submissionCandidates(ctx));

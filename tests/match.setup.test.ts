@@ -600,7 +600,10 @@ describe('carry-over', () => {
   });
 
   it('reads a real bout for the damage it did', () => {
-    const run = simulate(baseConfig('phase7a.ledger'));
+    // A bout long enough for both men to have been hit (Phase 9: the old
+    // seed now ends by an early submission before one of them is touched).
+    let run = simulate(baseConfig('phase7a.ledger'));
+    for (let i = 1; i < 12 && run.result.totalSeconds < 120; i++) run = simulate(baseConfig(`phase7a.ledger-${i}`));
     const zero = damageLedger(run.events, 0, run.result);
     const one = damageLedger(run.events, 1, run.result);
     expect(zero.head + zero.body + zero.legs).toBeGreaterThan(0);

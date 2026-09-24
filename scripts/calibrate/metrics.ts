@@ -20,7 +20,7 @@
  */
 import type { ResultRow } from '../batch/types';
 import {
-  Dataset, MEN_CODES, WOMEN_CODES, cardTotals, fighterUnits, fmin, isDec, isDraw, isFinish, isKoTko, isOther,
+  Dataset, MEN_CODES, WOMEN_CODES, cardTotals, fighterUnits, fmin, isDec, isDraw, isFinish, isKoTko, isOther, isStrikeKoTko,
   isSub, ptLA, winLose,
 } from './data';
 import {
@@ -340,20 +340,20 @@ export const MASTER_ROWS: readonly MasterRow[] = [
     compute: (d) => ({ comps: [P('jab head acc', accuracy(d.ufc, (f) => f.jab), 0.29, 0.03)] }) },
   { id: 27, section: 'Striking output', metric: 'Strike-type share of KO-causing strikes', target: 'punch 85% · knee 6% · kick 8% · other 1%', tolerance: '±5 pp', owner: '§05', status: 'core', population: UFC,
     compute: (d) => {
-      const fins = d.ufc.filter((r) => isKoTko(r.res.m) && r.fin?.k === 'strike');
+      const fins = d.ufc.filter((r) => isStrikeKoTko(r.res.m) && r.fin?.k === 'strike');
       const sh = (c: string[]) => share(fins, (r) => c.includes(r.fin!.cls));
       return { comps: [P('punch', sh(['punch']), 0.85, 0.05), P('knee', sh(['knee']), 0.06, 0.05), P('kick', sh(['kick']), 0.08, 0.05), P('other (incl. elbow)', sh(['elbow', 'other']), 0.01, 0.05)],
         note: 'Finishing strike = the winner\'s last landed strike before a KO/TKO.' };
     } },
   { id: 28, section: 'Striking output', metric: 'Ground finishing strikes', target: 'punches 83% · elbows 14% · knees 3%', tolerance: '±5 pp', owner: '§05/§03', status: 'core', population: UFC,
     compute: (d) => {
-      const fins = d.ufc.filter((r) => isKoTko(r.res.m) && r.fin?.k === 'strike' && r.fin.pos === 'ground');
+      const fins = d.ufc.filter((r) => isStrikeKoTko(r.res.m) && r.fin?.k === 'strike' && r.fin.pos === 'ground');
       const sh = (c: string) => share(fins, (r) => r.fin!.cls === c);
       return { comps: [P('punch', sh('punch'), 0.83, 0.05), P('elbow', sh('elbow'), 0.14, 0.05), P('knee', sh('knee'), 0.03, 0.05)] };
     } },
   { id: 29, section: 'Striking output', metric: 'Fight-ending punch type (KO/TKO)', target: 'rear straight 29% · lead hook 27% · rear hook 24% · other 20%', tolerance: '±6 pp', owner: '§02/§05', status: 'core', population: UFC,
     compute: (d) => {
-      const fins = d.ufc.filter((r) => isKoTko(r.res.m) && r.fin?.k === 'strike' && r.fin.cls === 'punch');
+      const fins = d.ufc.filter((r) => isStrikeKoTko(r.res.m) && r.fin?.k === 'strike' && r.fin.cls === 'punch');
       const kind = (id: string): string => id.startsWith('tech.cross') ? 'rs' : id.startsWith('tech.hook_lead') || id === 'tech.check_hook' ? 'lh' : id.startsWith('tech.hook_rear') ? 'rh' : 'o';
       const sh = (k: string) => share(fins, (r) => kind(r.fin!.id) === k);
       return { comps: [P('rear straight', sh('rs'), 0.29, 0.06), P('lead hook', sh('lh'), 0.27, 0.06), P('rear hook', sh('rh'), 0.24, 0.06), P('other', sh('o'), 0.20, 0.06)] };
@@ -417,27 +417,27 @@ export const MASTER_ROWS: readonly MasterRow[] = [
   // ---- Strikes to finish / absorption ---------------------------------------
   { id: 44, section: 'Strikes to finish / absorption', metric: 'KO/TKO fights: winner sig landed (mean / median)', target: '38 / 29', tolerance: '±5 / ±4', owner: '§05', status: 'core', population: UFC,
     compute: (d) => {
-      const xs = d.ufc.filter((r) => isKoTko(r.res.m) && winLose(r)).map((r) => winLose(r)![0].sig[0]);
+      const xs = d.ufc.filter((r) => isStrikeKoTko(r.res.m) && winLose(r)).map((r) => winLose(r)![0].sig[0]);
       return { comps: [N('mean', mean(xs), 38, 5), N('median', median(xs), 29, 4)] };
     } },
   { id: 45, section: 'Strikes to finish / absorption', metric: 'KO/TKO fights: winner head sig landed (mean / median)', target: '27 / 20', tolerance: '±4 / ±3', owner: '§05', status: 'core', population: UFC,
     compute: (d) => {
-      const xs = d.ufc.filter((r) => isKoTko(r.res.m) && winLose(r)).map((r) => ptLA(winLose(r)![0], null, 'head')[0]);
+      const xs = d.ufc.filter((r) => isStrikeKoTko(r.res.m) && winLose(r)).map((r) => ptLA(winLose(r)![0], null, 'head')[0]);
       return { comps: [N('mean', mean(xs), 27, 4), N('median', median(xs), 20, 3)] };
     } },
   { id: 46, section: 'Strikes to finish / absorption', metric: 'KO/TKO fights: loser head sig absorbed before stoppage (mean / median)', target: '11 / 6', tolerance: '±3 / ±2', owner: '§05/§06', status: 'core', population: UFC,
     compute: (d) => {
-      const xs = d.ufc.filter((r) => isKoTko(r.res.m) && winLose(r)).map((r) => winLose(r)![1].habs);
+      const xs = d.ufc.filter((r) => isStrikeKoTko(r.res.m) && winLose(r)).map((r) => winLose(r)![1].habs);
       return { comps: [N('mean', mean(xs), 11, 3), N('median', median(xs), 6, 2)] };
     } },
   { id: 47, section: 'Strikes to finish / absorption', metric: 'KO/TKO fight duration (mean / median)', target: '6.1 / 4.9 min', tolerance: '±0.7 / ±0.6', owner: '§05/§06', status: 'core', population: UFC,
     compute: (d) => {
-      const xs = d.ufc.filter((r) => isKoTko(r.res.m)).map(fmin);
+      const xs = d.ufc.filter((r) => isStrikeKoTko(r.res.m)).map(fmin);
       return { comps: [M('mean', mean(xs), 6.1, 0.7), M('median', median(xs), 4.9, 0.6)] };
     } },
   { id: 48, section: 'Strikes to finish / absorption', metric: 'Strikes in final 30 s before TKO', target: '18.5 (5–46), 92% to head', tolerance: '±4', owner: '§06/§07', status: 'core', population: UFC,
     compute: (d) => {
-      const rs = d.ufc.filter((r) => r.res.m.startsWith('tko') && r.l30);
+      const rs = d.ufc.filter((r) => r.res.m === 'tko' && r.l30);
       return { comps: [
         N('strikes in last 30 s', mean(rs.map((r) => r.l30![0])), 18.5, 4),
         P('to head', ratio(rs.map((r) => r.l30![1]), rs.map((r) => r.l30![0])), 0.92, 0.05, { info: true }),
@@ -445,7 +445,7 @@ export const MASTER_ROWS: readonly MasterRow[] = [
     } },
   { id: 49, section: 'Strikes to finish / absorption', metric: 'Post-KO strikes before referee intervenes; time to stoppage', target: '2.6 (0–20); 3.5 s (0–20)', tolerance: '±1; ±1.5 s', owner: '§06', status: 'core', population: UFC,
     compute: (d) => {
-      const rs = d.ufc.filter((r) => isKoTko(r.res.m) && r.lag);
+      const rs = d.ufc.filter((r) => isStrikeKoTko(r.res.m) && r.lag);
       return { comps: [N('extra strikes', mean(rs.map((r) => r.lag![1])), 2.6, 1), S('lag', mean(rs.map((r) => r.lag![0])), 3.5, 1.5)],
         note: 'Referee stoppages carrying a lag; extra strikes = winner\'s landed strikes inside the lag window.' };
     } },

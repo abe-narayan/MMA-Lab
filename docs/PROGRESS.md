@@ -152,3 +152,16 @@ comparing byte-for-byte.
 
 ## Open decisions
 1. ~~**Engine path**~~ — approved 2026-09-22: stay on the upgraded web stack.
+
+## UI polish pass — summary (details: `docs/design/UI_PASS.md`)
+- Design system: `src/app/theme.css` (stable token contract, light/dark, reduced motion) and
+  `src/app/ui/*` (Button, Tabs, Segmented, Slider, Select, Field, Switch, Dialog/confirm, Tooltip,
+  StatusBadge, Empty/Loading/Error states, Alert, Progress, Toasts with Undo, icons).
+- Shell: grouped left navigation with a collapsible rail; legacy v3 Replay/Dashboard/Model tabs
+  removed (the app no longer imports `src/ui|engine|render|replay|data`); new "About the model".
+- Fighter editor: Physical / Athletic / Technical / Style / Mental / Experience profile view with
+  Basic/Advanced, search, presets, comparison, undo/redo; every live control is verified to change
+  the bout by `tests/ui.params-effect.test.ts`; seven stored-but-unread controls are labelled.
+- New Batch simulation screen on a Web Worker pool with ETA, cancel, CIs and a digest fingerprint
+  that is identical for any worker count.
+- Fixed: import crash on prototype-named keys; tournament lost update.

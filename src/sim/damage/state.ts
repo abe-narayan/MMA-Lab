@@ -137,6 +137,13 @@ export interface RoundBreakOptions extends Partial<BreakOptions> {
 
 const TEN = 10;
 
+/**
+ * Delivered force below which a landed head strike does not count toward the
+ * referee's unanswered-strike tally [E: Phase 9] — roughly a third of an
+ * in-fight power punch's median (02 §2.2: cross 1,400 N, jab 900 N).
+ */
+export const UNANSWERED_MIN_FORCE_N = 300;
+
 export class DamageState {
   readonly t: Tuning;
   readonly regions: RegionSet = newRegionSet();
@@ -306,6 +313,7 @@ export class DamageState {
         fatigue: this.f,
         headStructural: this.regions.head.structural,
         neckCranked: this.has(S.neckCranked),
+        targetMassKg: this.profile.massKg,
       }, front);
       alphaEq = alpha.alphaEq;
 
@@ -339,7 +347,14 @@ export class DamageState {
         this.applyConcussiveOutcome(outcome, d[2], d[3], imp);
       }
 
-      this.unansweredHead += imp.placement === 'flush' || imp.placement === 'solid' ? 1 : 0;
+      // Phase 9: a referee counts *damaging* strikes; a short pitter-patter
+      // punch lands flush without hurting anyone, and counting it let one
+      // arm-punch on the mat stop a fight (06's "covering" test fired on the
+      // first unanswered strike).
+      if ((imp.placement === 'flush' || imp.placement === 'solid')
+        && front.fDel >= UNANSWERED_MIN_FORCE_N) {
+        this.unansweredHead += 1;
+      }
       this.applyCut(imp, site, side, d[4], d[5]);
       this.applyHeadRegionEvent(site, front.raw, d[6]);
       this.applyHeadThresholds(nowS, concussive, rockedNow, imp);
@@ -519,6 +534,7 @@ export class DamageState {
         { kind: 'hurt', cause: imp.tech, region: imp.region, severity: 1 },
         'dropped by accumulated damage',
       );
+      this.knockedDownDefenceReset();
       this.kdLog.push(nowS);
       this.knockedDownCue = { cause: 'legal_strike', kind: 'hurt' };
     }
@@ -528,7 +544,19 @@ export class DamageState {
     return this.has(S.knockdownHurt) || this.has(S.knockdownFlash) || this.has(S.ko);
   }
 
+  /**
+   * Phase 9: a knockdown wipes the "intelligent defence" clock. A fighter who
+   * had thrown a punch a second before he was dropped has not been defending
+   * himself *since*; carrying the old answer over let the referee's 3-s
+   * window (06 §2.3.3) run on while the follow-up strikes put him out.
+   */
+  private knockedDownDefenceReset(): void {
+    this.lastDefenceS = -1e9;
+    this.unansweredHead = 0;
+  }
+
   private emitKnockdown(kind: 'flash' | 'hurt' | 'ko', imp: StrikeImpact): void {
+    this.knockedDownDefenceReset();
     this.kdLog.push(this.nowS);
     this.knockedDownCue = { cause: 'legal_strike', kind };
     this.event('knockdown', { kind, cause: imp.tech, region: imp.region }, `knockdown (${kind})`);

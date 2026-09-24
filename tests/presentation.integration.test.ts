@@ -48,7 +48,7 @@ function boutFor(cfg: SimConfig): BoutPresentation {
   });
 }
 
-/** The demonstration bout's first `n` ticks (it takes the fight down at ~tick 340). */
+/** The demonstration bout's first `n` ticks. */
 function record(cfg: SimConfig, n: number): { frames: TickSnapshot[]; events: SimEvent[] } {
   const sim = createSim(cfg);
   const frames = [sim.snapshot()];
@@ -101,12 +101,20 @@ function fakeArena(): ArenaSet {
   };
 }
 
-// 'watch-demo-5' (Phase 9, engine 5.0.0): the calibrated sim takes this
-// demonstration bout down at ~tick 340; the old 'watch-demo' seed now ends by
-// a standing KO before any ground frame.
-const cfg = config('watch-demo-5');
+// The demonstration bout is *searched for* (Phase 9): the first watch-demo
+// seed whose first 520 ticks stand for a while and then go to the ground. A
+// hard-coded seed breaks every time calibration changes how bouts unfold.
+function demoSeed(): { cfg: SimConfig; rec: ReturnType<typeof record> } {
+  for (let i = 0; i < 40; i++) {
+    const c = config(i === 0 ? 'watch-demo' : `watch-demo-${i}`);
+    const r = record(c, 520);
+    const g = r.frames.findIndex((f) => f.engagements.some((e) => e.kind === 'ground'));
+    if (g > 60 && g < 420) return { cfg: c, rec: r };
+  }
+  throw new Error('no demonstration seed goes to the ground');
+}
+const { cfg, rec } = demoSeed();
 const bout = boutFor(cfg);
-const rec = record(cfg, 520);
 const groundIdx = rec.frames.findIndex((f) => f.engagements.some((e) => e.kind === 'ground'));
 
 // ---------------------------------------------------------------------------

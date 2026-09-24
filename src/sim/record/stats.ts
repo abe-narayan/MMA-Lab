@@ -18,7 +18,7 @@ import type { SimConfig } from '../core/config';
 import type { PositionId } from '../core/ids';
 import type { SimEvent } from './events';
 import {
-  grapplingEdge, hasGrapplingEdge, positionNode, hasPositionNode, roleFor,
+  hasPositionNode, isMatNode as isMatNodeShared, isReversal, isTakedownAttempt, positionNode, roleFor,
 } from '../grappling';
 
 /** Seconds a takedown must be held before UFCStats records it (09 §4.1). */
@@ -140,48 +140,51 @@ function phaseOf(node: PositionId | null): StrikePosition {
 }
 
 /**
- * "On the mat" for the §4.1 takedown rule, which is narrower than `phaseOf`.
- *
- * The §2.2.3 `attack` nodes (`pos.td_*`, `pos.throw_in_progress`) are *ground*
- * for striking purposes — a captured single leg is not distance striking — but
- * nobody is down yet: the shot is still contested. `transient` is the scramble
- * and the post-knockdown node, neither of which is a takedown either. A
- * takedown is scored only once the pair reaches a real ground position and
- * holds it (09 §4.1), so the stabilisation clock keys on this, not `phaseOf`.
+ * "On the mat" for the §4.1 takedown rule, which is narrower than `phaseOf`:
+ * the §2.2.3 `attack` nodes are ground for striking purposes but nobody is down
+ * yet, and `transient` is the scramble and the post-knockdown node. The
+ * definition is shared with the judges (`grappling/takedowns.ts`).
  */
 function isMatNode(node: PositionId | null): boolean {
-  if (node === null || !hasPositionNode(node)) return false;
-  const family = positionNode(node).family;
-  return family !== 'standingFree' && family !== 'clinch'
-    && family !== 'attack' && family !== 'transient';
+  return isMatNodeShared(node);
 }
 
-/**
- * Is this edge a takedown *attempt* in the UFCStats sense?
- *
- * `edgeEventKind` in the binder reports every §2.3 A `entry` edge as a
- * `takedown` event, because that is the event taxonomy 09 §3 gives it — but
- * the A group also holds the clinch entries (`tech.clinch_entry_cold`,
- * `tech.clinch_entry_strikes`) and `tech.pull_guard`, and UFCStats counts
- * none of those as takedown attempts. A shot is an entry that reaches the
- * §2.2.3 attack layer; everything else is a capture or a throw.
- */
-function isTakedownAttemptEdge(edgeId: string | undefined): boolean {
-  if (edgeId === undefined || !hasGrapplingEdge(edgeId)) return false;
-  const edge = grapplingEdge(edgeId);
-  if (edge.kind === 'capture' || edge.kind === 'throw') return true;
-  if (edge.kind !== 'entry') return false;
-  return edge.to.some((d) => hasPositionNode(d.node) && positionNode(d.node).family === 'attack');
-}
+/** A takedown attempt stays open this long for its chain to reach the mat. */
+const TD_CHAIN_SECONDS = 10;
 
 /**
- * 09 §4.1 significance: landed at distance always counts; in clinch or on the
- * ground only power strikes do. The event carries the technique id, which is
- * all that is needed to tell a jab from a power strike.
+ * 09 §4.1 significance, the FightMetric definition: every strike at distance
+ * counts; in the clinch and on the ground only *power* strikes do. A short
+ * strike (the event's `short` flag: an arm punch or thigh knee in the tie, a
+ * short punch on the mat), a jab-type strike and a punch from the bottom are
+ * total strikes only. This is the one definition — `record/stats.ts`, the
+ * batch summariser and the sim's own counters all call it (Phase 9; the old
+ * rule counted everything but jabs, so non-significant volume could not
+ * exist and the sig/total ratio sat at 0.97 against a real 0.72).
  */
-function isSignificant(technique: string, position: StrikePosition): boolean {
+export function isSignificantStrike(technique: string, position: StrikePosition, short = false): boolean {
   if (position === 'distance') return true;
-  return !technique.startsWith('tech.jab');
+  if (short) return false;
+  if (technique.startsWith('tech.jab')) return false;
+  return !NON_SIG_OFF_DISTANCE.has(technique);
+}
+
+/**
+ * A strike that goes on the books as landed (09 §4.1): a clean landing, or a
+ * kick that met a check — it made contact, which is what FightMetric counts,
+ * and what 02's `statLanded` and the sim's own running counters already said
+ * (Phase 9: this file counted only 'landed', so the live tallies and the
+ * computed stats disagreed by every checked kick).
+ */
+export function isStatLanded(result: string): boolean {
+  return result === 'landed' || result === 'checked';
+}
+
+/** Techniques that are never power strikes away from distance. */
+const NON_SIG_OFF_DISTANCE: ReadonlySet<string> = new Set(['tech.bottom_punch']);
+
+function isSignificant(technique: string, position: StrikePosition, short = false): boolean {
+  return isSignificantStrike(technique, position, short);
 }
 
 function targetBucket(region: string): 'head' | 'body' | 'leg' | null {
@@ -194,22 +197,14 @@ function targetBucket(region: string): 'head' | 'body' | 'leg' | null {
 /** Per-pair engagement state the time-based definitions need. */
 interface PairState {
   node: PositionId;
-  /** Fighter in slot `a` of the node. */
+  /** Fighter in slot `a` of the node (top / attacker / controlling). */
   a: number;
   b: number;
   /** Tick the pair reached the mat, or -1 while nobody is down. */
   tdTick: number;
-  /** Fighter credited with the takedown that put them here, or -1. */
+  /** Fighter credited with the takedown that put them here, or -1 for none. */
   tdBy: number;
   tdCounted: boolean;
-  /**
-   * Who shot. A takedown chain runs entry -> capture -> mat across several
-   * edges (`tech.double_leg` into `pos.td_double_leg_in`, then
-   * `tech.front_headlock_go_behind` into `pos.ground_turtle`), and only the
-   * first of those is a `takedown` event. This carries the shooter forward
-   * through the chain so the credit survives to the landing.
-   */
-  shooter: number;
 }
 
 /**
@@ -250,6 +245,16 @@ export function computeStats(
   const lastSubAttempt = new Map<string, number>();
   let round = 1;
 
+  // Open takedown attempts: shooter id -> tick the attempt started. A chain
+  // runs capture -> finish (or a throw straight to the mat) across one or
+  // more edges; the landing is credited to the shooter only if the chain puts
+  // him on top on the mat, once per attempt (Phase 9: a guard pull, a
+  // knockdown follow-up, an escape or a stuffed get-up that "re-created" the
+  // pair used to be credited as a landed takedown with no attempt behind it).
+  const openShot = new Map<number, number>();
+  const clearAfterTick: number[] = [];
+  let live = true;
+
   const clearPair = (id: number): void => {
     const p = pairOf.get(id);
     if (!p) return;
@@ -257,7 +262,7 @@ export function computeStats(
     pairOf.delete(p.b);
   };
 
-  const setPair = (a: number, b: number, node: PositionId, tick: number, byTakedown: boolean): void => {
+  const setPair = (a: number, b: number, node: PositionId, tick: number): void => {
     const prev = pairOf.get(a);
     const same = prev !== undefined
       && ((prev.a === a && prev.b === b) || (prev.a === b && prev.b === a));
@@ -267,12 +272,8 @@ export function computeStats(
     if (phaseOf(node) === 'distance') return;
 
     // §4.1: the stabilisation clock starts when the pair first reaches the mat
-    // and runs until they leave it. A position change *on* the mat — passing
-    // the guard, a sweep, a scramble that lands back in a ground position — is
-    // not a new takedown and does not cancel the one in progress; the old code
-    // rebuilt the pair from scratch on every event, so any improvement inside
-    // the three seconds silently erased the takedown.
-    const shooter = byTakedown ? a : (carried?.shooter ?? -1);
+    // and runs until they leave it. A position change *on* the mat is not a
+    // new takedown and does not cancel the one in progress.
     let tdTick = -1;
     let tdBy = -1;
     let tdCounted = false;
@@ -283,10 +284,18 @@ export function computeStats(
         tdCounted = carried.tdCounted;
       } else {
         tdTick = tick;
-        tdBy = shooter >= 0 ? shooter : a;
+        const role = roleFor(node, 'a');
+        const shotAt = openShot.get(a);
+        if ((role === 'top' || role === 'attacker') && shotAt !== undefined
+          && (tick - shotAt) * DT_S <= TD_CHAIN_SECONDS) {
+          tdBy = a;
+          openShot.delete(a);
+        }
+        // Whoever shot, the chain is over once the pair is down.
+        openShot.delete(b);
       }
     }
-    const p: PairState = { node, a, b, tdTick, tdBy, tdCounted, shooter };
+    const p: PairState = { node, a, b, tdTick, tdBy, tdCounted };
     pairOf.set(a, p);
     pairOf.set(b, p);
   };
@@ -300,7 +309,11 @@ export function computeStats(
         if (e.round > 0) round = e.round;
         applyEvent(e);
       }
+      for (const id of clearAfterTick) clearPair(id);
+      clearAfterTick.length = 0;
     }
+    // The break between rounds is not fight time: no position, no control.
+    if (!live) continue;
 
     // ---- integrate the tick ------------------------------------------------
     const rs = roundOf(round);
@@ -321,13 +334,20 @@ export function computeStats(
         if (f) f.controlSeconds += DT_S;
       }
       // Takedown stabilisation (§4.1: landed = held >= 3 s).
-      if (!p.tdCounted && p.tdTick >= 0 && isMatNode(p.node)
+      if (!p.tdCounted && p.tdTick >= 0 && p.tdBy >= 0 && isMatNode(p.node)
         && (tick - p.tdTick) * DT_S >= TD_HOLD_SECONDS) {
         p.tdCounted = true;
         const f = rs.fighters[p.tdBy];
         if (f) f.takedowns.landed++;
       }
     }
+  }
+
+  /** Slot `a` after a grapple event: `detail.a`, else (older logs) the actor. */
+  function slotAOf(e: SimEvent & { detail: { a?: number } }): [number, number] {
+    const a = e.detail.a;
+    if (a === undefined || a === e.actor) return [e.actor, e.target];
+    return [a, a === e.target ? e.actor : e.target];
   }
 
   function applyEvent(e: SimEvent): void {
@@ -340,8 +360,8 @@ export function computeStats(
         if (!actor) break;
         const pair = pairOf.get(e.actor);
         const position = phaseOf(pair ? pair.node : null);
-        const landed = e.detail.result === 'landed';
-        const sig = isSignificant(e.detail.technique, position);
+        const landed = isStatLanded(e.detail.result);
+        const sig = isSignificant(e.detail.technique, position, e.detail.short === true);
         actor.total.attempted++;
         if (landed) actor.total.landed++;
         if (sig) {
@@ -369,34 +389,52 @@ export function computeStats(
           list[e.round - 1] = (list[e.round - 1] ?? 0) + 1;
         }
         // A knockdown separates the pair: the downed fighter is not "controlled".
-        clearPair(e.target);
+        // The strike that caused it is logged *after* its damage events on
+        // the same tick, and was thrown from the pair's position: the pair
+        // is cleared once the tick's events are all in (Phase 9).
+        clearAfterTick.push(e.target);
         break;
       }
-      case 'takedown': {
-        // Not every `takedown` event is a takedown attempt: the §2.3 A group
-        // also holds the clinch entries and the guard pull, and counting those
-        // in the denominator is what drove takedown accuracy to single digits.
-        const isShot = isTakedownAttemptEdge(e.detail.edge);
-        if (actor && isShot) actor.takedowns.attempted++;
-        if (e.detail.result === 'success' && e.detail.to) {
-          setPair(e.actor, e.target, e.detail.to, e.tick, isShot);
-        }
-        break;
-      }
+      case 'takedown':
       case 'clinch':
       case 'engagementJoin':
       case 'positionChange':
       case 'scramble':
-      case 'reversal': {
-        if (e.kind === 'reversal' && actor) actor.reversals++;
-        if (e.detail.to) setPair(e.actor, e.target, e.detail.to, e.tick, false);
-        break;
-      }
+      case 'reversal':
       case 'standUp':
       case 'clinchBreak':
-      case 'disengage':
-        clearPair(e.actor);
-        clearPair(e.target);
+      case 'disengage': {
+        const d = e.detail;
+        const success = d.result === 'success';
+        // A contested edge the fighter lost the race for never started: it has
+        // no destination, and it changes nothing.
+        if (d.reason === 'contested') break;
+        // `engagementJoin` is the pair-opening twin of the edge's own event
+        // (same edge, same tick): count the attempt once, on the edge event.
+        if (actor && e.kind !== 'engagementJoin' && isTakedownAttempt(d.edge, d.from)) {
+          actor.takedowns.attempted++;
+          openShot.set(e.actor, e.tick);
+        }
+        if (actor && e.kind !== 'engagementJoin' && isReversal(d.edge, d.from, d.to, success, e.actor, d.a)) actor.reversals++;
+        if (d.to) {
+          const [a, b] = slotAOf(e as SimEvent & { detail: { a?: number } });
+          setPair(a, b, d.to, e.tick);
+        } else if (success && (e.kind === 'standUp' || e.kind === 'clinchBreak' || e.kind === 'disengage')) {
+          clearPair(e.actor);
+          clearPair(e.target);
+        }
+        // A chain that ends back on the feet, pair dissolved, is over.
+        if (!pairOf.has(e.actor)) openShot.delete(e.actor);
+        break;
+      }
+      case 'roundEnd':
+        // The engine separates the pair for the break (P0 break recovery).
+        pairOf.clear();
+        openShot.clear();
+        live = false;
+        break;
+      case 'roundStart':
+        live = true;
         break;
       case 'submissionStage': {
         if (!actor) break;

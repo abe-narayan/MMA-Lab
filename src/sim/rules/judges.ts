@@ -322,6 +322,15 @@ function dmgOf(l: RoundLedger, w: JudgeWeights): number {
     + w.dominantPosition * l.dominantPositionsGained;
 }
 
+/**
+ * One fighter's effective-scoring total for a round: damage plus dominance
+ * under these weights. 09 §4.3 scores teams and ffa by summing this across a
+ * side (Phase 9, QA-4).
+ */
+export function effectiveScore(l: RoundLedger, w: JudgeWeights, roundS: number): number {
+  return dmgOf(l, w) + domOf(l, w, roundS);
+}
+
 function domOf(l: RoundLedger, w: JudgeWeights, roundS: number): number {
   const span = roundS > 0 ? roundS : 1;
   return w.controlOffenceS * l.controlOffenceS
@@ -468,9 +477,14 @@ function tenPointScore(
     return [10, 10];
   }
 
+  // Phase 9: "significant damage" is damage *done to the other man*, so the
+  // test is the winner's damage over the loser's. An absolute threshold was
+  // crossed by any busy round once significant strikes ran at the real rate
+  // (45 % of judge-rounds came out 10-8 against a real 3-7 %, and the
+  // offsetting 10-8s made one decision in eight a draw).
   const sigDamage = sig.kd[w] >= 1
     || sig.rockedCaused[w] >= 2
-    || sig.dmg[w] >= p('judge.tenEightDamage');
+    || sig.dmg[w] - sig.dmg[l] >= p('judge.tenEightDamage');
   // Positional control alone never yields a 10-8: the loser must have been
   // stopped from doing anything, not merely held.             [S: RULES §2.2]
   const domination = sig.dom[w] >= p('judge.tenEightDom')
@@ -478,10 +492,13 @@ function tenPointScore(
   const t8 = p('judge.tenEight') * tenEightMult * j.propensity1008;
 
   let loserScore = 9;
-  if (sig.kd[w] >= 2
+  // Phase 9: two knockdowns make a 10-8, not automatically a 10-7 — the
+  // unified criteria keep 10-7 for overwhelming, sustained damage and
+  // dominance, and real 10-7s are a small fraction of a per cent of rounds.
+  if (sig.kd[w] >= 3
     || (sigDamage && domination && sig.dur[w] >= 0.8 && abs >= p('judge.tenSeven'))) {
     loserScore = 7;
-  } else if ((sigDamage && abs >= p('judge.tenEightKd')) || (abs >= t8 && domination)) {
+  } else if (sig.kd[w] >= 2 || (sigDamage && abs >= p('judge.tenEightKd')) || (abs >= t8 && domination)) {
     loserScore = 8;
   }
   const out: [number, number] = [0, 0];

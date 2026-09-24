@@ -31,6 +31,8 @@ import type { World, FighterWorldState } from '../core/world';
 import type { ObservedFighter, ObservedState } from '../core/perception';
 import { distanceToWall } from '../rules/arenas/types';
 import type { DefenceId, PositionId } from '../core/ids';
+import { hasPositionNode, positionNode } from '../grappling/graph';
+import { isTakedownAttempt } from '../grappling/takedowns';
 import {
   reachProfile, rangeFit, bandFor, bandLimits, isOpenStance, leadFootBattle,
   BAND_BOUNDS,
@@ -51,7 +53,8 @@ import {
   type BehaviourWeights, type TierBehaviour,
 } from './behaviour';
 import {
-  decisionTier, effectiveTau, scoreAction, softmaxSelect, tauForTier,
+  decisionTier, effectiveTau, familyShares, scoreAction, softmaxSelect, tauForTier,
+  type MassCap,
   type ConsiderationInputs, type WeightBundle,
 } from './utility';
 import {
@@ -69,7 +72,7 @@ import {
   COUNTER_ON_READ_MULT, type Cues,
 } from './perceive';
 import { patternReadP } from '../striking/defence';
-import type { OppFamily } from './families';
+import { STRIKE_FAMILIES, type OppFamily } from './families';
 import {
   adaptWeight, applyAdjustment, beliefToConfidence, buildAdjustment, candidateAdjustments,
   cornerCue, cornerUptakeP, defaultCornerTier, effectiveIqTier, evaluationDue,
@@ -164,10 +167,118 @@ export const FINISH_BUDGET: readonly number[] = [0.53, 0.30, 0.15];
 export const FINAL_ROUND_INTENT = 1.10;
 /** Default intended pace in strikes per minute when no plan says otherwise. */
 export const DEFAULT_PACE_TARGET = 14;
+/**
+ * Landed-to-thrown conversion for the pace target [E: Phase 9]: UFC total
+ * strike accuracy is 53 % (FIGHT_DATA §3 #6); the plan's `paceSLpM` is a
+ * landed rate, the controller runs on thrown strikes.
+ */
+export const PACE_NOMINAL_ACCURACY = 0.45;
+
+/**
+ * The pace governor's constants [E: tuned Phase 9]. `gain` scales the hazard
+ * (a combination's follow-up beats ride on one decision, so the gain sits
+ * below 1); `n` is the feedback exponent above target, `boost` the catch-up
+ * below it; the multipliers are per phase (see `strikeCap`).
+ */
+/**
+ * Submission-attempt hazard per minute in a position that offers one, by the
+ * attacker's side of the §03 node family [E: tuned Phase 9]. Anchors: 0.45
+ * attempts per fighter per 15 min and 40 % of fights with one (FIGHT_DATA §3
+ * #69-#71); the RNC is 39 % of submission finishes (#74), so the back is by
+ * far the busiest position.
+ */
+export const SUB_HAZARD_PER_MIN: Readonly<Record<string, number>> = Object.freeze({
+  'back:top': 1.8,
+  'mount:top': 0.75,
+  'side:top': 0.25,
+  'turtle:top': 0.5,
+  'half:top': 0.08,
+  'closedGuard:top': 0.03,
+  'openGuard:top': 0.05,
+  'closedGuard:bottom': 0.45,
+  'openGuard:bottom': 0.25,
+  'half:bottom': 0.08,
+  'legEntanglement:top': 0.5,
+  'legEntanglement:bottom': 0.5,
+  clinch: 0.12,
+  attack: 0.25,
+  standingFree: 0.05,
+  default: 0.1,
+});
+
+/**
+ * Clinch-entry attempts per minute from the feet [E: tuned Phase 9]: clinch
+ * time is 15 % of UFC fight time (FIGHT_DATA §3 #24); at 15-20 s a clinch
+ * that is about four successful entries per fighter per fifteen minutes.
+ */
+export const CLINCH_ENTRY_PER_MIN = 3.0;
+
+/**
+ * P(a free fighter follows a knocked-down opponent to the floor) per decision
+ * while the chance lasts [E: tuned Phase 9 to FIGHT_DATA §5 KD conversion].
+ */
+export const KNOCKDOWN_FOLLOW_P = 0.35;
+
+/** How long a measured finisher who stopped waits before trying again [E: Phase 9]. */
+export const FINISH_RETRY_MS = 10_000;
+
+/** Positional-edge attempts per minute in contact, by role [E: tuned Phase 9]. */
+export const GRAPPLE_TEMPO_PER_MIN = Object.freeze({ clinch: 5, top: 5, bottom: 12 });
+
+/** A submission-hunting plan's multiplier on the attempt hazard [E]. */
+export const SUB_HUNT_MULT = 1.5;
+
+/** UFC-level §01 SUB composites, the reference for the attempt hazard [D: pooled population]. */
+export const SUB_SKILL_REF = Object.freeze({ attack: 25, defence: 18 });
+
+/** Exponent of the defender-side opportunity (ref / subDefence) [E: tuned Phase 9, T7]. */
+export const SUB_OPPORTUNITY_EXP = 1.5;
+
+/**
+ * Pace by striking tier [E: tuned Phase 9 to 09 §7.3 T7]: regional fighters
+ * throw less (T2 6-7, T3 7.5-8 significant attempts a minute, UFC 8.4).
+ */
+export function tierPaceMult(tier: number): number {
+  return 0.55 + 0.11 * Math.max(0, Math.min(5, tier));
+}
+
+/** Takedown governor [E: tuned Phase 9]: gain on the plan's per-round target. */
+export const TD_GOVERNOR = Object.freeze({
+  gain: 2.6, boost: 3.0, n: 2.0, priorS: 60, floorPerRound: 0.15,
+});
+
+/**
+ * Feint and level-change budget per minute [E: Phase 9]. Once the shots are
+ * budgeted, the setups that lead to them (a level change is a SETUP edge,
+ * §2.3 A) took the freed mass and ran at ten a minute.
+ */
+export const FEINT_PER_MIN = 2.5;
+
+/** The families that spend the takedown budget. */
+export const TD_FAMILIES: ReadonlySet<string> = new Set([
+  'shoot', 'nakedShot', 'shootOffStrikes', 'bodylockTd', 'trip',
+]);
+
+/** Exchange clustering of the strike hazard [E: tuned Phase 9]. */
+export const EXCHANGE = Object.freeze({ windowS: 1.5, inMult: 5.0, outMult: 0.3 });
+
+export const PACE_GOVERNOR = Object.freeze({
+  gain: 1.4,
+  n: 2.0,
+  boost: 3.0,
+  finishMult: 5.0,
+  clinchMult: 0.75,
+  groundTopMult: 1.1,
+  groundBottomMult: 0.4,
+});
 
 /** Per-fighter AI state. Stored on `FighterWorldState.ai`, which is opaque. */
 export interface AiState {
   fighterId: number;
+  /** Phase 9: takedown attempts chosen this round, and which round that is. */
+  tdRound: { round: number; n: number };
+  /** Phase 9: tick of this fighter's last strike choice (exchange clustering). */
+  lastStrikeTick: number;
   plan: PlanView | null;
   /** `w_style(a)`: per-bout jittered style vector. */
   style: Record<ActionFamily, number>;
@@ -197,6 +308,8 @@ export interface AiState {
   finisher: FinisherProfile | null;
   /** ms until which the opponent is still believed to be hurt (§2.6.5). */
   oppHurtUntilMs: number;
+  /** Phase 9: a stopped measured finisher waits this long before re-reading a hurt cue. */
+  finishRetryAfterMs: number;
   /**
    * How many resolved outcomes the ledger has seen. The measured finisher's
    * stop rule is a hit-rate test, and a hit rate over zero landings is not a
@@ -340,6 +453,8 @@ export class MmaPolicy implements DecisionPolicy {
     };
     return {
       fighterId: f.id,
+      tdRound: { round: 1, n: 0 },
+      lastStrikeTick: -1_000_000,
       plan,
       style,
       model: new OpponentModel(iq),
@@ -356,6 +471,7 @@ export class MmaPolicy implements DecisionPolicy {
       hurtBehaviourId: null,
       finisher: null,
       oppHurtUntilMs: -Infinity,
+      finishRetryAfterMs: -Infinity,
       outcomesSeen: 0,
       reads: { attempts: 0, successes: 0, counters: 0, feintBites: 0 },
       cornerCues: [],
@@ -452,7 +568,7 @@ export class MmaPolicy implements DecisionPolicy {
 
     // --- perception (draws 1-3) -------------------------------------------
     const distanceM = Math.hypot(self.x - opp.x, self.z - opp.z);
-    const onTop = isTopRole(self.position);
+    const onTop = isTopRole(world, self);
     const context = buildContext(self.posture, distanceM, onTop, st.model.active ? 0.5 : 0, st.lastFamily);
     st.lastContext = context;
 
@@ -479,7 +595,31 @@ export class MmaPolicy implements DecisionPolicy {
     if (macroStep) return macroStep;
 
     const enumeration = this.buildEnumeration(st, self, world, opp, distanceM);
-    const candidates = enumerateActions(enumeration, opp.x - self.x, opp.z - self.z);
+    let candidates = enumerateActions(enumeration, opp.x - self.x, opp.z - self.z);
+    // Phase 9: a shot is one committed movement (§2.3 B). Once the leg is
+    // captured the shooter drives straight into a finish or a chain; he does
+    // not stop to throw a punch or wait while the defender works his
+    // sprawl, whizzer and hip heist on every free tick — which is how fewer
+    // than one shot in eight used to reach the mat against a real 38 %
+    // (FIGHT_DATA §3 #57).
+    if (enumeration.slot === 'a' && hasPositionNode(self.position)
+      && positionNode(self.position).family === 'attack') {
+      const chain = candidates.filter((c) => c.kind === 'grapple');
+      if (chain.length > 0) candidates = chain;
+    }
+    // Phase 9: a man on the floor in front of you is followed down — the
+    // fighter who dropped him jumps on (`tech.knockdown_follow`) far more often
+    // than he waves him up. As one candidate among fifty under the ordinary
+    // weights it was almost never chosen, and a flash knockdown was followed
+    // by a punch or two at a man on the floor and then nothing: 19 of 20
+    // flash knockdowns went unpunished and knockdown-to-finish conversion sat
+    // at ~50 % against a real 65 % (FIGHT_DATA §5). No new draw: the follow
+    // decision reuses this tick's target-region draw, which the follow edge
+    // does not read.
+    if (self.position === 'pos.ground_knockdown' && u.uTarget < KNOCKDOWN_FOLLOW_P) {
+      const follow = candidates.filter((c) => c.kind === 'grapple' && c.id === 'tech.knockdown_follow');
+      if (follow.length > 0) candidates = follow;
+    }
     if (candidates.length === 0) return waitDecision();
 
     st.tierWeights = behaviourWeights(st.behaviour, {
@@ -490,7 +630,7 @@ export class MmaPolicy implements DecisionPolicy {
       readSucceeded: st.pendingDefence !== null || st.counterWindowUntilMs >= world.nowMs,
       oppAdvancing: (opp.vx * (self.x - opp.x) + opp.vz * (self.z - opp.z)) > 0,
       afterExchange: self.lastStruckTick >= world.tick - 10 || st.lastSetupTick >= world.tick - 10,
-      onBottom: self.posture === 'ground' && !isTopRole(self.position),
+      onBottom: self.posture === 'ground' && !isTopRole(world, self),
       withinHalfMetre: distanceM < 0.5,
       fatigue: fatigueOf(self),
       oppCircles: Math.hypot(opp.vx, opp.vz) > 0.1,
@@ -517,7 +657,28 @@ export class MmaPolicy implements DecisionPolicy {
       scores[i] = scoreAction(c, inputs, this.weightsFor(st, self, opp, c)).score;
     }
 
-    const pick = softmaxSelect(scores, tau, u.uSelect);
+    const pick = softmaxSelect(
+      scores, tau, u.uSelect, familyShares(candidates.map((c) => c.family)),
+      [
+        this.strikeCap(st, self, world, candidates, opp),
+        this.submissionCap(st, self, world, candidates),
+        // A hurt fighter's §2.6.4 emergency (grab, shoot, tie up to survive)
+        // is not paced by the plan's budgets.
+        ...(st.intent.emergency === 'hurt' ? [] : [this.takedownCap(st, self, world, candidates)]),
+        {
+          mask: candidates.map((c) => c.family === 'levelChange' || c.family === 'feint'),
+          cap: (FEINT_PER_MIN / 60) * (world.params.get('core.dtMs') / 1000),
+        },
+        this.grappleTempoCap(self, world, candidates),
+        {
+          mask: candidates.map((c) => c.family === 'clinchEntry' && self.posture === 'standing'
+            && st.intent.emergency !== 'hurt'),
+          // A clinch fighter's plan weights the entry (planWeight up to x1.4).
+          cap: (CLINCH_ENTRY_PER_MIN / 60) * (world.params.get('core.dtMs') / 1000)
+            * planWeight(st.plan, 'clinchEntry'),
+        },
+      ],
+    );
     const chosen = candidates[pick < 0 ? 0 : pick];
 
     // A macro may start here: the utility layer chose its head action, and the
@@ -528,6 +689,11 @@ export class MmaPolicy implements DecisionPolicy {
       st.mustNotViolations.push({ mustNot: chosen.family, tick: world.tick });
     }
     st.lastFamily = chosen.family;
+    if (chosen.kind === 'strike' && STRIKE_FAMILIES.has(chosen.family)) st.lastStrikeTick = world.tick;
+    if (chosen.kind === 'grapple' && chosen.id !== null && isTakedownAttempt(chosen.id, self.position)) {
+      if (st.tdRound.round !== world.round) st.tdRound = { round: world.round, n: 0 };
+      st.tdRound.n += 1;
+    }
     st.consecutiveFeints = chosen.family === 'feint' ? st.consecutiveFeints + 1 : 0;
     if (isSetupAction(chosen)) st.lastSetupTick = world.tick;
     st.ledger.note('attempt', chosen.family);
@@ -566,7 +732,11 @@ export class MmaPolicy implements DecisionPolicy {
       inRecovery: opp.action !== 'idle' && opp.action !== 'move' && opp.actionPhase > 0.6,
       paceDrop: opp.visiblyTired ? 0.25 : 0,
       perceivedDamage: clamp01(1 - opp.balance),
-      hurtCueSeen: hurtSeen,
+      // Phase 9: nobody misses a knockdown. The per-tick hurt-cue roll is for
+      // the subtle signs (legs dipping, a hand reaching for the fence); a man
+      // on the floor is read by everyone, so the finish intent is not left to
+      // a per-tick roll the knockdown usually outlasts.
+      hurtCueSeen: hurtSeen || opp.posture === 'down',
     });
 
     // What the opponent is visibly doing is what the model counts.
@@ -958,7 +1128,13 @@ export class MmaPolicy implements DecisionPolicy {
       st.hurtBehaviourId = null;
     }
 
-    if (cues.oppHurt) st.oppHurtUntilMs = world.nowMs + OPP_HURT_BELIEF_MS;
+    // Phase 9: a measured finisher who gave up on this hurt episode does not
+    // re-read it on the very next tick. (The perception bug that hid every
+    // hurt cue also hid this loop: once cues flowed, a stopped finisher
+    // restarted every tick — hundreds of "smells the finish" a bout.)
+    if (cues.oppHurt && world.nowMs >= st.finishRetryAfterMs) {
+      st.oppHurtUntilMs = world.nowMs + OPP_HURT_BELIEF_MS;
+    }
     if (world.nowMs < st.oppHurtUntilMs) {
       if (st.finisher === null) {
         st.finisher = finisherProfile(
@@ -979,6 +1155,7 @@ export class MmaPolicy implements DecisionPolicy {
         st.finisher = null;
         st.intent.emergency = null;
         st.oppHurtUntilMs = -Infinity;
+        st.finishRetryAfterMs = world.nowMs + FINISH_RETRY_MS;
       }
     } else if (st.intent.emergency === 'finish') {
       st.finisher = null;
@@ -1004,7 +1181,7 @@ export class MmaPolicy implements DecisionPolicy {
       ruleset: world.ruleset,
       posture: self.posture,
       node: self.posture === 'standing'
-        ? standingNodeFor(self.runtime, distanceM)
+        ? (self.position === 'pos.ground_knockdown' ? self.position : standingNodeFor(self.runtime, distanceM))
         : self.position,
       slot: engagement ? (engagement.a === self.id ? 'a' : 'b') : null,
       distanceM,
@@ -1023,6 +1200,7 @@ export class MmaPolicy implements DecisionPolicy {
       positionValue: 0.5,
       mustNots: st.plan?.mustNots ?? [],
       shield: 0,
+      oppStriking: opp.action !== 'idle' && opp.action !== 'move' && hasTechnique(opp.action),
     };
   }
 
@@ -1055,12 +1233,184 @@ export class MmaPolicy implements DecisionPolicy {
       // "pure pressure without landed strikes does not win rounds". The target
       // is `tendencies.paceSLpM`, which is a landed rate, so a thrown rate on
       // top of it also compared two different units.
-      paceRatio: st.ledger.landedPerMin() / paceTarget,
+      // Phase 9: controlled on strikes *thrown* (the variable the fighter
+      // actually chooses), against the plan's landed target over a nominal
+      // accuracy. On the landed rate the attempt volume ran inversely to
+      // accuracy and the brake had no history at the bell.
+      paceRatio: st.ledger.paceEstimate(paceTarget / PACE_NOMINAL_ACCURACY, elapsedS)
+        / (paceTarget / PACE_NOMINAL_ACCURACY),
       dwellExceeded: dwellExceeded(st, self, world),
       lookahead: 0,
       intentRangeM: rangeTargetMetres(st.intent.rangeTarget, self.runtime),
       distanceM,
       effectiveIqTier: st.intent.effectiveIqTier,
+    };
+  }
+
+  /**
+   * Phase 9 pace governor (PHASE4_FINDINGS C-9). The plan's pace target is
+   * turned into a per-tick hazard of starting a strike — target strikes a
+   * minute over the 600 decisions a minute — scaled by a proportional
+   * feedback term on the fighter's own recent rate, and applied as a cap on
+   * the strike share of the softmax (`MassCap`). A multiplicative brake on the
+   * scores could not hold the rate: the utility has no absolute scale, so at
+   * close range, where nearly every candidate is a strike, halving every
+   * strike's score barely moved the choice, and the unbraked rate is 20-25 a
+   * minute. The position multipliers carry the observed difference in output
+   * between phases (FIGHT_DATA §3 #23-#24: 7 % of significant attempts in
+   * 15 % clinch time and 7 % in 24 % ground time, plus the non-significant
+   * volume that lives mostly on the mat).
+   */
+  private strikeCap(
+    st: AiState, self: FighterWorldState, world: World, candidates: readonly Candidate[],
+    opp: ObservedFighter,
+  ): MassCap {
+    const pacing = pacingFor(st.plan, world.round);
+    const landedTarget = Math.max(0.5, pacing?.paceTarget ?? st.intent.paceTarget);
+    const onTop = self.posture === 'ground' && isTopRole(world, self);
+    const posMult = self.posture === 'ground'
+      ? (onTop ? PACE_GOVERNOR.groundTopMult : PACE_GOVERNOR.groundBottomMult)
+      : self.posture === 'clinch' ? PACE_GOVERNOR.clinchMult : 1;
+    const target = (landedTarget / PACE_NOMINAL_ACCURACY) * posMult * tierPaceMult(self.runtime.strikingTier);
+    const est = st.ledger.paceEstimate(target, (world.roundTick * world.params.get('core.dtMs')) / 1000);
+    const ratio = est / target;
+    const gain = ratio <= 1 ? 1 + PACE_GOVERNOR.boost * (1 - ratio) : Math.pow(1 / ratio, PACE_GOVERNOR.n);
+    const dtS = world.params.get('core.dtMs') / 1000;
+    const perTick = (target / 60) * dtS;
+    // Exchanges, not a metronome: striking comes in bursts — a combination,
+    // the answer to it, the answer to that — separated by lulls of feinting
+    // and footwork (FIGHT_DATA §3 #127: over half of each round is "low
+    // intensity", no strike by either man in the last two seconds, at a pace
+    // that a steady rate would leave only ~40 % quiet). Inside an exchange
+    // (either man struck within `EXCHANGE.windowS`) the hazard is raised,
+    // outside it lowered; the feedback term keeps the minute's total.
+    // Standing only: clinch and ground work is continuous. [E: Phase 9]
+    let burst = 1;
+    if (self.posture === 'standing') {
+      const oppStriking = typeof opp.action === 'string' && opp.action.startsWith('tech.');
+      const inExchange = oppStriking
+        || (world.tick - st.lastStrikeTick) * dtS < EXCHANGE.windowS
+        || (world.tick - self.lastStruckTick) * dtS < EXCHANGE.windowS;
+      burst = inExchange ? EXCHANGE.inMult : EXCHANGE.outMult;
+    }
+    // A man who smells blood does not pace himself: in the §2.6 finish
+    // emergency the plan's pace no longer holds him back.
+    const finishing = st.intent.emergency === 'finish' ? PACE_GOVERNOR.finishMult : 1;
+    return {
+      mask: candidates.map((c) => c.kind === 'strike' && STRIKE_FAMILIES.has(c.family)),
+      cap: Math.min(1, PACE_GOVERNOR.gain * perTick * gain * burst * finishing),
+    };
+  }
+
+  /**
+   * Phase 9: the same governor for submission attempts. The utility has no
+   * absolute scale, so on the mat, once the strike share is capped, the
+   * freed mass went to whatever else the node offered — and the back, the
+   * mount and the turtle offer many submissions — which produced ten or more
+   * attempts per fifteen minutes against the real 0.45 (FIGHT_DATA §3 #69).
+   * Attempts are rare, opportunistic events: a per-tick hazard by the kind of
+   * position (a back taker works the choke almost continuously, a guard
+   * player rarely has the angle), scaled by the attacker's submission skill.
+   */
+  private submissionCap(
+    st: AiState, self: FighterWorldState, world: World, candidates: readonly Candidate[],
+  ): MassCap {
+    const mask = candidates.map((c) => c.kind === 'submission');
+    if (!mask.some(Boolean)) return { mask, cap: 1 };
+    const node = self.position;
+    const fam = hasPositionNode(node) ? positionNode(node).family : 'standingFree';
+    const top = isTopRole(world, self);
+    const perMin = SUB_HAZARD_PER_MIN[top ? `${fam}:top` : `${fam}:bottom`]
+      ?? SUB_HAZARD_PER_MIN[fam] ?? SUB_HAZARD_PER_MIN.default;
+    // The submission artist attacks far more often than the wrestler who
+    // happens to hold the same position: scaled by the §01 SUB composite
+    // (0-100) and by a submission-hunting plan.
+    // §01 SUB composites run ~20-25 at UFC level (the pooled population's
+    // subAttack ~23, subDefence ~18), ~7-9 at T2.
+    const skill = clamp01(self.runtime.grappling.subAttack / SUB_SKILL_REF.attack);
+    const hunt = st.plan?.primaryMode === 'mode.submission_hunt' ? SUB_HUNT_MULT : 1;
+    // Opportunity comes from the man underneath as much as the man on top:
+    // a weak submission defender leaves arms out and gives up his neck, which
+    // is why regional bouts see more attempts than the UFC does (FIGHT_DATA
+    // §3 #97 / 09 §7.3 T7: T2 0.7-1.0, T3 0.6-0.8, UFC 0.45 per 15 min).
+    const partner = self.partnerId === null ? null : world.fighters[self.partnerId];
+    const defSkill = Math.max(3, partner?.runtime.grappling.subDefence ?? SUB_SKILL_REF.defence);
+    const opportunity = Math.max(0.5, Math.min(3,
+      Math.pow(SUB_SKILL_REF.defence / defSkill, SUB_OPPORTUNITY_EXP)));
+    const perTick = (perMin / 60) * (world.params.get('core.dtMs') / 1000)
+      * (0.3 + 0.7 * skill) * opportunity * hunt;
+    return { mask, cap: Math.min(1, perTick) };
+  }
+
+  /**
+   * Phase 9: and for takedown attempts, from the plan's own per-round
+   * takedown target (`tdAttemptTarget`, 07 §2.5), which nothing read before.
+   * Shots, trips, throws and clinch takedowns share the budget.
+   */
+  private takedownCap(
+    st: AiState, self: FighterWorldState, world: World, candidates: readonly Candidate[],
+  ): MassCap {
+    // Only the edges that *start* a takedown spend the budget; the finish of a
+    // leg already captured is the same attempt, not a new one.
+    const mask = candidates.map((c) => c.kind === 'grapple' && c.id !== null
+      && isTakedownAttempt(c.id, self.position));
+    if (!mask.some(Boolean)) return { mask, cap: 1 };
+    const pacing = pacingFor(st.plan, world.round);
+    const perRound = Math.max(TD_GOVERNOR.floorPerRound, pacing?.tdAttemptTarget ?? TD_GOVERNOR.floorPerRound);
+    const roundS = Math.max(60, world.ruleset.rounds.lengthS || 300);
+    const dtS = world.params.get('core.dtMs') / 1000;
+    const perTick = (perRound / roundS) * dtS;
+    // Feedback on this round's count against the pro-rated target, shrunk by
+    // a prior so the first attempt of a round does not swing it.
+    const elapsedS = world.roundTick * dtS;
+    const done = st.tdRound.round === world.round ? st.tdRound.n : 0;
+    const prior = (perRound * TD_GOVERNOR.priorS) / roundS;
+    const ratio = (done + prior) / ((perRound * elapsedS) / roundS + prior);
+    const gain = ratio <= 1 ? 1 + TD_GOVERNOR.boost * (1 - ratio) : Math.pow(1 / ratio, TD_GOVERNOR.n);
+    void self;
+    return { mask, cap: Math.min(1, TD_GOVERNOR.gain * perTick * gain), exact: true };
+  }
+
+  /**
+   * Phase 9: the grappling tempo. In the clinch and on the mat the fighter
+   * who is free chose a positional edge (a pass, an escape, a pummel, a sweep)
+   * almost every time he was free — fifteen attempts a minute in contact,
+   * which spent the energy pools three to four times faster than the
+   * research bands (lactate 9 mmol/L by the middle of round 1, DAMAGE §4.1
+   * puts 10-21 at the *end* of a bout) and churned positions so fast that
+   * control time never accrued. Real grappling is positional: a top player
+   * holds, strikes and passes when the chance comes; a bottom player works
+   * frames and picks moments to explode. The edge attempts are capped at a
+   * per-minute hazard by role [E: tuned Phase 9]; takedown shots have their
+   * own budget.
+   */
+  private grappleTempoCap(
+    self: FighterWorldState, world: World, candidates: readonly Candidate[],
+  ): MassCap {
+    const inShot = hasPositionNode(self.position) && positionNode(self.position).family === 'attack';
+    const shooter = inShot && world.engagements.slotOf(self.id) === 'a';
+    const mask = candidates.map((c) => c.kind === 'grapple' && c.id !== null
+      && !isTakedownAttempt(c.id, self.position));
+    // Inside a shot the shooter's chain resolves at its own speed (§2.3 B
+    // durations). The defender's sprawl, whizzer and hip heist are already
+    // priced into the finish's baseP ("0.40 if the defender is already
+    // half-sprawled"); letting him also fire them on every free tick counted
+    // the defence twice, so his active counters share the contact tempo.
+    if (shooter || (!inShot && self.posture !== 'ground' && self.posture !== 'clinch')) {
+      return { mask, cap: 1 };
+    }
+    const perMin = self.posture === 'clinch' ? GRAPPLE_TEMPO_PER_MIN.clinch
+      : isTopRole(world, self) ? GRAPPLE_TEMPO_PER_MIN.top : GRAPPLE_TEMPO_PER_MIN.bottom;
+    // Better grapplers chain more (0.6x at T0 .. 1.4x at T5).
+    const tierMult = 0.6 + 0.16 * self.runtime.grapplingTier;
+    // Underneath, working to get up or sweep is not optional: it is a
+    // hazard, not a ceiling (a pinned man frames, shrimps and wall-walks
+    // whatever else the utility liked); on top and in the clinch it is a
+    // ceiling on an otherwise free choice.
+    const bottom = self.posture === 'ground' && !isTopRole(world, self) && !inShot;
+    return {
+      mask, cap: Math.min(1, (perMin / 60) * (world.params.get('core.dtMs') / 1000) * tierMult),
+      ...(bottom ? { exact: true } : {}),
     };
   }
 
@@ -1253,7 +1603,7 @@ export class MmaPolicy implements DecisionPolicy {
       moveX: c.moveX,
       moveZ: c.moveZ,
       intentTag: c.intentTag,
-      payload: { exec, family: c.family },
+      payload: { exec, family: c.family, ...(c.short ? { short: true } : {}) },
     };
   }
 
@@ -1471,8 +1821,17 @@ function phaseTierFor(
   return distanceM < 0.9 ? Math.max(rt.strikingTier, rt.disciplines.wrestling.tier) : rt.strikingTier;
 }
 
-function isTopRole(position: PositionId): boolean {
-  return !position.includes('bottom') && !position.includes('guard');
+/**
+ * Is this fighter the top / attacking / controlling slot of his engagement?
+ * Phase 9: this used to be read off the node id ("no 'bottom' or 'guard' in
+ * the name"), which called *both* fighters "on top" in side control, half
+ * guard, mount, the back and the turtle — the man underneath got the top's
+ * ground-and-pound budget and submission hazards, and no bottom tempo.
+ */
+function isTopRole(world: World, self: FighterWorldState): boolean {
+  if (!world.engagements.of(self.id)) return false;
+  const role = world.engagements.roleOf(self.id);
+  return role === 'top' || role === 'attacker';
 }
 
 /**

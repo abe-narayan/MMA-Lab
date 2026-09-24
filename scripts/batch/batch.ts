@@ -76,14 +76,18 @@ export function readResults(file: string, repair = false): ResultRow[] {
   const end = text.lastIndexOf('\n');
   if (repair && end + 1 < text.length) truncateSync(file, Buffer.byteLength(text.slice(0, end + 1)));
   const body = end >= 0 ? text.slice(0, end) : '';
-  const rows: ResultRow[] = [];
+  // One row per (cell, i): a `--resume` over a directory without a manifest
+  // re-runs bouts and appends them again. The last copy wins; rows are pure
+  // functions of their job, so the copies are identical anyway (Phase 9).
+  const byKey = new Map<string, ResultRow>();
   for (const line of body.split('\n')) {
     if (line.trim() === '') continue;
     try {
-      rows.push(JSON.parse(line) as ResultRow);
+      const row = JSON.parse(line) as ResultRow;
+      byKey.set(`${row.cell}#${row.i}`, row);
     } catch { /* a corrupt interior line is skipped and will be re-run */ }
   }
-  return rows;
+  return [...byKey.values()];
 }
 
 function machine(): Record<string, unknown> {

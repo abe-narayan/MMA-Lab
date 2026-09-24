@@ -13,6 +13,12 @@ export const MEN_CODES = ['FLW', 'BW', 'FW', 'LW', 'WW', 'MW', 'LHW', 'HW'] as c
 export const WOMEN_CODES = ['W-SW', 'W-FLW', 'W-BW'] as const;
 
 export const isKoTko = (m: string): boolean => m === 'ko' || m.startsWith('tko');
+/**
+ * A KO/TKO by strikes: not a doctor, corner or retirement stoppage. The
+ * finishing-strike and strikes-to-finish rows (27-29, 44-49) are about the
+ * strikes that ended the fight (Phase 9, reviewer item 2).
+ */
+export const isStrikeKoTko = (m: string): boolean => m === 'ko' || m === 'tko';
 export const isSub = (m: string): boolean => m.startsWith('submission');
 export const isDec = (m: string): boolean => m.startsWith('decision');
 export const isDraw = (m: string): boolean => m.startsWith('draw');

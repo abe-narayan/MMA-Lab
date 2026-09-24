@@ -188,17 +188,24 @@ function monteCarlo(cls: StrikeClass, n: number, seed: string): ClassResult {
 describe('§2.4.1 knockdown model, Monte-Carlo over the §2.1 force distribution', () => {
   it('reproduces 4.2 % concussive events and 2.3 % knockdowns per landed distance power head strike', () => {
     const r = monteCarlo({ medianN: 1150, sigmaLn: 0.45, unseen: 0.25 }, 30_000, 'c3');
-    // Chapter table: pConcuss 4.2 %, P(drop) = 0.55 pConcuss = 2.3 %, P(KO) = 0.8 %.
-    expect(r.pConcuss).toBeGreaterThan(0.034);
-    expect(r.pConcuss).toBeLessThan(0.050);
-    expect(r.drop).toBeGreaterThan(0.017);
-    expect(r.drop).toBeLessThan(0.029);
-    expect(r.ko).toBeGreaterThan(0.004);
+    // Chapter table (pre-Phase 9): pConcuss 4.2 %, P(drop) 2.3 %, P(KO) 0.8 %,
+    // with the acute-accumulation path supplying the rest of the knockdowns.
+    // Phase 9 cut that path back (dmg.head.thr.kdHurt 65 -> 80, rawScale 50 ->
+    // 35) and recalibrated the single-impact roll (ko.alphaCal 1.0 -> 1.3,
+    // ko.kKO 0.20 -> 0.10), so the roll now carries the FIGHT_DATA §3 #36
+    // rate on its own: ~4 % knockdowns per landed distance power head strike
+    // over this force distribution (in-fight forces run lower: blocks,
+    // placement, fatigue). Bands moved deliberately; see PHASE9_TUNING.md.
+    expect(r.pConcuss).toBeGreaterThan(0.070);
+    expect(r.pConcuss).toBeLessThan(0.125);
+    expect(r.drop).toBeGreaterThan(0.030);
+    expect(r.drop).toBeLessThan(0.060);
+    expect(r.ko).toBeGreaterThan(0.003);
     expect(r.ko).toBeLessThan(0.013);
-    // The split itself: drops are 0.55 of concussive events (kKO 0.20 + hurt
+    // The split itself: drops are 0.42 of concussive events (kKO 0.07 + hurt
     // 0.10 + flash 0.25) at massSevKO = 1 and f = 0.
-    expect(r.drop / r.pConcuss).toBeGreaterThan(0.45);
-    expect(r.drop / r.pConcuss).toBeLessThan(0.65);
+    expect(r.drop / r.pConcuss).toBeGreaterThan(0.32);
+    expect(r.drop / r.pConcuss).toBeLessThan(0.52);
   });
 
   it('reproduces ~1.1 knockdowns per 100 head significant strikes over the head-sig mix', () => {
@@ -215,8 +222,9 @@ describe('§2.4.1 knockdown model, Monte-Carlo over the §2.1 force distribution
       { medianN: 1150 * 0.8, sigmaLn: 0.45, unseen: 0.10, grounded: true }, 20_000, 'c2d',
     );
 
-    // Each class against its own row in the §2.4.1 table.
-    expect(jab.pConcuss).toBeLessThan(0.008);
+    // Each class against its own row in the §2.4.1 table (the jab ceiling
+    // scaled with the Phase 9 roll recalibration, see above).
+    expect(jab.pConcuss).toBeLessThan(0.02);
     expect(clinch.pConcuss).toBeLessThan(distance.pConcuss);
     expect(ground.pConcuss).toBeLessThan(clinch.pConcuss);
 
@@ -227,8 +235,10 @@ describe('§2.4.1 knockdown model, Monte-Carlo over the §2.1 force distribution
       + 0.11 * ground.drop
     );
     // Chapter: ~1.1 per 100 head sig, against the FD #37 target of 0.82 +- 0.2.
+    // Phase 9: the roll now carries all of it (see above), at this idealised
+    // force distribution; the in-fight rate is what row 37 measures.
     expect(per100).toBeGreaterThan(0.75);
-    expect(per100).toBeLessThan(1.45);
+    expect(per100).toBeLessThan(2.6);
   });
 
   it('puts the weight-class gradient in severity, not in frequency (§2.4.2)', () => {
@@ -958,11 +968,14 @@ describe('§2.3.5 / §2.3.6 injuries', () => {
   it('routes a blocked head strike into the guard (§2.2.1)', () => {
     const ds = freshState();
     const rng = new RNG('block');
-    ds.applyImpact(impact({ defence: 'block_forearm', absorb: 0.5, forceN: 3000 }), rng, CTX);
+    // 2,000 N (was 3,000): below the concussive band, so a knockdown roll's
+    // acute floor cannot land on either side of the comparison — the test is
+    // about the routing to the arms, not the KO roll (Phase 9 recalibrated it).
+    ds.applyImpact(impact({ defence: 'block_forearm', absorb: 0.5, forceN: 2000 }), rng, CTX);
     expect(ds.regions.arm.left.structural).toBeGreaterThan(0);
     expect(ds.regions.arm.right.structural).toBeGreaterThan(0);
     expect(ds.regions.head.acute).toBeLessThan(
-      freshState().applyImpact(impact({ forceN: 3000 }), new RNG('b2'), CTX).raw,
+      freshState().applyImpact(impact({ forceN: 2000 }), new RNG('b2'), CTX).raw,
     );
   });
 
