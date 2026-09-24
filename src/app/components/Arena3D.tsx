@@ -79,6 +79,8 @@ export interface Arena3DProps {
   /** False while the Watch tab is hidden: the frame loop stops. */
   active?: boolean;
   onBackend?: (backend: 'webgpu' | 'webgl2') => void;
+  /** The preset this machine should start on (stage/profiles.ts), once the renderer is up. */
+  onRecommendedQuality?: (level: QualityLevel) => void;
   onUnavailable?: (reason: string) => void;
   /** The loading card has lifted and the broadcast is on screen. */
   onLive?: () => void;
@@ -197,6 +199,11 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
       setStatus('ready');
       (window as unknown as { __presenter?: Presenter }).__presenter = presenter;
       propsRef.current.onBackend?.(b);
+      if (propsRef.current.onRecommendedQuality) {
+        presenter.recommendedQuality().then((rec) => {
+          if (!disposed) propsRef.current.onRecommendedQuality?.(rec.level);
+        }).catch(() => { /* keep the starting preset */ });
+      }
     }).catch((err: unknown) => {
       if (disposed) return;
       fail(err instanceof Error ? err.message : String(err));

@@ -40,6 +40,7 @@ import { ReplaySequencer, planReplays, type ReplayPlan } from '../../presentatio
 import { makeBroadcastBout } from '../components/broadcast';
 import { EventIndex, advanceBroadcast, lastSecondsReplayPlan, replayKey } from '../replay/broadcast';
 import { gpuLikelyAvailable, isQualityLevel, QUALITY_LEVELS, QUALITY_PRESETS } from '../../presentation/stage/index';
+import { initialQuality, readQualityChoice, writeQualityChoice } from '../../presentation/stage/profiles';
 import { PlayheadSignal } from '../replay/playhead';
 import { timelineMarkers, adjacentMarker, type TimelineMarker } from '../replay/markers';
 import { shortcutFor, type WatchAction } from '../replay/shortcuts';
@@ -194,7 +195,10 @@ export function Watch(props: WatchProps): JSX.Element {
   const [prefs] = useState(readViewPrefs);
   const [qa] = useState(urlOverrides);
   const [view, setView] = useState<'3d' | '2d'>(() => qa.view ?? prefs.view ?? (gpuLikelyAvailable() ? '3d' : '2d'));
-  const [quality, setQuality] = useState<QualityLevel>(() => qa.quality ?? prefs.quality ?? 'high');
+  // The preset: a URL override, else the viewer's explicit choice, else the
+  // machine's recommendation once the renderer can be probed (Medium until then).
+  const [quality, setQuality] = useState<QualityLevel>(() => qa.quality ?? initialQuality(readQualityChoice(), null));
+  const qualityChosenRef = useRef(qa.quality !== undefined || readQualityChoice() !== null);
   const [renderScale, setRenderScale] = useState<number | null>(qa.scale ?? prefs.scale);
   const [cameraId, setCameraId] = useState<string>(qa.cam ?? 'auto');
   const [followId, setFollowId] = useState(0);
@@ -226,7 +230,7 @@ export function Watch(props: WatchProps): JSX.Element {
   const library = useMemo(() => replayLibrary(), []);
 
   useEffect(() => {
-    writeViewPrefs({ view, quality, scale: renderScale, analytics, tab });
+    writeViewPrefs({ view, quality: null, scale: renderScale, analytics, tab });
   }, [view, quality, renderScale, analytics, tab]);
 
   // ---- loading -----------------------------------------------------------
@@ -776,6 +780,7 @@ export function Watch(props: WatchProps): JSX.Element {
       camera={{ mode: camera.mode, followId }}
       cameraOverride={camera.override}
       quality={quality}
+      onRecommendedQuality={(level) => { if (!qualityChosenRef.current) setQuality(level); }}
       renderScale={renderScale ?? undefined}
       debug={debug}
       labels={false}
@@ -917,6 +922,8 @@ export function Watch(props: WatchProps): JSX.Element {
                       onChange={(e) => {
                         const q = e.target.value;
                         if (isQualityLevel(q)) {
+                          qualityChosenRef.current = true;
+                          writeQualityChoice(q);
                           setQuality(q);
                           setRenderScale(null);
                         }
