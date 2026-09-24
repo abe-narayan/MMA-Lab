@@ -1,0 +1,10 @@
+import v8 from 'node:v8'; import vm from 'node:vm';
+import { simulate } from '../../src/sim';
+import { arch, cfg, withId } from './qa-lib';
+v8.setFlagsFromString('--expose-gc'); const gc = vm.runInNewContext('gc') as () => void;
+const heap = () => { gc(); gc(); return process.memoryUsage().heapUsed / 1048576; };
+const rpa = arch('arch.regional_pro_allrounder');
+const fs = [withId(arch('arch.champion_complete'), 'hero'), ...[0, 1, 2, 3, 4].map((i) => withId(rpa, `g${i}`))];
+const b = heap(); const t0 = performance.now();
+const r = simulate(cfg('qa-perf-1v5-1', fs, { mode: 'teams', teamOf: [0, 1, 1, 1, 1, 1], ruleset: 'mma.unified.5r' }), { record: true });
+console.log(`1v5 5R recorded: ${r.ticks} ticks, ${r.frames!.length} frames, ${(performance.now() - t0).toFixed(0)} ms, heap +${(heap() - b).toFixed(0)} MB, events ${r.events.length}, json ${(JSON.stringify(r.frames).length / 1048576).toFixed(0)} MB`);
