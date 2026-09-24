@@ -32,7 +32,7 @@
  *
  * Environment: HEAVY_SLOTS (default 3; the memory and CPU gates, not the slot
  * count, are what hold the 93 % cap), HEAVY_NEED_GB (default 1.6),
- * HEAVY_HEAP_MB (default 2048), HEAVY_CAP (default 0.93),
+ * HEAVY_HEAP_MB (default 2048), HEAVY_CAP (default 0.90, 3 points below the hard 93 % rule as headroom for load that starts after a job),
  * HEAVY_CPU_START (default 0.70), HEAVY_AFFINITY (hex mask, default 1F).
  */
 import { execFileSync, spawn } from 'node:child_process';
@@ -43,7 +43,7 @@ import { join } from 'node:path';
 const SLOTS = Number(process.env.HEAVY_SLOTS ?? 3);
 const NEED_GB = Number(process.env.HEAVY_NEED_GB ?? 1.6);
 const HEAP_MB = Number(process.env.HEAVY_HEAP_MB ?? 2048);
-const CAP = Number(process.env.HEAVY_CAP ?? 0.93);
+const CAP = Number(process.env.HEAVY_CAP ?? 0.90);
 const CPU_START = Number(process.env.HEAVY_CPU_START ?? 0.70);
 const AFFINITY = process.env.HEAVY_AFFINITY ?? '1F';
 // A slot whose owner process is gone is reclaimed at once; a live owner keeps
