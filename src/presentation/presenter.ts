@@ -345,7 +345,7 @@ export class Presenter implements Presenter3D {
       // so the set is told where the director puts it.
       arena = await this.deps.createArenaSet(bout.arena, q, {
         cosmeticSeed: bout.cosmeticSeed, cornerColours: bout.cornerColours,
-        hardCameraAngle: hardCameraAngle(bout),
+        hardCameraAngle: hardCameraAngle(bout), blood: bout.blood,
       });
     } catch (err) {
       console.warn('[presenter] createArenaSet failed, using the placeholder:', err);
@@ -353,6 +353,7 @@ export class Presenter implements Presenter3D {
     if (token !== this.boutToken) { arena?.dispose(); return; }
     this.modules.arena = arena ? 'module' : 'placeholder';
     this.arena = arena ?? createPlaceholderArena(bout.arena);
+    this.applyArenaRecording();
 
     // One module factory per presenter (review M2b): its preload is idempotent
     // and it owns the shared textures and materials every bout's bodies use.
@@ -465,6 +466,14 @@ export class Presenter implements Presenter3D {
     if (isBroadcastDirector(this.camera)) this.camera.setRecording(frames, events);
     this.corner?.setRecording(frames, events);
     this.finish?.setRecording(frames, events);
+    this.applyArenaRecording();
+  }
+
+  /** The canvas marks (sweat, blood) are baked from the recording (arena/marks.ts). */
+  private applyArenaRecording(): void {
+    if (!this.recording || !this.bout) return;
+    const set = this.arena as Partial<VenueSet> | null;
+    set?.setRecording?.(this.recording.frames, this.recording.events, { blood: this.bout.blood });
   }
 
   /** The instant replay on air (`ReplaySequencer.state`), or null for live. */

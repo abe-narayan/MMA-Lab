@@ -179,7 +179,7 @@ describe('presenter wiring', () => {
     await p.setBout(bout);
     expect(createArenaSet).toHaveBeenCalledTimes(1);
     expect(createArenaSet.mock.calls[0][2]).toEqual({
-      cosmeticSeed: bout.cosmeticSeed, cornerColours: bout.cornerColours, hardCameraAngle: hardCameraAngle(bout),
+      cosmeticSeed: bout.cosmeticSeed, cornerColours: bout.cornerColours, hardCameraAngle: hardCameraAngle(bout), blood: bout.blood,
     });
     expect(Math.abs(hardCameraAngle(bout))).toBeGreaterThan(3); // MAIN sits at 6 o'clock (-z)
     expect(setRecording).toHaveBeenCalledWith(rec.frames, rec.events);
