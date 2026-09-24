@@ -13,11 +13,11 @@ import { canonical, type Canonical } from './canonical';
 import { buildBodyGeometry } from './bodyMesh';
 import { buildRig, FINGER_BONES, fingersAtRest, handShapeRotations, type HandShape, type Rig } from './rigging';
 import { createSkinMaterial, makeSkinState, setPalette, type SkinState, type SkinTextures } from './skinMaterial';
-import { buildEyeGeometry, createEyeMaterial, irisColour } from './eyes';
+import { buildEyeGeometry, buildLashGeometry, createEyeMaterial, createLashMaterial, irisColour, irisInner, type EyeState } from './eyes';
 import { hashSeed } from './textures';
 import { resolveHair, skinPalette, hexToLinear } from './appearance';
 import { buildKit, type Kit, type KitTextures } from './kit';
-import { buildHair, type HairParts } from './hair';
+import { buildHair, ROW_FREQ, type HairParts } from './hair';
 
 export interface SharedResources {
   asset: BodyAsset;
@@ -53,6 +53,8 @@ export class FighterActor implements CharacterActor {
   private readonly rig: Rig;
   private readonly bodyMeshes: THREE.SkinnedMesh[] = [];
   private readonly eyes: THREE.SkinnedMesh;
+  private readonly lashes: THREE.SkinnedMesh | null = null;
+  private readonly eyeState: EyeState & { lash: THREE.Vector3 };
   private readonly kit: Kit;
   private readonly hair: HairParts;
   private readonly u: SkinState;
@@ -107,8 +109,15 @@ export class FighterActor implements CharacterActor {
       scattering: quality.skinScattering, sweatAndDamage: quality.sweatAndDamage, lm: res.can.lm,
     }));
 
-    // Body LODs.
-    const geo = buildBodyGeometry(res.asset, this.body, res.can);
+    // Body LODs (this fighter's sweat patches are seeded from the cosmetic seed and the id).
+    const seed = hashSeed(`${def.id}|${bout.cosmeticSeed}`);
+    const idHash = hashSeed(def.id);
+    u.seedOff = (seed % 9973) / 97;
+    u.browDensity = 0.75 + ((idHash >>> 8) % 100) / 100 * 0.45;
+    // Superficial veins show on lean fighters (and more on the well-defined).
+    const bf = def.body.bodyFatPct ?? 12;
+    u.veins = Math.max(0, Math.min(1, (19 - bf) / 11)) * (0.55 + 0.45 * u.definition);
+    const geo = buildBodyGeometry(res.asset, this.body, res.can, seed);
     geo.lods.forEach((g, i) => {
       const mesh = new THREE.SkinnedMesh(g, skin);
       mesh.name = `body-lod${i}`;
@@ -123,16 +132,33 @@ export class FighterActor implements CharacterActor {
     });
 
     // Eyes.
-    const seed = hashSeed(`${def.id}|${bout.cosmeticSeed}`);
     const eyeMat = res.material('eyes', () => createEyeMaterial());
     const eyeGeo = buildEyeGeometry(this.body);
     this.eyes = new THREE.SkinnedMesh(eyeGeo, eyeMat);
     this.eyes.name = 'eyes';
     this.eyes.bind(this.rig.skelA, new THREE.Matrix4());
     this.eyes.frustumCulled = false;
-    this.eyes.userData.eye = { iris: new THREE.Vector3(...irisColour(hashSeed(def.id))) };
+    const iris = irisColour(idHash);
+    this.eyeState = {
+      iris: new THREE.Vector3(...iris), iris2: new THREE.Vector3(...irisInner(iris)), red: 0.15,
+      // Lashes are darker than the scalp hair except on the darkest hair colours.
+      lash: new THREE.Vector3(hair.colour[0] * 0.35 + 0.004, hair.colour[1] * 0.35 + 0.003, hair.colour[2] * 0.35 + 0.0025),
+    };
+    this.eyes.userData.eye = this.eyeState;
     this.object3d.add(this.eyes);
     this.geometries.push(eyeGeo);
+    const lash = buildLashGeometry(res.asset, res.can, this.body);
+    if (lash) {
+      const lm = new THREE.SkinnedMesh(lash.geometry, res.material('lashes', () => createLashMaterial()));
+      lm.name = 'lashes';
+      lm.bind(this.rig.skelA, new THREE.Matrix4());
+      lm.frustumCulled = false;
+      lm.castShadow = false;
+      lm.userData.eye = this.eyeState;
+      this.object3d.add(lm);
+      this.geometries.push(lash.geometry);
+      this.lashes = lm;
+    }
 
     // Hair and kit.
     this.hair = buildHair(res, this.body, hair, this.rig, seed);
@@ -170,7 +196,16 @@ export class FighterActor implements CharacterActor {
       // A swollen orbit closes the lid (docs/design/08 §4.1.4: shut at structural ≥ 70).
       infl[FACE.eyesClosedL] = Math.min(1, infl[FACE.eyesClosedL] + 0.85 * smooth(0.55, 1, this.swellRef[0]));
       infl[FACE.eyesClosedR] = Math.min(1, infl[FACE.eyesClosedR] + 0.85 * smooth(0.55, 1, this.swellRef[1]));
+      this.syncLashes();
     }
+  }
+
+  /** The lash fringe carries the body's face/swelling morphs; keep its influences in step. */
+  private syncLashes(): void {
+    const src = this.bodyMeshes[0].morphTargetInfluences;
+    const dst = this.lashes?.morphTargetInfluences;
+    if (!src || !dst) return;
+    for (let i = 0; i < dst.length && i < src.length; i++) dst[i] = src[i];
   }
 
   setVisualState(s: CharacterVisualState): void {
@@ -195,7 +230,10 @@ export class FighterActor implements CharacterActor {
       infl[b] = this.swellRef[0]; infl[b + 1] = this.swellRef[1];
       infl[b + 2] = this.swellRef[3]; infl[b + 3] = this.swellRef[4];
       infl[b + 4] = this.swellRef[2]; infl[b + 5] = this.swellRef[2] * 0.7;
+      this.syncLashes();
     }
+    // Bloodshot eyes: a little from exertion, more from strikes around the eyes.
+    this.eyeState.red = clamp01(0.12 + 0.45 * clamp01(s.fatigue) + 0.6 * Math.max(z[0] ?? 0, z[1] ?? 0));
     for (let i = 0; i < 4; i++) {
       const c = s.cuts[i];
       const p = c ? this.cutSites[c.site] : undefined;
@@ -216,6 +254,7 @@ export class FighterActor implements CharacterActor {
     this.lod = l;
     this.bodyMeshes.forEach((m, i) => { m.visible = i === Math.min(2, l); });
     this.eyes.visible = l <= 1;
+    if (this.lashes) this.lashes.visible = l <= 0;
     this.hair.setLOD(l);
     this.kit.setLOD(l);
   }
@@ -249,7 +288,7 @@ function hairLook(style: string, facial: string): {
   scalp: number; recede: number; fade: number; stubble: number; beard: number; goatee: number; moustache: number; rows: number;
 } {
   const s = {
-    bald: [0, 0, 0], buzz: [0.85, 0, 0], fade: [0.9, 0, 1], crew: [0.95, 0, 0.35], curly: [1, 0, 0.2],
+    bald: [0, 0, 0], buzz: [0.97, 0, 0], fade: [0.9, 0, 1], crew: [0.95, 0, 0.35], curly: [1, 0, 0.2],
     cornrows: [1, 0, 0], braids: [1, 0, 0], receding: [0.8, 1.8, 0.2],
   }[style] ?? [0.9, 0, 0];
   return {
@@ -258,7 +297,8 @@ function hairLook(style: string, facial: string): {
     beard: facial === 'full' ? 1 : 0,
     goatee: facial === 'goatee' ? 1 : 0,
     moustache: facial === 'moustache' || facial === 'goatee' ? 1 : 0,
-    rows: style === 'cornrows' || style === 'braids' ? 1 : 0,
+    // Row frequency (rad/m) of the painted partings; hair.ts builds the rows at the same spacing.
+    rows: style === 'cornrows' ? ROW_FREQ.cornrows : style === 'braids' ? ROW_FREQ.braids : 0,
   };
 }
 

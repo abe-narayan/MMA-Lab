@@ -129,16 +129,20 @@ export function buildKit(
     const [t0, t1] = res.asset.header.ranges.teeth;
     const m = emptyMesh();
     const map = new Map<number, number>();
+    // A guard is bulky: it covers the teeth and the gum line, so it sits lower and a little
+    // proud of MakeHuman's upper-teeth helper (which hides entirely behind the upper lip) and
+    // shows below the lip whenever the mouth opens.
+    const drop = [0, -0.0026 * body.scale, 0.0012 * body.scale];
     for (let s = t0; s < t1; s++) {
       map.set(s, s - t0);
       for (let k = 0; k < 3; k++) {
-        m.pos.push(body.pos[s * 3 + k] + body.normal[s * 3 + k] * 0.0012);
+        m.pos.push(body.pos[s * 3 + k] + body.normal[s * 3 + k] * 0.0018 + drop[k]);
         m.nrm.push(body.normal[s * 3 + k]);
       }
     }
     const idx = res.asset.teethIndex;
     for (let i = 0; i < idx.length; i++) m.index.push(map.get(idx[i])!);
-    const solid = solidify(m, 0.0025);
+    const solid = solidify(m, 0.0034);
     const si: number[] = [], sw: number[] = [];
     for (let v = 0; v < solid.pos.length / 3; v++) { si.push(B.head, 0, 0, 0); sw.push(1, 0, 0, 0); }
     const mat = res.material('mouthguard', () => {

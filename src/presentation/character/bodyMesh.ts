@@ -7,6 +7,7 @@ import type { BodyAsset } from './asset';
 import type { BuiltBody } from './body';
 import type { Canonical } from './canonical';
 import { interleave } from './geom';
+import { sweatPropensity } from './anatomy';
 
 /** Three 0..1 values as 8-bit fields of one float (a·65536 + b·256 + c); exact in float32. */
 export function pack3(a: number, b: number, c: number): number {
@@ -20,7 +21,11 @@ export interface BodyGeometries {
   morphCount: number;
 }
 
-export function buildBodyGeometry(asset: BodyAsset, body: BuiltBody, can: Canonical): BodyGeometries {
+/**
+ * `seed` (cosmetic seed + fighter id) places this fighter's sweat patches: aFx.x is the regional
+ * propensity broken up by seeded noise (anatomy.ts `sweatPropensity`).
+ */
+export function buildBodyGeometry(asset: BodyAsset, body: BuiltBody, can: Canonical, seed = 0): BodyGeometries {
   const R = asset.renderSrc.length;
   const map = asset.renderSrc;
   const pos = new Float32Array(R * 3);
@@ -32,6 +37,13 @@ export function buildBodyGeometry(asset: BodyAsset, body: BuiltBody, can: Canoni
   const fx = new Float32Array(R * 4);
   const za = new Float32Array(R * 4);
   const zb = new Float32Array(R * 4);
+  const nBody = asset.header.counts.body;
+  const sweat = new Float32Array(nBody);
+  for (let s = 0; s < nBody; s++) {
+    const p = [can.pos[s * 3], can.pos[s * 3 + 1], can.pos[s * 3 + 2]] as const;
+    const n = [can.normal[s * 3], can.normal[s * 3 + 1], can.normal[s * 3 + 2]] as const;
+    sweat[s] = sweatPropensity(p, n, seed);
+  }
   for (let r = 0; r < R; r++) {
     const s = map[r];
     for (let k = 0; k < 3; k++) {
@@ -48,6 +60,7 @@ export function buildBodyGeometry(asset: BodyAsset, body: BuiltBody, can: Canoni
       zb[r * 4 + k] = can.zoneB[s * 4 + k];
     }
     misc[r * 4 + 3] = body.cavity[s];
+    fx[r * 4] = sweat[s];
   }
   const attrs: Record<string, THREE.BufferAttribute> = {
     position: new THREE.BufferAttribute(pos, 3),
@@ -60,13 +73,13 @@ export function buildBodyGeometry(asset: BodyAsset, body: BuiltBody, can: Canoni
   // inputs are three vec4s in one interleaved buffer (5 + 3 = 8 attributes). Low-precision masks
   // are packed three 8-bit values per float (exact in float32) and unpacked in the vertex stage:
   //   aRef  = (x, y, z, zones 0-2)
-  //   aMisc = (palm | thin | oil, cavity, zones 3-5, zones 6-7)
-  //   aFx   = (sweat, flush, wrap, mouth)
+  //   aMisc = (palm | thin | oil, cavity, zones 3-5, zones 6-7 | lash line)
+  //   aFx   = (sweat propensity (seeded), flush, wrap, static AO)
   const tmp = new THREE.BufferGeometry();
   interleave(tmp, R, [
     ['aRef', 4, (r) => [ref[r * 3], ref[r * 3 + 1], ref[r * 3 + 2], pack3(za[r * 4], za[r * 4 + 1], za[r * 4 + 2])]],
     ['aMisc', 4, (r) => [pack3(misc[r * 4], misc[r * 4 + 1], misc[r * 4 + 2]), misc[r * 4 + 3],
-      pack3(za[r * 4 + 3], zb[r * 4], zb[r * 4 + 1]), pack3(zb[r * 4 + 2], zb[r * 4 + 3], 0)]],
+      pack3(za[r * 4 + 3], zb[r * 4], zb[r * 4 + 1]), pack3(zb[r * 4 + 2], zb[r * 4 + 3], can.misc[map[r] * 4 + 3])]],
     ['aFx', 4, (r) => fx.subarray(r * 4, r * 4 + 4)],
   ]);
   const shared: Record<string, THREE.BufferAttribute | THREE.InterleavedBufferAttribute> = { ...attrs };

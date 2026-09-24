@@ -54,14 +54,16 @@ const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
  * with a slight red undertone, never grey. Luminance falls monotonically along the ramp.
  */
 const SKIN_KEYS: readonly RGB[] = [
-  [232, 196, 180],
-  [222, 182, 156],
-  [206, 160, 128],
-  [184, 134, 100],
-  [156, 106, 76],
-  [120, 78, 54],
-  [86, 55, 39],
-  [58, 38, 29],
+  // Pass 2: light-to-medium keys carry more blue (less orange) — measured skin albedo is less
+  // saturated than it looks, and the filmic tone curve saturates warm hues further.
+  [236, 200, 186],
+  [226, 186, 164],
+  [210, 166, 138],
+  [188, 140, 108],
+  [160, 112, 82],
+  [122, 81, 58],
+  [88, 56, 40],
+  [60, 39, 30],
 ];
 
 const SKIN_KEYS_LIN: RGB[] = SKIN_KEYS.map((k) => k.map((c) => srgbToLinear(c / 255)) as RGB);
@@ -96,8 +98,8 @@ export function skinPalette(tone: number): SkinPalette {
   const palmTone = skinAlbedo(t * 0.3);
   const palm: RGB = [palmTone[0] * 1.0, palmTone[1] * 0.93, palmTone[2] * 0.9];
   // Lips: redder on light skin; on dark skin a deeper brown-violet.
-  const lipLight: RGB = [0.3, 0.115, 0.1];
-  const lipDark: RGB = [0.05, 0.021, 0.019];
+  const lipLight: RGB = [0.34, 0.1, 0.09];
+  const lipDark: RGB = [0.055, 0.02, 0.02];
   const lips: RGB = [lerp(lipLight[0], lipDark[0], t), lerp(lipLight[1], lipDark[1], t), lerp(lipLight[2], lipDark[2], t)];
   const dark: RGB = [base[0] * lerp(0.78, 0.62, t), base[1] * lerp(0.7, 0.6, t), base[2] * lerp(0.7, 0.62, t)];
   const flush: RGB = [0.55, 0.1, 0.08];
@@ -123,18 +125,74 @@ export interface FacePreset {
   morphs: Readonly<Record<string, number>>;
 }
 
+// Pass 2: every preset uses MakeHuman's eye, nose, mouth, chin, cheek, brow and forehead targets
+// (not just head shape), so the ten read as ten different people at replay distance.
 export const FACE_PRESETS: readonly FacePreset[] = [
-  { label: 'Square jaw, straight nose', shape: [0.15, 0.15, 0.7], morphs: { 'head-square': 0.6, 'chin-width': 0.4, 'chin-bones': 0.3, 'eyebrows-trans-forward': 0.3 } },
-  { label: 'Broad nose, full lips, round crown', shape: [0.75, 0.05, 0.2], morphs: { 'head-round': 0.3, 'nose-scale-horiz': 0.3, 'mouth-lowerlip-volume': 0.3, 'chin-width': 0.2 } },
-  { label: 'High cheekbones, soft brow', shape: [0.1, 0.75, 0.15], morphs: { 'cheek-bones': 0.5, 'head-diamond': 0.3, 'nose-hump': -0.3 } },
-  { label: 'Balanced oval', shape: [0.34, 0.33, 0.33], morphs: { 'head-oval': 0.5 } },
-  { label: 'Long face, prominent nose', shape: [0.15, 0.05, 0.8], morphs: { 'head-rectangular': 0.5, 'nose-hump': 0.5, 'nose-scale-vert': 0.3, 'chin-height': 0.3 } },
-  { label: 'Angular, strong chin', shape: [0.6, 0.05, 0.35], morphs: { 'chin-prominent': 0.5, 'chin-bones': 0.5, 'nose-flaring': 0.3, 'cheek-bones': 0.3 } },
-  { label: 'Round, wide cheeks', shape: [0.2, 0.55, 0.25], morphs: { 'head-round': 0.5, 'cheek-volume': 0.4, 'head-fat': 0.2 } },
-  { label: 'Veteran brawler: flattened nose, heavy brow', shape: [0.2, 0.1, 0.7], morphs: { 'nose-compression-compress': 0.7, 'nose-scale-horiz': 0.4, 'eyebrows-trans-forward': 0.6, 'chin-width': 0.5, 'ear-flap': 0.5, 'ear-scale-depth': 0.4 } },
-  { label: 'Diamond, sharp cheekbones', shape: [0.45, 0.1, 0.45], morphs: { 'head-diamond': 0.5, 'cheek-bones': 0.6, 'chin-width': -0.3 } },
-  { label: 'Narrow jaw, slim nose', shape: [0.05, 0.35, 0.6], morphs: { 'head-triangular': 0.4, 'nose-scale-horiz': -0.4, 'chin-width': -0.3 } },
+  { label: 'Square jaw, straight nose', shape: [0.15, 0.15, 0.7], morphs: {
+    'head-square': 0.6, 'chin-width': 0.45, 'chin-bones': 0.4, 'eyebrows-trans-forward': 0.35, 'nose-width1': -0.2, 'nose-greek': 0.3,
+    'eye-height2': -0.3, 'mouth-scale-horiz': 0.15, 'forehead-scale-vert': 0.25, 'mouth-upperlip-height': -0.2 } },
+  { label: 'Broad nose, full lips, round crown', shape: [0.75, 0.05, 0.2], morphs: {
+    'head-round': 0.35, 'nose-scale-horiz': 0.4, 'nose-width3': 0.35, 'nose-nostrils-width': 0.45, 'nose-point': -0.25,
+    'mouth-lowerlip-volume': 0.5, 'mouth-upperlip-volume': 0.4, 'mouth-scale-horiz': 0.2, 'chin-width': 0.25, 'forehead-nubian': 0.35, 'eye-scale': 0.15 } },
+  { label: 'High cheekbones, hooded eyes', shape: [0.1, 0.75, 0.15], morphs: {
+    'cheek-bones': 0.6, 'head-diamond': 0.3, 'nose-hump': -0.35, 'eye-epicanthus': -0.5, 'eye-eyefold-angle': 0.35, 'eye-height1': -0.35,
+    'nose-scale-vert': -0.25, 'mouth-cupidsbow': 0.35, 'chin-prominent': -0.1, 'forehead-temple': 0.25, 'nose-base': 0.2 } },
+  { label: 'Balanced oval', shape: [0.34, 0.33, 0.33], morphs: {
+    'head-oval': 0.5, 'eye-scale': 0.2, 'mouth-scale-vert': 0.15, 'nose-point': 0.15, 'cheek-inner': 0.2, 'mouth-dimples': 0.3 } },
+  { label: 'Long face, prominent nose', shape: [0.15, 0.05, 0.8], morphs: {
+    'head-rectangular': 0.55, 'nose-hump': 0.6, 'nose-scale-vert': 0.4, 'nose-move': 0.35, 'nose-point': -0.3, 'chin-height': 0.35,
+    'chin-jaw-drop': 0.25, 'forehead-scale-vert': 0.3, 'eye-trans': -0.2, 'mouth-scale-horiz': -0.15, 'cheek-inner': -0.35, 'head-scale-vert': 0.25 } },
+  { label: 'Angular, strong chin', shape: [0.6, 0.05, 0.35], morphs: {
+    'chin-prominent': 0.55, 'chin-bones': 0.55, 'chin-cleft': 0.45, 'nose-flaring': 0.35, 'cheek-bones': 0.35, 'eyebrows-trans-forward': 0.4,
+    'mouth-angles': -0.35, 'eye-corner1': 0.25, 'head-invertedtriangular': 0.2, 'chin-triangle': 0.3 } },
+  { label: 'Round, wide cheeks', shape: [0.2, 0.55, 0.25], morphs: {
+    'head-round': 0.55, 'cheek-volume': 0.45, 'head-fat': 0.3, 'nose-scale-horiz': 0.2, 'nose-point-width': 0.35, 'eye-height2': -0.3,
+    'mouth-scale-horiz': -0.2, 'chin-width': 0.3, 'eye-bag': 0.35, 'mouth-upperlip-volume': 0.2 } },
+  { label: 'Veteran brawler: flattened, crooked nose, heavy brow', shape: [0.2, 0.1, 0.7], morphs: {
+    'nose-compression-compress': 0.7, 'nose-scale-horiz': 0.45, 'nose-width2': 0.4, 'asym-nose-2-l': 0.6, 'asym-nose-1-r': 0.35,
+    'eyebrows-trans-forward': 0.65, 'forehead-trans-forward': 0.3, 'chin-width': 0.5, 'ear-flap': 0.6, 'ear-scale-depth': 0.5,
+    'eye-bag': 0.45, 'eye-height1': -0.25, 'mouth-lowerlip-volume': 0.2 } },
+  { label: 'Diamond, sharp cheekbones, narrow chin', shape: [0.45, 0.1, 0.45], morphs: {
+    'head-diamond': 0.55, 'cheek-bones': 0.65, 'chin-width': -0.35, 'chin-triangle': 0.45, 'nose-width1': -0.2, 'eye-corner1': 0.35,
+    'eye-scale': 0.2, 'mouth-upperlip-volume': 0.25, 'forehead-temple': -0.3, 'cheek-trans': 0.25 } },
+  { label: 'Narrow jaw, slim nose, deep-set eyes', shape: [0.05, 0.35, 0.6], morphs: {
+    'head-triangular': 0.45, 'nose-scale-horiz': -0.45, 'nose-width3': -0.3, 'nose-point': 0.25, 'chin-width': -0.35, 'eye-push1': -0.45,
+    'eyebrows-trans-forward': 0.3, 'mouth-scale-horiz': -0.2, 'mouth-lowerlip-volume': -0.2, 'cheek-inner': 0.3, 'eyebrows-trans': -0.25 } },
 ];
+
+/** MPFB asymmetry families (`asym-<part>-l|r` targets). */
+export const ASYM_PARTS = ['brown-1', 'brown-2', 'cheek-1', 'cheek-2', 'ear-1', 'ear-2', 'eye-1', 'eye-2', 'eye-3', 'eye-4',
+  'eye-5', 'eye-6', 'jaw-1', 'jaw-2', 'jaw-3', 'mouth-1', 'mouth-2', 'nose-1', 'nose-2', 'nose-3', 'temple-1', 'top-1'] as const;
+
+/** Small FNV-1a hash (identity-stable; no three.js here). */
+function hash32(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return h >>> 0;
+}
+
+/**
+ * A fighter's own small departures from the preset, seeded by the fighter id (stable across
+ * bouts): six asymmetry targets at 0.12-0.4 on a random side, and gentle symmetric variation of
+ * the eyes, nose, mouth, chin and brow. No real face is symmetric; these keep two fighters with
+ * the same preset from being twins.
+ */
+export function faceVariation(id: string): Map<string, number> {
+  let st = hash32(`face|${id}`) || 1;
+  const rnd = (): number => { st ^= st << 13; st ^= st >>> 17; st ^= st << 5; return (st >>> 0) / 4294967296; };
+  const out = new Map<string, number>();
+  const parts = [...ASYM_PARTS];
+  for (let k = 0; k < 6; k++) {
+    const i = Math.floor(rnd() * parts.length);
+    const part = parts.splice(i, 1)[0];
+    out.set(`asym-${part}-${rnd() < 0.5 ? 'l' : 'r'}`, 0.12 + 0.28 * rnd());
+  }
+  for (const [k, amp] of [['eye-scale', 0.15], ['nose-scale-horiz', 0.15], ['mouth-scale-horiz', 0.12], ['chin-prominent', 0.15],
+    ['eyebrows-trans', 0.2], ['nose-point', 0.15], ['mouth-lowerlip-volume', 0.15], ['cheek-bones', 0.15]] as const) {
+    out.set(k, (rnd() * 2 - 1) * amp);
+  }
+  return out;
+}
 
 /**
  * Friendly `faceMorphs` keys (the creator's sliders, -1..1) → target short names. Any other key
@@ -154,7 +212,11 @@ export interface ResolvedFace {
   morphs: Map<string, number>;
 }
 
-export function resolveFace(app: AppearanceSpec | undefined): ResolvedFace {
+/**
+ * The face for an appearance. `id` (the fighter id) adds the fighter's seeded asymmetry and small
+ * variations; omit it for the bare preset.
+ */
+export function resolveFace(app: AppearanceSpec | undefined, id?: string): ResolvedFace {
   const n = FACE_PRESETS.length;
   let idx = app?.facePreset;
   if (idx === undefined || !Number.isFinite(idx)) {
@@ -164,6 +226,10 @@ export function resolveFace(app: AppearanceSpec | undefined): ResolvedFace {
   const preset = FACE_PRESETS[((Math.floor(idx) % n) + n) % n];
   const shape: [number, number, number] = [...preset.shape];
   const morphs = new Map<string, number>(Object.entries(preset.morphs));
+  // The fighter's own variation on top of the preset (added, not replacing).
+  if (id !== undefined) {
+    for (const [k, v] of faceVariation(id)) morphs.set(k, Math.max(-1, Math.min(1, (morphs.get(k) ?? 0) + v)));
+  }
   const fm = app?.faceMorphs ?? {};
   const keys = Object.keys(fm).sort();
   for (const k of keys) {

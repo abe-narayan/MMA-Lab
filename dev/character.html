@@ -13,11 +13,13 @@
   #ui select { background: #222; color: #ddd; border: 1px solid #444; }
   #stats { position: fixed; bottom: 8px; left: 8px; background: rgba(10,10,12,0.7); padding: 4px 8px; border-radius: 4px; white-space: pre; }
   body.clean #ui, body.clean #stats { display: none; }
+  #labels .lab { position: fixed; color: #f2f2f2; font: 600 13px/1.2 system-ui, sans-serif; text-shadow: 0 1px 2px #000; letter-spacing: 0.04em; pointer-events: none; }
 </style>
 </head>
 <body>
 <div id="app"></div>
 <div id="ui"></div>
+<div id="labels"></div>
 <div id="stats">loading…</div>
 <script type="module" src="./character.ts"></script>
 </body>

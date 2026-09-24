@@ -10,6 +10,7 @@
 import { B } from '../rig/skeleton';
 import type { BodyAsset } from './asset';
 import { aPoseToT, deriveJoints, skinToT, computeNormals } from './body';
+import { lashAt, sweatRegion } from './anatomy';
 
 type V3 = [number, number, number];
 
@@ -23,9 +24,9 @@ export interface Canonical {
   pos: Float32Array;
   normal: Float32Array;
   lm: CanonicalLandmarks;
-  /** Per src body vertex: palm/sole, thin (back-scatter), oil (T-zone), 0. */
+  /** Per src body vertex: palm/sole, thin (back-scatter), oil (T-zone), lash line. */
   misc: Float32Array;
-  /** Per src body vertex: sweat weight, flush weight, forearm/shin (wrap) mask, 0. */
+  /** Per src body vertex: regional sweat propensity, flush weight, hand-wrap mask, static AO (1 = open). */
   fx: Float32Array;
   /** Damage zones 0-3 and 4-7 (docs/design/08 §2.2 order), legs as LEFT (6) / RIGHT (7). */
   zoneA: Float32Array;
@@ -128,11 +129,8 @@ export function canonical(asset: BodyAsset): Canonical {
     const palm = wh * smooth(0.15, 0.65, -ny) + wf * smooth(0.35, 0.85, -ny) * smooth(0.05, 0.0, p[1]);
     const thin = Math.min(1, 0.8 * w(s, fingers) + 0.45 * g(p, noseTip, 1.2 * r) + 0.25 * wf * smooth(0.12, 0.2, p[2]));
     const oil = head * Math.min(1, g(p, noseTip, 2.5 * r, 1.6) + g(p, [cx, cy + 3.2 * r, eyeL[2] + 0.4 * r], 3.2 * r, 0.7) * 0.8 + 0.25 * g(p, chin, 2 * r));
-    misc.set([Math.min(1, palm), thin, oil, 0], s * 4);
-    const back = smooth(0.1, -0.4, nz);
-    const sweat = Math.min(1,
-      head * (0.55 + 0.45 * smooth(cy + 1 * r, cy + 4 * r, p[1]) * smooth(-0.3, 0.4, nz)) +
-      neck * 0.8 + chest * (0.9 + 0.1 * back) + abd * 0.7 + shoulders * 0.85 + arms * 0.55 + legs * 0.3 + (wh + wf) * 0.25);
+    misc.set([Math.min(1, palm), thin, oil, lashAt(p)], s * 4);
+    const sweat = sweatRegion(p, [nx, ny, nz]);
     const flush = Math.min(1,
       head * (0.35 + 0.65 * Math.min(1, g(p, cheekL, 2.4 * r) + g(p, cheekR, 2.4 * r) + g(p, noseTip, 1.6 * r) +
         g(p, earL, 2.2 * r) + g(p, earR, 2.2 * r))) + neck * 0.55 + chest * 0.5 * smooth(-0.2, 0.3, nz) + shoulders * 0.25);
@@ -140,7 +138,7 @@ export function canonical(asset: BodyAsset): Canonical {
     const wristX = t.headT[B.lHand * 3];
     const wrap = w(s, [B.lForeArm, B.rForeArm]) * smooth(wristX - 0.1, wristX - 0.075, Math.abs(p[0])) + w(s, hands) +
       0.6 * w(s, fingers) * smooth(0.035, 0.0, Math.abs(p[0]) - (wristX + 0.105));
-    fx.set([sweat, flush, Math.min(1, wrap), 0], s * 4);
+    fx.set([sweat, flush, Math.min(1, wrap), 1], s * 4);
     // Damage zones.
     const eyeZone = (eye: V3, brow: V3): number => head * Math.min(1, g(p, brow, 2.4 * r, 0.8) + 0.8 * g(p, eye, 1.6 * r)) * smooth(-0.2, 0.3, nz);
     const z0 = eyeZone(eyeL, browL);
@@ -155,9 +153,63 @@ export function canonical(asset: BodyAsset): Canonical {
     zoneA.set([z0, z1, z2, z3], s * 4);
     zoneB.set([z4, z5, Math.min(1, thighL + 0.8 * calfL), Math.min(1, thighR + 0.8 * calfR)], s * 4);
   }
+  staticAO(asset, pos, normal, fx);
   const jointT = t.headT.slice();
   for (let i = 1; i < jointT.length; i += 3) jointT[i] -= floor;
   const out: Canonical = { pos, normal, lm, misc, fx, zoneA, zoneB, jointT };
   cache.set(asset, out);
   return out;
 }
+
+/**
+ * Static ambient occlusion per body vertex in the canonical T-pose (point-based: each nearby
+ * vertex is a small disc of a third of its triangles' area; occlusion is the summed disc form
+ * factor). Catches what is always shadowed whatever the pose — under the jaw, eye sockets,
+ * nostrils, ears, between the fingers and toes, the navel — for the skin's image-based light,
+ * which otherwise mirrors the bright canvas into every downward-facing crease. Written to fx[3].
+ */
+function staticAO(asset: BodyAsset, pos: Float32Array, normal: Float32Array, fx: Float32Array): void {
+  const n = asset.header.counts.body;
+  const area = new Float32Array(n);
+  const idx = asset.lodIndex[0], map = asset.renderSrc;
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = map[idx[t]], b = map[idx[t + 1]], c = map[idx[t + 2]];
+    const e1 = [pos[b * 3] - pos[a * 3], pos[b * 3 + 1] - pos[a * 3 + 1], pos[b * 3 + 2] - pos[a * 3 + 2]];
+    const e2 = [pos[c * 3] - pos[a * 3], pos[c * 3 + 1] - pos[a * 3 + 1], pos[c * 3 + 2] - pos[a * 3 + 2]];
+    const A = 0.5 * Math.hypot(e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]) / 3;
+    area[a] += A; area[b] += A; area[c] += A;
+  }
+  const R = 0.08, cell = R;
+  const key = (x: number, y: number, z: number): number => ((Math.floor(x / cell) + 64) * 128 + (Math.floor(y / cell) + 8)) * 128 + (Math.floor(z / cell) + 64);
+  const grid = new Map<number, number[]>();
+  for (let s = 0; s < n; s++) {
+    const k = key(pos[s * 3], pos[s * 3 + 1], pos[s * 3 + 2]);
+    let l = grid.get(k);
+    if (!l) { l = []; grid.set(k, l); }
+    l.push(s);
+  }
+  for (let s = 0; s < n; s++) {
+    const px = pos[s * 3], py = pos[s * 3 + 1], pz = pos[s * 3 + 2];
+    const nx = normal[s * 3], ny = normal[s * 3 + 1], nz = normal[s * 3 + 2];
+    // Start a hair above the surface so the vertex does not see its own tangent plane.
+    const ox = px + nx * 0.002, oy = py + ny * 0.002, oz = pz + nz * 0.002;
+    const cx = Math.floor(px / cell), cy = Math.floor(py / cell), cz = Math.floor(pz / cell);
+    let occ = 0;
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) {
+      const l = grid.get(((cx + i + 64) * 128 + (cy + j + 8)) * 128 + (cz + k + 64));
+      if (!l) continue;
+      for (const o of l) {
+        const dx = pos[o * 3] - ox, dy = pos[o * 3 + 1] - oy, dz = pos[o * 3 + 2] - oz;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > R * R || d2 < 1e-6) continue;
+        const d = Math.sqrt(d2);
+        const cosV = (nx * dx + ny * dy + nz * dz) / d;
+        if (cosV <= 0.05) continue;
+        const cosO = Math.abs(normal[o * 3] * dx + normal[o * 3 + 1] * dy + normal[o * 3 + 2] * dz) / d;
+        occ += (area[o] * cosV * cosO) / (Math.PI * d2 + area[o]);
+      }
+    }
+    fx[s * 4 + 3] = Math.max(0.15, 1 - Math.min(1, occ * 1.4));
+  }
+}
+

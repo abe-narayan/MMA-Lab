@@ -13,7 +13,9 @@ import { ARCHETYPES, deriveRuntime, resolveParams, type FighterDefinition } from
 import { decodeBodyAsset, type BodyAsset, type BodyHeader } from '../src/presentation/character/asset';
 import { buildBody, builtToT } from '../src/presentation/character/body';
 import { canonical } from '../src/presentation/character/canonical';
-import { luminance, resolveFace, skinAlbedo, skinPalette } from '../src/presentation/character/appearance';
+import { FACE_PRESETS, luminance, resolveFace, skinAlbedo, skinPalette } from '../src/presentation/character/appearance';
+import { anatomyForm, sweatPropensity, sweatRegion, sweatWetness, type V3 } from '../src/presentation/character/anatomy';
+import { bakeSkinMaps, packSkinMaps } from '../src/presentation/character/skinMaps';
 import { B, BONE_COUNT, BONES } from '../src/presentation/rig/skeleton';
 
 const DIR = 'static/assets/body';
@@ -167,7 +169,7 @@ describe('fighter actor (no GPU)', () => {
     const mats = new Map<string, unknown>();
     const res = {
       asset, can: canonical(asset),
-      skinTex: { maskA: tex, maskB: tex, detail: makeSkinDetail(64), sweat: makeSweatDetail(64) },
+      skinTex: { maskA: tex, maskB: tex, detail: makeSkinDetail(64), sweat: makeSweatDetail(64), skinA: tex, skinB: tex, skinC: tex },
       kitTex: { cloth: makeClothDetail(64), leather: makeLeatherDetail(64) },
       material<M>(key: string, make: () => M): M {
         if (!mats.has(key)) mats.set(key, make());
@@ -180,7 +182,11 @@ describe('fighter actor (no GPU)', () => {
       replayDepthOfField: false, replayMotionBlur: false, skinScattering: true, sweatAndDamage: true,
       crowd: 'off', crowdCount: 0, maxCharacterLOD: 0,
     } as const;
-    const fighters = [variant(defs[0], {}, { hairStyle: { styleId: 'curly', colorId: 'black', length: 'short' } }), defs[10]];
+    // Cover the pass-2 parts too: beard shells (full beard), braided rows, eyelashes.
+    const fighters = [
+      variant(defs[0], {}, { hairStyle: { styleId: 'curly', colorId: 'black', length: 'short' }, facialHair: 'full' }),
+      variant(defs[10], {}, { hairStyle: { styleId: 'cornrows', colorId: 'black', length: 'short' }, facialHair: 'goatee' }),
+    ];
     const bout = {
       fighters, runtimes: fighters.map(runtime), teamOf: [0, 1], arena: {} as never, rulesetId: 'mma',
       glove: 'mma4oz', cornerColours: ['#c01824', '#1d4fb8'], blood: true, cosmeticSeed: 'test',
@@ -189,6 +195,10 @@ describe('fighter actor (no GPU)', () => {
       const a = new FighterActor(res as never, bout as never, i, quality as never);
       const t0 = a.triangles();
       expect(t0).toBeLessThanOrEqual(60000);
+      const names: string[] = [];
+      a.object3d.traverse((o) => { names.push(o.name); });
+      expect(names).toContain('lashes');
+      expect(names.some((n) => n.startsWith('beard-'))).toBe(true);
       // WebGPU guarantees 8 vertex attributes and 8 vertex buffers per pipeline.
       a.object3d.traverse((o) => {
         const g = (o as { geometry?: import('three').BufferGeometry }).geometry;
@@ -207,5 +217,187 @@ describe('fighter actor (no GPU)', () => {
       expect(a.rest.head.length).toBe(BONE_COUNT * 3);
       a.dispose();
     }
+  }, 60000);
+});
+
+// ---------------------------------------------------------------------------
+// Lookdev pass 2
+// ---------------------------------------------------------------------------
+
+describe('sweat model (anatomy.ts)', () => {
+  const can = canonical(asset);
+  const nBody = asset.header.counts.body;
+  const P = (s: number): V3 => [can.pos[s * 3], can.pos[s * 3 + 1], can.pos[s * 3 + 2]];
+  const Nn = (s: number): V3 => [can.normal[s * 3], can.normal[s * 3 + 1], can.normal[s * 3 + 2]];
+  // Canonical regions: chest/sternum front, forearms (T-pose arms along x), shins, torso.
+  const chest: number[] = [], forearm: number[] = [], shin: number[] = [], torso: number[] = [];
+  for (let s = 0; s < nBody; s++) {
+    const [x, y, z] = P(s);
+    if (Math.abs(x) < 0.12 && y > 1.2 && y < 1.36 && z > 0.05) chest.push(s);
+    if (Math.abs(x) > 0.44 && Math.abs(x) < 0.6 && y > 1.28 && y < 1.42) forearm.push(s);
+    if (Math.abs(x) > 0.05 && y > 0.12 && y < 0.38) shin.push(s);
+    if (Math.abs(x) < 0.2 && y > 0.95 && y < 1.4) torso.push(s);
+  }
+  const mean = (a: number[]): number => a.reduce((t, v) => t + v, 0) / a.length;
+  const wet = (list: number[], level: number, seed: number): number[] =>
+    list.map((s) => sweatWetness(sweatPropensity(P(s), Nn(s), seed), level));
+
+  it('is regional: forearms and shins stay drier than the chest at the same sweat level', () => {
+    expect(chest.length).toBeGreaterThan(50);
+    expect(forearm.length).toBeGreaterThan(50);
+    for (const level of [0.3, 0.5, 0.8]) {
+      const c = mean(wet(chest, level, 7)), f = mean(wet(forearm, level, 7)), sh = mean(wet(shin, level, 7));
+      expect(c, 'chest vs forearm at level ' + level).toBeGreaterThan(f + 0.2);
+      expect(c, 'chest vs shin at level ' + level).toBeGreaterThan(sh + 0.2);
+    }
+    // The regional map itself ranks them.
+    expect(mean(chest.map((s) => sweatRegion(P(s), Nn(s))))).toBeGreaterThan(mean(forearm.map((s) => sweatRegion(P(s), Nn(s)))) + 0.3);
+  });
+
+  it('is patchy, not an even coat: wetness over the torso varies strongly mid-fight', () => {
+    for (const seed of [11, 12, 13]) {
+      const w = wet(torso, 0.55, seed);
+      const m = mean(w);
+      const sd = Math.sqrt(mean(w.map((v) => (v - m) ** 2)));
+      expect(sd).toBeGreaterThan(0.25);
+      expect(m).toBeGreaterThan(0.15);
+      expect(m).toBeLessThan(0.85);
+    }
+    // Where sweat pools (forehead, sternum) it is reliably among the first to run wet.
+    const forehead: number[] = [];
+    for (let s = 0; s < nBody; s++) { const [x, y, z] = P(s); if (Math.abs(x) < 0.04 && y > 1.585 && y < 1.63 && z > 0.1) forehead.push(s); }
+    for (const seed of [1, 2, 3, 4, 5]) expect(mean(forehead.map((s) => sweatPropensity(P(s), Nn(s), seed)))).toBeGreaterThan(0.7);
+    const w = wet(torso, 0.55, 11);
+    const m = mean(w);
+    expect(m).toBeGreaterThan(0.15);
+  });
+
+  it('builds over the rounds and is seeded per fighter', () => {
+    const levels = [0.1, 0.3, 0.5, 0.7, 0.9].map((l) => mean(wet(torso, l, 3)));
+    for (let i = 1; i < levels.length; i++) expect(levels[i]).toBeGreaterThan(levels[i - 1]);
+    const a = torso.map((s) => sweatPropensity(P(s), Nn(s), 1));
+    const b = torso.map((s) => sweatPropensity(P(s), Nn(s), 1));
+    const c = torso.map((s) => sweatPropensity(P(s), Nn(s), 2));
+    expect(a).toEqual(b);
+    expect(mean(a.map((v, i) => Math.abs(v - c[i])))).toBeGreaterThan(0.05);
+  });
+});
+
+describe('generated textures and skin maps are deterministic', () => {
+  it('the UV-space anatomy/region bake gives identical bytes twice, and covers the body', () => {
+    const can = canonical(asset);
+    const a = bakeSkinMaps(asset, can, 256);
+    const b = bakeSkinMaps(asset, can, 256);
+    expect(Buffer.from(packSkinMaps(a).raw).equals(Buffer.from(packSkinMaps(b).raw))).toBe(true);
+    expect(a.coverage).toBeGreaterThan(0.5);
+    // Relief is present (not a flat normal map): some texels bend well away from 128.
+    let bent = 0;
+    for (let i = 0; i < a.a.length; i += 4) if (Math.abs(a.a[i] - 128) > 8 || Math.abs(a.a[i + 1] - 128) > 8) bent++;
+    expect(bent).toBeGreaterThan(20);
+  }, 60000);
+
+  it('the shipped skinmaps.bin matches its header checksum', () => {
+    const head = JSON.parse(readFileSync(join(DIR, 'skinmaps.json'), 'utf8')) as { binSha256: string; size: number };
+    const bin = readFileSync(join(DIR, 'skinmaps.bin'));
+    expect(createHash('sha256').update(bin).digest('hex')).toBe(head.binSha256);
+    expect(head.size).toBe(2048);
+  });
+
+  it('procedural detail textures are identical when regenerated', async () => {
+    const { makeSkinDetail, makeSweatDetail } = await import('../src/presentation/character/textures');
+    const bytes = (t: unknown): Buffer => Buffer.from((t as { image: { data: Uint8Array } }).image.data);
+    expect(bytes(makeSkinDetail(64)).equals(bytes(makeSkinDetail(64)))).toBe(true);
+    expect(bytes(makeSweatDetail(64)).equals(bytes(makeSweatDetail(64)))).toBe(true);
+  });
+});
+
+describe('faces and anatomy', () => {
+  const base = defs[0];
+  const can = canonical(asset);
+  const headVerts: number[] = [];
+  for (let s = 0; s < asset.header.counts.body; s++) {
+    if (can.pos[s * 3 + 1] > 1.44 && Math.abs(can.pos[s * 3]) < 0.1 && can.pos[s * 3 + 2] > 0.05) headVerts.push(s);
+  }
+  /** Face shape only: head vertices relative to their centroid (stature does not count). */
+  const faceShape = (preset: number, id = 'face.test'): Float32Array => {
+    const body = buildBody(asset, { ...variant(base, {}, { facePreset: preset }), id });
+    const c = [0, 0, 0];
+    for (const s of headVerts) for (let k = 0; k < 3; k++) c[k] += body.pos[s * 3 + k] / headVerts.length;
+    const out = new Float32Array(headVerts.length * 3);
+    headVerts.forEach((s, i) => { for (let k = 0; k < 3; k++) out[i * 3 + k] = body.pos[s * 3 + k] - c[k]; });
+    return out;
+  };
+  const rms = (a: Float32Array, b: Float32Array): number => {
+    let t = 0;
+    for (let i = 0; i < a.length; i++) t += (a[i] - b[i]) ** 2;
+    return Math.sqrt(t / (a.length / 3));
+  };
+
+  it('the ten face presets are measurably different faces', () => {
+    expect(FACE_PRESETS.length).toBe(10);
+    const shapes = FACE_PRESETS.map((_, i) => faceShape(i));
+    let min = Infinity;
+    for (let i = 0; i < shapes.length; i++) for (let j = i + 1; j < shapes.length; j++) min = Math.min(min, rms(shapes[i], shapes[j]));
+    // Every pair of presets differs by more than 1.2 mm RMS over the whole face (most by 3-6 mm).
+    expect(min).toBeGreaterThan(0.0012);
+  }, 60000);
+
+  it('every fighter gets a seeded, stable asymmetry on top of the preset', () => {
+    const a1 = faceShape(3, 'fighter.a'), a2 = faceShape(3, 'fighter.a'), b = faceShape(3, 'fighter.b');
+    expect(rms(a1, a2)).toBe(0);
+    expect(rms(a1, b)).toBeGreaterThan(0.0004);
+    // The face's left/right mirror error is non-zero (no real face is symmetric).
+    // Mirror partners on the (symmetric) base mesh: nearest vertex to (-x, y, z) within 0.5 mm.
+    const pairs: [number, number][] = [];
+    headVerts.forEach((s, i) => {
+      if (can.pos[s * 3] < 0.005) return;
+      let best = -1, bd = 0.0005;
+      headVerts.forEach((t, j) => {
+        const d = Math.hypot(can.pos[t * 3] + can.pos[s * 3], can.pos[t * 3 + 1] - can.pos[s * 3 + 1], can.pos[t * 3 + 2] - can.pos[s * 3 + 2]);
+        if (d < bd) { bd = d; best = j; }
+      });
+      if (best >= 0) pairs.push([i, best]);
+    });
+    expect(pairs.length).toBeGreaterThan(100);
+    let asym = 0;
+    for (const [i, j] of pairs) asym += Math.hypot(a1[i * 3] + a1[j * 3], a1[i * 3 + 1] - a1[j * 3 + 1], a1[i * 3 + 2] - a1[j * 3 + 2]);
+    expect(asym / pairs.length).toBeGreaterThan(0.0003);
+  }, 60000);
+
+  it('skin tone and face preset stay independent: tone never moves geometry, the palette is tone alone', () => {
+    for (const preset of [0, 4, 8]) {
+      const light = buildBody(asset, variant(base, {}, { skinTone: 0.05, facePreset: preset }));
+      const dark = buildBody(asset, variant(base, {}, { skinTone: 0.95, facePreset: preset }));
+      expect(Buffer.from(light.pos.buffer).equals(Buffer.from(dark.pos.buffer))).toBe(true);
+    }
+    let prev = Infinity;
+    for (let i = 0; i <= 20; i++) {
+      const p = skinPalette(i / 20);
+      expect(luminance(p.base)).toBeLessThan(prev);
+      prev = luminance(p.base);
+      expect(p.base[0]).toBeGreaterThan(p.base[2]);
+    }
+  });
+
+  it('muscle form is anatomical and follows definition: abs, deltoids, calves', () => {
+    // Ab blocks rise between the tendinous intersections; deltoid cap; gastrocnemius heads.
+    expect(anatomyForm([0.035, 1.146, 0.13], [0, 0, 1])).toBeGreaterThan(0.002);
+    expect(anatomyForm([0.035, 1.146, 0.13], [0, 0, 1])).toBeGreaterThan(anatomyForm([0.035, 1.128, 0.13], [0, 0, 1]) + 0.0005);
+    expect(anatomyForm([0.21, 1.4, 0.03], [0, 1, 0])).toBeGreaterThan(0.002);
+    expect(anatomyForm([0.08, 0.33, -0.02], [0, 0, -1])).toBeGreaterThan(0.002);
+    // The same fighter at full vs zero definition: the form lands on the muscles (abdomen,
+    // deltoids), millimetres deep, and nowhere near the face.
+    const rt = runtime(base);
+    const defined = buildBody(asset, base, { ...rt, rig: { ...rt.rig, definition: 1 } });
+    const smooth0 = buildBody(asset, base, { ...rt, rig: { ...rt.rig, definition: 0 } });
+    let absMax = 0, faceMax = 0;
+    for (let s = 0; s < asset.header.counts.body; s++) {
+      const x = can.pos[s * 3], y = can.pos[s * 3 + 1], z = can.pos[s * 3 + 2];
+      const d = Math.hypot(defined.pos[s * 3] - smooth0.pos[s * 3], defined.pos[s * 3 + 1] - smooth0.pos[s * 3 + 1], defined.pos[s * 3 + 2] - smooth0.pos[s * 3 + 2]);
+      if (Math.abs(x) < 0.08 && y > 1.08 && y < 1.2 && z > 0.1) absMax = Math.max(absMax, d);
+      if (y > 1.5 && z > 0.1) faceMax = Math.max(faceMax, d);
+    }
+    expect(absMax).toBeGreaterThan(0.002);
+    expect(faceMax).toBeLessThan(0.0002);
   }, 60000);
 });

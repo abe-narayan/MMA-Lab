@@ -109,6 +109,45 @@ for (const p of [
   'eyebrows/eyebrows-trans-forward', 'eyebrows/eyebrows-trans-backward', 'eyebrows/eyebrows-angle-down',
   'eyebrows/eyebrows-angle-up', 'forehead/forehead-trans-forward', 'forehead/forehead-trans-backward',
 ]) TARGETS.push([`reg/${p.split('/')[1]}`, p]);
+// Lookdev pass 2: the face regions MakeHuman models (eyes, nose, mouth, chin, cheeks, forehead,
+// brows) so the face presets are clearly different faces, and MPFB's asymmetry targets for a
+// seeded per-fighter asymmetry. Opposite-direction targets that are not named decr/incr (down/up,
+// in/out, backward/forward, concave/convex) are stored as <base>-decr / <base>-incr, so every
+// regional morph is one signed weight.
+const OPPOSITES = [
+  ...['l', 'r'].flatMap((s) => [
+    [`eyes/${s}-eye-scale`, 'decr', 'incr'], [`eyes/${s}-eye-trans`, 'down', 'up'], [`eyes/${s}-eye-move`, 'in', 'out', `eyes/${s}-eye-trans`],
+    [`eyes/${s}-eye-height1`, 'decr', 'incr'], [`eyes/${s}-eye-height2`, 'decr', 'incr'], [`eyes/${s}-eye-corner1`, 'down', 'up'],
+    [`eyes/${s}-eye-epicanthus`, 'in', 'out'], [`eyes/${s}-eye-bag`, 'decr', 'incr'], [`eyes/${s}-eye-eyefold-angle`, 'down', 'up'],
+    [`eyes/${s}-eye-push1`, 'in', 'out'],
+    [`cheek/${s}-cheek-trans`, 'down', 'up'], [`cheek/${s}-cheek-inner`, 'decr', 'incr'],
+  ]),
+  ['nose/nose-trans', 'down', 'up'], ['nose/nose-move', 'backward', 'forward', 'nose/nose-trans'], ['nose/nose-width1', 'decr', 'incr'],
+  ['nose/nose-width2', 'decr', 'incr'], ['nose/nose-width3', 'decr', 'incr'], ['nose/nose-greek', 'decr', 'incr'],
+  ['nose/nose-point', 'down', 'up'], ['nose/nose-nostrils-width', 'decr', 'incr'], ['nose/nose-septumangle', 'decr', 'incr'],
+  ['nose/nose-curve', 'concave', 'convex'], ['nose/nose-base', 'down', 'up'],
+  ['mouth/mouth-scale-vert', 'decr', 'incr'], ['mouth/mouth-cupidsbow', 'decr', 'incr'], ['mouth/mouth-lowerlip-height', 'decr', 'incr'],
+  ['mouth/mouth-upperlip-height', 'decr', 'incr'], ['mouth/mouth-angles', 'down', 'up'], ['mouth/mouth-trans', 'down', 'up'],
+  ['mouth/mouth-move', 'backward', 'forward', 'mouth/mouth-trans'], ['mouth/mouth-philtrum-volume', 'decr', 'incr'],
+  ['mouth/mouth-lowerlip-width', 'decr', 'incr'], ['mouth/mouth-upperlip-width', 'decr', 'incr'],
+  ['mouth/mouth-laugh-lines', 'in', 'out'], ['mouth/mouth-dimples', 'in', 'out'],
+  ['chin/chin-jaw-drop', 'decr', 'incr'], ['chin/chin-cleft', 'decr', 'incr'],
+  ['forehead/forehead-temple', 'decr', 'incr'], ['forehead/forehead-scale-vert', 'decr', 'incr'], ['forehead/forehead-nubian', 'decr', 'incr'],
+  ['eyebrows/eyebrows-trans', 'down', 'up'],
+  ['head/head-scale-vert', 'decr', 'incr'], ['head/head-back-scale-depth', 'decr', 'incr'],
+];
+for (const [base, neg, pos, file] of OPPOSITES) {
+  const name = base.split('/')[1];
+  const src = file ?? base;
+  TARGETS.push([`reg/${name}-decr`, `${src}-${neg}`], [`reg/${name}-incr`, `${src}-${pos}`]);
+}
+TARGETS.push(['reg/chin-triangle', 'chin/chin-triangle']);
+for (const part of ['brown-1', 'brown-2', 'cheek-1', 'cheek-2', 'ear-1', 'ear-2', 'ear-3', 'ear-4',
+  'eye-1', 'eye-2', 'eye-3', 'eye-4', 'eye-5', 'eye-6', 'eye-7', 'eye-8', 'jaw-1', 'jaw-2', 'jaw-3',
+  'mouth-1', 'mouth-2', 'nose-1', 'nose-2', 'nose-3', 'nose-4', 'temple-1', 'temple-2', 'top-1', 'top-2']) {
+  for (const s of ['l', 'r']) TARGETS.push([`reg/asym-${part}-${s}`, `asym/asym-${part}-${s}`]);
+}
+
 const EXPR = [
   'eye-left-closure', 'eye-right-closure', 'eye-left-slit', 'eye-right-slit',
   'eyebrows-left-down', 'eyebrows-right-down', 'eyebrows-left-inner-up', 'eyebrows-right-inner-up',

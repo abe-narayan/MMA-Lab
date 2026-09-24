@@ -1,0 +1,32 @@
+{
+  "format": "boutlab-skinmaps/1",
+  "size": 2048,
+  "parts": [
+    {
+      "name": "a",
+      "size": 1024,
+      "channels": 4,
+      "offset": 0,
+      "length": 4194304
+    },
+    {
+      "name": "b",
+      "size": 1024,
+      "channels": 4,
+      "offset": 4194304,
+      "length": 4194304
+    },
+    {
+      "name": "c",
+      "size": 2048,
+      "channels": 2,
+      "offset": 8388608,
+      "length": 8388608
+    }
+  ],
+  "rawBytes": 16777216,
+  "rawSha256": "a548e4baec861086f5d44f1d773d53f15c04574892821c595d5a407c815f924d",
+  "binSha256": "802c60cf444dbc6c5a4e75f4a3b230274034d8eb41c8a8de4d7271cbde98dbf3",
+  "metresPerTexel": 0.000732,
+  "coverage": 0.6256
+}

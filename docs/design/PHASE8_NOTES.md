@@ -261,8 +261,8 @@ considered for the truss; its per-pixel LTC cost bought nothing over the IBL on 
 Owner: character module (`src/presentation/character/`, `scripts/assets/build-body.mjs`,
 `static/assets/body/`, `dev/character.html`, `tests/presentation.character.test.ts`).
 
-**Pipeline.** `build-body.mjs` turns MPFB2's CC0 data (base.obj, 211 targets, Mixamo rig weights,
-UV masks) into `static/assets/body/` (5.5 MB bin + 60 KB header + 8 small JPEG masks), deterministic
+**Pipeline.** `build-body.mjs` turns MPFB2's CC0 data (base.obj, 380 targets since pass 2, Mixamo rig weights,
+UV masks) into `static/assets/body/` (6.0 MB bin + 100 KB header + 8 small JPEG masks), deterministic
 (SHA-256 in the header; the test rebuilds offline and compares bytes). Per fighter, once per bout
 (`body.ts`, ~15 ms morph+fit, 45–120 ms including geometry, skeleton and kit):
 1. MakeHuman macro blend with MakeHuman's own weight products (gender × age × muscle × weight,
@@ -335,6 +335,155 @@ shots (the tight shot is GPU-bound either way); first-frame shader build ~7 s We
 - Female bodies build (targets included, sports top) but were not look-developed.
 
 Screenshots: `docs/screenshots/phase8-character-{lineup-arena,lineup-studio,trio-arena,face,damage,gloves,shorts,boxing}.png`.
+
+### Lookdev pass 2
+
+Goal: close the gap from "good game-engine skin" toward broadcast-real, judged under the real
+venue light (one hard 5600 K key almost straight overhead, bright canvas bounce, dark bowl) at
+the three broadcast distances. Everything below is presentation-only and seeded from
+`cosmeticSeed` + fighter id (face identity from the id alone, so a face is stable across bouts);
+no `Math.random`.
+
+**How it was judged.** `dev/character.html` gained venue boards: `board=distances|sweat|tones|
+faces|hair|detail|face` build the real octagon with `createVenueAsync` (its key light and IBL)
+and render several camera presets as tiles of one frame (one capture per comparison — the
+machine is memory-bound), and `shot=wide|cageside|replay` renders one preset through the stage's
+own `StagePipeline` (TAAU, GTAO, bloom, ACES, broadcast LUT) at the High preset's render scale.
+Main wide ≈ 12 m, cageside ≈ 3 m (torso), replay ≈ 1.2 m (face and shoulders); `round=1|3` sets
+presenter-like sweat; `dbg=1..9` shows one skin channel (lash, redness, veins, oil, pores, cavity,
+sweat propensity, wetness, AO); `perf=1` records GPU timestamps; `mouth=1&mouthcam=1` checks the
+mouthguard.
+
+**Sweat** (was: an even clear coat over the whole body — the lacquered-mannequin look).
+- Regional propensity (`anatomy.ts sweatRegion`): forehead and temples, upper lip, sternum and
+  chest, upper and lower back and shoulders pool first; biceps middling; forearms, hands, shins
+  and feet near dry. Per fighter it is broken into seeded patches (two octaves of value noise,
+  stretched vertically) and baked into the body geometry's `aFx.x` (a free slot — no new vertex
+  attribute). Patchiness is strongest over middling regions and weakest where sweat reliably
+  pools, so the forehead and sternum are always among the first to run wet.
+- A point turns wet at sweat level ≈ 1 − propensity (`sweatWetness`, mirrored in the shader), so
+  wet patches grow outward over the rounds. Before that the skin goes "damp" (roughness −0.07);
+  wet skin is 8 % darker, roughness → 0.28, clear coat 0.8 at roughness 0.10 with bead normals
+  where sweat pools; short runs streak down from wet patches (never on forearms/shins). The film
+  follows the pores (the coat normal carries 75 % of the skin detail), so highlights are broken,
+  not mirrors. Hair-covered skin (including cornrow partings) takes no film.
+- Measured (tests): mid-fight torso wetness SD > 0.25 (patchy); chest wetter than forearms and
+  shins by > 0.2 at every level; wetness rises monotonically with the sweat level.
+
+**Dry skin.** No longer glossy: roughness ≈ 0.56 on the limbs, ≈ 0.42 over the oily T-zone (baked
+sebum map), ≈ 0.6 on palms/soles, with low-frequency variation; F0 stays 0.028. Static per-vertex
+AO (point-based disc occlusion on the canonical mesh; under the jaw, sockets, nostrils, ears,
+between fingers) plus a downward-facing term drive `aoNode`, so the bright canvas is no longer
+mirrored as a white band under every jaw. Albedo keys for light-to-medium tones carry more blue
+(less orange); pigment unevenness at three scales with a slight hue shift.
+
+**Micro-detail and anatomy — `anatomy.ts`, `skinMaps.ts`, `build-skin-maps.ts`.**
+- Features are authored once in canonical space (landmarks measured on the base mesh) and baked
+  offline into the body UV layout (`static/assets/body/skinmaps.{json,bin}`, 0.67 MB, zlib; see
+  `docs/ASSETS.md`): each body triangle is rasterised in UV space at 2048² (0.73 mm/texel), each
+  texel evaluates the anatomy at its interpolated canonical position, and heights become
+  tangent-space normals through the triangle's dP/du, dP/dv (the frame three's derivative-based
+  `normalMap` rebuilds). Offline because the bake takes ~6 s; the browser inflates it with
+  `DecompressionStream`, so bytes reach the GPU exactly.
+- Separations (scaled by `definition`): linea alba, three irregular tendinous intersections,
+  linea semilunaris, inguinal line, pectoral fold and sternal gap, deltopectoral groove, clavicles,
+  serratus slips, spinal groove, scapular border, lat edge, deltoid V, biceps/triceps and forearm
+  septa, vastus medialis teardrop, rectus femoris / vastus lateralis, sartorius, patella, the
+  gastrocnemius heads and their lower borders, tibialis — as broad shallow valleys with bulging
+  shoulders, not lines. Raised superficial veins (seeded random-walk polylines on forearms, back of
+  the hand, biceps and front delts) scale with a `veins` value from body fat.
+- Creases (not scaled by definition; slightly deeper with age): knuckle wrinkles over every
+  finger joint, dorsal elbow wrinkles and the front fold, wrist creases, knee wrinkles, neck
+  lines, crow's feet, nasolabial folds, faint forehead lines.
+- Region maps: pore strength (nose, cheeks, back and shoulders strongest; drives the pore normal
+  and its roughness), subdermal redness (knees, elbows, knuckles, ears, nose, cheeks — rendered
+  as redness on light skin and deeper, browner pigment on dark skin), vein tint (blue-green on
+  light skin; on dark skin the relief carries them), sebum.
+- FORM, not just shading: `anatomyForm` displaces the fitted mesh along its normals by up to
+  ~6 mm (ab blocks, pectoral mass, obliques, serratus, erectors, lats, deltoid caps and heads,
+  biceps, triceps, forearm masses, VMO, vastus lateralis, rectus femoris, calf heads, tibialis),
+  scaled by definition^1.2 × muscle. The mesh cavity then darkens the real grooves.
+
+**Eyes and face.**
+- Eyeball re-centred on its own lid-margin ring: after the macro and face morphs MakeHuman's
+  helper-eye centre sits ~3 mm high against the lids, which buried half the iris under the upper
+  lid (the dead, sleepy look). The ball is also 3 % smaller and 0.5 mm deeper so it never pokes
+  through the lids as a pale rim.
+- Eye shader: two-tone iris (pupillary zone warmer) with radial fibres at two scales, crypts,
+  flecks, collarette and a dark limbal ring; off-white sclera, warmer toward the corners, a pink
+  caruncle on the nasal side, fine vessels whose redness rises with fatigue and eye-zone damage
+  (`userData.eye.red`); the upper lid's shadow across the top of the ball and iris; wet cornea.
+- Eyelashes: a ribbon of ~110 alpha-tested strands per upper lid, rooted on the lid-margin
+  vertices, out at ~45° then curling up, longest mid-lid; it carries the body's face and
+  swelling morph deltas so it closes with a blink and rides a swollen lid. The lash line itself
+  is painted per vertex (MakeHuman splits the lid margin between the face and eyelid UV islands,
+  so a texture cannot hold it).
+- Brows: one mirrored evaluation of individual hairs (growth direction up at the head, outward
+  along the body, down at the tail) with a noisy edge and seeded density; settles to its mean
+  when a hair is sub-pixel.
+- Periorbital tone (violet-grey on light skin, deeper brown on dark), lips with their own colour,
+  a lighter vermilion border and vertical lip lines.
+- Stubble: round follicle dots (one jittered dot per 0.8 mm cell; cell noise rendered squares)
+  over a blue-grey shadow, averaged to the shadow at distance. Full beards, goatees and moustaches
+  add two short shells (`hair.ts`), so facial hair has volume and a broken silhouette.
+- Face variety: the body asset now carries 380 MPFB targets (was 211): eye, nose, mouth, chin,
+  cheek, forehead and brow targets and MPFB's 29 asymmetry pairs. The 10 presets each use 6–13
+  of them; every pair of presets differs by > 1.2 mm RMS over the face (most by 3–6 mm). Each
+  fighter adds a seeded variation (`appearance.ts faceVariation`, from the fighter id): six
+  asymmetry targets at 0.12–0.4 on a random side and small symmetric changes to eyes, nose,
+  mouth, chin, brows and cheekbones.
+- Mouthguard: thicker and seated 2.6 mm lower/1.2 mm forward than the upper-teeth helper (which
+  hides entirely behind the upper lip), so it shows whenever the mouth opens.
+
+**Hair.** Buzz: one sparse shell with no clumps over a denser painted scalp (skin shows through;
+strands settle to their mean when sub-pixel). Fade: shells taper to nothing over ~4 cm above the
+ear line and the painted density follows the same gradient. Crew/receding/curly keep the strand
+pattern as an alpha-test dither (the stage's TAA averages it). Cornrows and braids are rebuilt:
+rows follow meridians of the head (constant angle about the front-back axis) from hairline to
+nape, each a rounded ridge of chevron plaits with a line of bare, matte scalp between rows, which
+the skin shader paints at the same `ROW_FREQ`.
+
+**Cost** (Arc 140V, measured on the dev page's stage-pipeline shots at 2560×1440 output, High
+preset scale 0.7, GPU timestamps, two fighters; the machine was shared with other agents so
+figures are ranges over repeated A/B runs against a temporary copy of the pass-1 module):
+- GPU: cageside 16.1–18.0 ms (pass 1: 16.1–25.0 ms); main wide 12.6–16.0 ms (pass 1: 11.7–15.0
+  ms) — about +1 ms on the wide shot, parity up close. The first pass-2 shader was +3–5 ms; the
+  cost came back by replacing a Worley follicle search with one jittered dot per cell, evaluating
+  one mirrored brow instead of two, reusing noise fields, and moving pigment variation and sweat
+  runs to mip-mapped texture lookups (9 procedural noise calls, as in pass 1). The integrated
+  Watch view (`?watchDemo=1&seek=45&quality=high`, MAIN shot) runs at 59.4 fps.
+- Build per fighter (browser): ~117–121 ms (pass 1 ~84–100 ms): form displacement and an extra
+  normal pass, seeded sweat propensity, lid-ring eye centring, lashes, beard shells.
+- Preload: +~230 ms (inflating and uploading the skin maps, static AO on the canonical mesh, the
+  larger body asset). Assets: body.bin 5.47 → 5.96 MB, + 0.67 MB skin maps. GPU memory: +~22 MB
+  of textures (two 1024² RGBA + one 2048² RG, with mips).
+- Vertex attributes unchanged (body 8/8; lashes 5; beard shells as hair); tests enforce ≤ 8.
+
+**Tests** (`tests/presentation.character.test.ts`, 22): the attribute limit over every mesh
+including lashes and beard shells; sweat regional (chest vs forearms/shins), patchy (torso SD),
+monotone over rounds, reliably wet forehead, seeded; bake determinism (256² re-bake twice, and
+the shipped checksum); detail textures regenerate identically; skin-tone ramp monotone and
+independent of face preset; the ten presets pairwise distinct; stable per-id asymmetry with a
+non-zero mirror error; form lands on the abdomen, not the face.
+
+**Where it still falls short of a broadcast** (honest):
+- Skin is still a shader, not a scan: no photographed albedo or pore maps, the scattering is
+  an analytic wrap, and at 0.5 m light skin still reads smooth and slightly waxy. A CC0 scanned
+  skin-detail set with verifiable licence was not found; everything is procedural.
+- Faces read as different people at 1.2 m but remain MakeHuman faces; mouths are the weakest
+  part (no teeth or tongue, the open mouth is a dark cavity with the guard at the top).
+- Lashes are visible as a fringe only in close-ups; brow hairs look combed rather than grown at
+  macro range (never a broadcast distance).
+- Buzz and fade tops still read as a slightly smooth cap at cageside; cornrow ends at the nape
+  are abrupt; beard edges on the cheek are cleaner than real ones.
+- Anatomy is a fixed canonical template scaled by definition (every fighter has the same ab
+  layout); veins are one seeded set shared by all fighters.
+- Sweat runs follow the UV layout's v direction (head-to-toe on the torso and limbs), not
+  gravity in the current pose.
+
+Screenshots (before = pass 1 with the same boards): `docs/screenshots/phase8-lookdev-{distances,
+sweat,tones,faces,hair,detail}-{before,after}.png`, `phase8-lookdev-{face,mouthguard}-after.png`,
+`phase8-lookdev-shot-{wide,cageside,replay}.png` (stage pipeline), `phase8-lookdev-watch.png`.
 
 ## Standing animation
 

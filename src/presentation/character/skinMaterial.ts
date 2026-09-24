@@ -25,7 +25,9 @@ import {
   positionViewDirection, pow, smoothstep, texture, uniform, uniformArray, uv, vec2, vec3, vec4, exp,
   atan, cos, sin, select, floor, varying, BRDF_GGX, BRDF_Lambert, F_Schlick, clearcoat as ccProp,
   clearcoatRoughness as ccRough, specularColor, clearcoatNormalView, step, diffuseContribution, roughness as roughProp,
+  fract, normalWorld,
 } from 'three/tsl';
+import { SWEAT_ONSET } from './anatomy';
 import type { CanonicalLandmarks } from './canonical';
 import type { SkinPalette, RGB } from './appearance';
 
@@ -151,6 +153,12 @@ export interface SkinState {
   /** 12 tattoo slot flags (TattooSlot order) packed in three vec4s. */
   tattoo: THREE.Vector4[]; tattooTint: THREE.Vector3;
   wrapOn: number; wrapCol: THREE.Vector3; tape: number;
+  /** Superficial vein visibility (lean, vascular fighters ~1; body fat hides them). */
+  veins: number;
+  /** Per-fighter offset (seeded) for the procedural sweat runs. */
+  seedOff: number;
+  /** Eyebrow density, ~0.7..1.2 (seeded per fighter). */
+  browDensity: number;
 }
 
 export function makeSkinState(): SkinState {
@@ -164,6 +172,7 @@ export function makeSkinState(): SkinState {
     cutPos: [v4(), v4(), v4(), v4()], cutInfo: [v4(), v4(), v4(), v4()], bloodOn: 1,
     tattoo: [v4(), v4(), v4()], tattooTint: new THREE.Vector3(0.02, 0.025, 0.03),
     wrapOn: 0, wrapCol: new THREE.Vector3(0.6, 0.6, 0.6), tape: 0,
+    veins: 0.5, seedOff: 0, browDensity: 1,
   };
 }
 
@@ -206,6 +215,10 @@ export interface SkinTextures {
   maskB: THREE.Texture;
   detail: THREE.Texture;
   sweat: THREE.Texture;
+  /** Baked anatomy/region maps (skinMaps.ts): A relief+cavity+pores, B redness/veins/oil/lash, C creases. */
+  skinA: THREE.Texture;
+  skinB: THREE.Texture;
+  skinC: THREE.Texture;
 }
 
 export interface SkinOptions {
@@ -216,6 +229,9 @@ export interface SkinOptions {
 }
 
 const V3c = (v: readonly number[]): N => vec3(v[0], v[1], v[2]);
+
+/** Lookdev debug channel for every skin material (0 = off). */
+export const skinDebug: N = uniform(0);
 
 export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNodeMaterial {
   const m = new SkinNodeMaterial();
@@ -252,6 +268,10 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   const earM: N = mB.r;
   const lidM: N = mB.g;
   const mouthM: N = smoothstep(0.3, 0.7, mB.a);
+  const sA: N = texture(tex.skinA, vUv);
+  const det2Early: N = texture(tex.detail, vUv.mul(31).add(0.13));
+  const sB: N = texture(tex.skinB, vUv);
+  const sC: N = texture(tex.skinC, vUv);
 
   // --- head space -------------------------------------------------------------------------
   const eyeMid: N = vec3((lm.eyeL[0] + lm.eyeR[0]) / 2, (lm.eyeL[1] + lm.eyeR[1]) / 2, (lm.eyeL[2] + lm.eyeR[2]) / 2);
@@ -274,30 +294,55 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
           mix(float(1.4), float(-5.5), smoothstep(2.25, 2.9, theta))))));
   const edgeNoise: N = mx_noise_float(ref.mul(160)).mul(0.35);
   const scalpRegion: N = smoothstep(-0.25, 0.35, ey.sub(hairline).add(edgeNoise)).mul(headW).mul(float(1).sub(earM.mul(1.5)).clamp());
-  // Fade: density drops toward the ear line on the sides and back.
-  const fadeD: N = mix(float(1), smoothstep(-1.0, 3.0, ey).mul(smoothstep(0.5, 1.2, theta)).add(smoothstep(1.0, 0.5, theta)).clamp(), u.hairFade);
-  // Follicle speckle (fades out when a follicle would be smaller than a pixel).
-  const fol: N = mx_cell_noise_float(ref.mul(1400));
-  const folAA: N = smoothstep(0.0006, 0.0002, length(fwidth(ref)));
-  const speckle: N = mix(float(0.75), smoothstep(0.35, 0.9, fol), folAA);
-  const rowsLine: N = smoothstep(0.55, 0.9, abs(sin(ref.x.mul(170).add(sin(ref.z.mul(60)).mul(0.4))))).mul(u.rows);
-  const scalpCov: N = scalpRegion.mul(u.hairScalp).mul(fadeD).mul(speckle.mul(0.5).add(0.5)).mul(float(1).sub(rowsLine.mul(0.8)));
+  // Fade: bare skin at the ear line, a smooth 3-4 cm gradient up the sides and back, full on top.
+  const sideBack: N = smoothstep(0.55, 1.15, theta);
+  const fadeProfile: N = smoothstep(-0.6, 3.6, ey.add(edgeNoise.mul(0.8)));
+  const fadeD: N = mix(float(1), mix(float(1), fadeProfile.mul(fadeProfile), sideBack), u.hairFade);
+  // Follicles (~0.8 mm apart) and short directional strands; both settle to their mean once they
+  // are smaller than a pixel, so the painted hair never sparkles at broadcast distance.
+  const pxm: N = length(fwidth(ref));
+  const folAA: N = smoothstep(0.0007, 0.00025, pxm);
+  // Round follicle dots: one jittered dot per 0.8 mm cell (cheap; cell noise alone renders as
+  // squares up close, and a full Worley search costs 27 cells per pixel).
+  const fcell: N = floor(ref.mul(1250));
+  const fjit: N = vec3(mx_cell_noise_float(fcell), mx_cell_noise_float(fcell.add(17.3)), mx_cell_noise_float(fcell.add(41.9))).mul(0.5).add(0.25);
+  const fol: N = smoothstep(0.34, 0.12, length(fract(ref.mul(1250)).sub(fjit)));
+  const strandN: N = mx_noise_float(ref.mul(vec3(2200, 700, 2200))).mul(0.5).add(0.5);
+  const speckle: N = mix(float(0.62), fol.mul(0.55).add(strandN.mul(0.45)), folAA);
+  // Cornrow / braid partings: lines of bare scalp between rows running front to back along the
+  // head's meridians (u.rows = hair.ts ROW_FREQ, rows per π radians about the front-back axis).
+  const rowPhase: N = abs(sin(atan(q.x, q.y).mul(u.rows)));
+  const rowsLine: N = smoothstep(0.32, 0.08, rowPhase).mul(step(1, u.rows));
+  const scalpCov: N = scalpRegion.mul(u.hairScalp).mul(fadeD).mul(speckle.mul(0.55).add(0.45)).mul(float(1).sub(rowsLine.mul(0.92)));
 
-  // Eyebrows.
-  const brow = (side: number): N => {
-    const bu: N = ref.x.mul(side).sub(eyeX).div(eyeR); // outward from the eye centre
+  // Eyebrows: a dense core with a soft, irregular edge, made of individual hairs (0.4 mm apart)
+  // that grow up at the head of the brow, outward along the body and slightly down at the tail.
+  const edge0: N = edgeNoise.mul(2.8);
+  // One evaluation serves both brows (mirrored about the face's midline).
+  const brow = (): N => {
+    const side: N = select(ref.x.greaterThan(0), float(1), float(-1));
+    const bu: N = abs(ref.x).sub(eyeX).div(eyeR); // outward from the eye centre
     const bv: N = ey;
-    const centre: N = float(1.5).add(bu.add(0.15).mul(bu.add(0.15)).mul(-0.12)).add(0.25);
-    const thick: N = mix(float(0.42), float(0.16), smoothstep(-0.9, 1.6, bu));
-        const span: N = smoothstep(-1.15, -0.8, bu).mul(smoothstep(1.85, 1.35, bu));
-    // Hairs grow up and outward at the inner end, flatten along the arch toward the tail.
-    const along: N = ref.x.mul(side).mul(2600).add(ref.y.mul(mix(float(1500), float(600), smoothstep(-0.8, 1.2, bu))));
-    const strokes: N = smoothstep(0.2, 0.9, mx_cell_noise_float(vec3(along, ref.y.mul(5200).sub(ref.x.mul(side).mul(900)), 0)));
-    const density: N = smoothstep(-1.1, -0.5, bu).mul(0.35).add(0.65).mul(smoothstep(1.9, 0.9, bu).mul(0.4).add(0.6));
-    const soft: N = smoothstep(thick.mul(1.25), thick.mul(0.35), abs(bv.sub(centre)));
-    return soft.mul(span).mul(density).mul(mix(float(0.35), float(1), strokes)).mul(smoothstep(lm.eyeL[2] - 0.02, lm.eyeL[2] - 0.005, ref.z));
+    const centre: N = float(1.72).sub(bu.add(0.1).mul(bu.add(0.1)).mul(0.11));
+    const thick: N = mix(float(0.5), float(0.17), smoothstep(-0.9, 1.7, bu));
+    const span: N = smoothstep(-1.35, -0.7, bu.add(edge0.mul(0.3))).mul(smoothstep(1.95, 1.35, bu));
+    const ang: N = mix(float(1.25), float(-0.2), smoothstep(-0.9, 1.6, bu));
+    const qx: N = abs(ref.x), qy: N = ref.y;
+    // Lanes warped by noise so the hairs are not a regular comb up close.
+    const across: N = qy.mul(cos(ang)).sub(qx.mul(sin(ang))).add(strandN.sub(0.5).mul(0.0005));
+    const along: N = qx.mul(cos(ang)).add(qy.mul(sin(ang)));
+    const k = 1 / 0.00042;
+    const lane: N = floor(across.mul(k));
+    const seg: N = mx_cell_noise_float(vec3(lane, floor(along.mul(k / 7).add(lane.mul(0.37))), side));
+    const hairLine: N = smoothstep(0.45, 0.12, abs(fract(across.mul(k)).sub(0.5))).mul(step(0.28, seg));
+    const aa: N = smoothstep(0.0006, 0.00025, pxm);
+    const density: N = smoothstep(-1.15, -0.6, bu).mul(0.3).add(0.7).mul(smoothstep(1.9, 0.9, bu).mul(0.45).add(0.55)).mul(u.browDensity);
+    const edge: N = strandN.sub(0.5).mul(0.28);
+    const soft: N = smoothstep(thick.mul(1.3), thick.mul(0.3), abs(bv.sub(centre)).add(edge.mul(thick)));
+    return soft.mul(span).mul(density).mul(mix(float(0.82), hairLine.mul(1.4), aa)).clamp()
+      .mul(smoothstep(lm.eyeL[2] - 0.02, lm.eyeL[2] - 0.005, ref.z));
   };
-  const browM: N = max(brow(1), brow(-1)).mul(headW);
+  const browM: N = brow().mul(headW);
 
   // Beard regions (in eye radii relative to the eyes).
   const ax: N = abs(ref.x.sub(eyeMid.x)).div(eyeR);
@@ -316,60 +361,123 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   const noLip: N = float(1).sub(lipsM);
   // Beard: short curled strands with density falling off at the edges; stubble: follicle dots
   // over a blue-grey shadow (the hair sits under the skin surface).
-  const bStr: N = mx_cell_noise_float(ref.mul(vec3(1900, 2600, 1900)));
-  const beardCov: N = smoothstep(0.1, 0.55, beardAmt).mul(mix(float(0.45), float(1), smoothstep(0.25, 0.7, bStr))).mul(noLip).mul(0.92);
-  const stubbleCov: N = stubbleAmt.mul(mix(float(0.12), float(0.5), speckle)).mul(noLip);
+  // Beard: ~4 mm clumps of short downward strands; the strands resolve only in close-ups (AA),
+  // so at cageside the beard reads as a textured dark mass with a soft, irregular edge.
+  const clump: N = mx_noise_float(ref.mul(vec3(260, 170, 260))).mul(0.5).add(0.5);
+  const bStrand: N = strandN;
+  const beardTex: N = mix(float(0.8), smoothstep(0.25, 0.75, bStrand).mul(0.5).add(0.5), folAA).mul(clump.mul(0.3).add(0.8));
+  const beardCov: N = smoothstep(0.08, 0.6, beardAmt.add(edgeNoise.mul(0.3))).mul(beardTex).clamp().mul(noLip).mul(0.95);
+  // Stubble sits in and just above the skin: an even blue-grey shadow at distance, follicle
+  // dots only when a follicle is bigger than a pixel.
+  const stubbleDots: N = mix(float(0.3), fol, folAA);
+  const stubbleCov: N = stubbleAmt.mul(float(0.3).add(stubbleDots.mul(0.45))).mul(noLip);
 
   // --- colour --------------------------------------------------------------------------
   // One noise octave shared by pigment mottling, bruise blotching and cloth layering.
   const n1: N = mx_noise_float(ref.mul(24));
-  const mott: N = n1.mul(0.06);
-  let col: N = u.base.mul(mott.add(1));
+  // Pigment unevenness at three scales, with a slight hue shift (redder / more yellow patches);
+  // the two finer scales come from the (mip-mapped) detail texture, not per-pixel noise.
+  const pig: N = texture(tex.detail, vUv.mul(vec2(9.7, 8.3)).add(0.61));
+  const n2: N = pig.b.sub(0.5).mul(2);
+  const n3: N = det2Early.b.sub(0.5).mul(2);
+  let col: N = u.base.mul(n1.mul(0.05).add(n2.mul(0.03)).add(n3.mul(0.02)).add(1)).mul(vec3(1, n2.mul(0.015).add(1), n1.mul(0.02).add(1)));
   col = mix(col, u.palm, misc.x);
-  // Natural redness where blood runs close to the surface (ears, nose, cheeks, knuckles).
-  const haem: N = fx.y.mul(0.14).add(earM.mul(0.25)).mul(float(1).sub(u.tone.mul(0.7)));
-  col = mix(col, col.mul(vec3(1.12, 0.86, 0.84)), haem);
+  // Subdermal colour (skinB.r): redness over the knees, elbows, knuckles, ears, nose and cheeks.
+  // On dark skin the same sites read as deeper, browner pigment rather than red.
+  const redM: N = sB.r.add(earM.mul(0.2)).clamp();
+  const redTint: N = mix(vec3(1.16, 0.84, 0.82), vec3(0.8, 0.7, 0.66), smoothstep(0.35, 0.85, u.tone));
+  col = mix(col, col.mul(redTint), redM.mul(0.55));
+  // Superficial veins (skinB.g): blue-green under thin light skin; on dark skin the raised relief
+  // (skinA) carries them instead.
+  col = mix(col, col.mul(vec3(0.84, 0.9, 0.96)), sB.g.mul(u.veins).mul(float(1).sub(u.tone.mul(0.75))).mul(0.35));
   col = mix(col, u.dark, areolaM.mul(0.85));
-  col = mix(col, u.lips, lipsM.mul(0.7));
+  // Lips: their own colour, a slightly lighter vermilion border, fine vertical lines.
+  const lipLines: N = abs(sin(ref.x.mul(2300).add(edgeNoise.mul(5.7))));
+  col = mix(col, u.lips.mul(lipLines.mul(0.12).add(0.9)), lipsM.mul(0.92));
+  col = col.mul(smoothstep(0.25, 0.45, mA.r).mul(smoothstep(0.62, 0.45, mA.r)).mul(0.1).add(1));
   col = mix(col, u.nail, nailM);
-  col = mix(col, col.mul(vec3(0.82, 0.74, 0.74)), lidM.mul(0.35));
+  col = mix(col, col.mul(vec3(0.84, 0.76, 0.76)), lidM.mul(0.3));
+  // Periorbital tone: the thin skin under and inside the eyes is darker (violet-grey on light skin,
+  // deeper brown on dark skin), which is much of what makes a face read as a person, not a mask.
+  {
+    const under = (side: number): N => {
+      const ex: N = ref.x.mul(side).sub(eyeX).div(eyeR);
+      return smoothstep(1.7, 0.4, abs(ex.add(0.25))).mul(smoothstep(-2.6, -1.2, ey)).mul(smoothstep(0.1, -0.9, ey));
+    };
+    const peri: N = max(under(1), under(-1)).mul(headW).mul(front);
+    const periTint: N = mix(vec3(0.8, 0.74, 0.8), vec3(0.78, 0.72, 0.7), smoothstep(0.3, 0.8, u.tone));
+    col = mix(col, col.mul(periTint), peri.mul(0.55));
+  }
   // Inside of the mouth: dark, red, wet.
   col = mix(col, vec3(0.035, 0.008, 0.008), mouthM.mul(0.95));
-  // Muscle definition: creases darken slightly (occluded, and thinner fat shows fascia lines).
+  // Muscle definition: the mesh's cavity and the baked grooves (skinA.b) occlude.
   const cav: N = misc.w;
-  col = col.mul(float(1).sub(cav.max(0).mul(u.definition.mul(0.5).add(0.15))));
+  const cavT: N = float(0.5).sub(sA.b).mul(2).clamp(-0.5, 1);
+  col = col.mul(float(1).sub(cav.max(0).mul(u.definition.mul(0.12).add(0.04))).sub(cavT.max(0).mul(u.definition.mul(0.08).add(0.03))));
   // Hair painted on the skin.
   col = mix(col, u.hair, scalpCov.mul(0.92));
-  col = mix(col, u.brow, browM.mul(0.9));
-  col = mix(col, mix(col.mul(vec3(0.62, 0.66, 0.7)), u.hair, 0.55), stubbleCov);
+  col = mix(col, u.brow, browM.mul(0.92));
+  col = mix(col, mix(col.mul(vec3(0.58, 0.62, 0.68)), u.hair, 0.5), stubbleCov);
   col = mix(col, u.hair, beardCov);
+  // Lash line along the lid margins (skinB.a): lashes and the lid's shadowed rim.
+  const lashM: N = z67.z;
+  col = mix(col, u.brow.mul(0.4).add(0.004), lashM.mul(0.88));
 
   // --- normals ------------------------------------------------------------------------
   // MakeHuman's UV atlas gives the face about twice the texel density of the body, so the body
   // samples the pore texture at a finer tiling to keep pores roughly the same size in metres.
+  // Tangent-space slopes: pores and fine lines (strength from the pore map), the anatomy relief
+  // (scaled by muscle definition), creases (a little deeper with age), lip lines.
   const faceM: N = smoothstep(0.2, 0.6, mB.b);
-  const det: N = mix(texture(tex.detail, vUv.mul(80)), texture(tex.detail, vUv.mul(38)), faceM);
+  const det: N = mix(texture(tex.detail, vUv.mul(80)), texture(tex.detail, vUv.mul(46)), faceM);
   const det2: N = texture(tex.detail, vUv.mul(11).add(0.37));
-  const nxy: N = det.xy.sub(0.5).mul(mix(float(0.4), float(0.55), faceM)).add(det2.xy.sub(0.5).mul(0.25)).mul(float(1).sub(scalpCov.mul(0.6)));
+  const poreS: N = sA.a.mul(0.9).add(0.15);
+  // Everything under the hair, partings included (bare scalp between rows is matte, not glossy).
+  const hairy: N = max(max(scalpCov, beardCov), scalpRegion.mul(u.hairScalp).mul(0.9));
+  const poreXY: N = det.xy.sub(0.5).mul(2).mul(poreS.mul(mix(float(0.42), float(0.75), faceM))).add(det2.xy.sub(0.5).mul(0.35));
+  const anatXY: N = sA.xy.sub(0.5).mul(2).mul(u.definition.mul(0.95).add(0.3));
+  const creaseXY: N = sC.xy.sub(0.5).mul(2).mul(u.age.mul(0.4).add(0.85));
+  const lipXY: N = vec2(lipLines.sub(0.55).mul(0.3).mul(lipsM), 0);
+  const slope: N = poreXY.add(anatXY).add(creaseXY).add(lipXY).mul(float(1).sub(hairy.mul(0.6)));
+  // Sweat (anatomy.ts sweatWetness, mirrored): each point starts to run wet at a sweat level of
+  // about 1 - propensity, so wet patches grow outward from the forehead, chest and back over the
+  // rounds while the forearms and shins stay comparatively dry. Runs streak down from the wet
+  // patches (seeded per fighter); beads sit where sweat pools.
   let wet: N = float(0);
+  let damp: N = float(0);
   let beadXY: N = vec2(0, 0);
   if (opt.sweatAndDamage) {
+    const prop: N = fx.x;
+    const onset: N = float(SWEAT_ONSET.a).sub(prop.mul(SWEAT_ONSET.b));
+    const level: N = u.sweat;
+    const base: N = smoothstep(onset.sub(SWEAT_ONSET.lo), onset.add(SWEAT_ONSET.hi), level.add(n1.mul(0.06)));
+    // Runs: the detail texture's low-frequency height stretched along v (the body's UV islands
+    // run head-to-toe along v), offset per fighter; mip-mapped, so no per-pixel noise.
+    const runN: N = texture(tex.detail, vUv.mul(vec2(7, 0.8)).add(vec2(u.seedOff.mul(0.013), u.seedOff.mul(0.029)))).b.sub(0.5).mul(2.2);
+    // Runs only where sweat actually collects (not on forearms and shins), just before a region
+    // turns fully wet.
+    const runs: N = smoothstep(0.35, 0.75, runN).mul(smoothstep(onset.sub(0.3), onset.sub(0.02), level)).mul(smoothstep(0.35, 0.55, prop)).mul(0.85);
     const sw: N = texture(tex.sweat, vUv.mul(vec2(22, 16)).add(vec2(0, u.time.mul(0.004))));
-    const film: N = u.sweat.mul(fx.x).mul(1.15).clamp();
-    wet = film.mul(mix(float(0.55), float(1), sw.a));
-    beadXY = sw.xy.sub(0.5).mul(sw.a).mul(film).mul(1.6);
+    wet = max(base, runs).mul(mix(float(0.72), float(1), sw.a));
+    damp = smoothstep(onset.sub(0.28), onset, level);
+    const beads: N = sw.a.mul(smoothstep(0.5, 0.8, prop)).mul(wet);
+    beadXY = sw.xy.sub(0.5).mul(2).mul(beads).mul(1.4);
   }
-  m.normalNode = normalMap(vec3(nxy.add(0.5), 1)) as N;
-  m.clearcoatNormalNode = normalMap(vec3(nxy.mul(0.3).add(beadXY).add(0.5), 1)) as N;
+  m.normalNode = normalMap(vec3(slope.mul(0.5).add(0.5), 1)) as N;
+  // The film follows the pores and fine lines (a sweat highlight is broken, never a mirror).
+  m.clearcoatNormalNode = normalMap(vec3(slope.mul(0.75).add(beadXY).mul(0.5).add(0.5), 1)) as N;
 
   // --- dynamic: flush, damage, cuts, sweat ---------------------------------------------
-  let rough: N = mix(float(0.47), float(0.36), misc.z);
-  rough = mix(rough, float(0.42), lipsM);
-  rough = mix(rough, float(0.25), nailM);
+  // Dry skin is not glossy: ~0.56 on the limbs, ~0.42 over the oily T-zone (skinB.b), ~0.6 on
+  // palms and soles, with low-frequency variation so highlights never look stamped.
+  let rough: N = float(0.56).sub(sB.b.mul(0.15)).add(n1.mul(0.035)).add(n2.mul(0.02));
+  rough = mix(rough, float(0.62), misc.x);
+  rough = mix(rough, float(0.36), lipsM);
+  rough = mix(rough, float(0.3), nailM);
   rough = mix(rough, float(0.5), mouthM);
-  rough = mix(rough, float(0.55), misc.x);
+  rough = mix(rough, float(0.4), lashM.mul(0.5));
   rough = mix(rough, float(0.62), max(scalpCov, max(beardCov, stubbleCov.mul(0.6))));
-  rough = rough.add(float(1).sub(det.a).mul(0.12)).add(u.age.mul(0.05));
+  rough = rough.add(float(1).sub(det.a).mul(0.08).mul(poreS)).add(u.age.mul(0.04));
 
   let coat: N = float(0);
   let coatRough: N = float(0.12);
@@ -424,11 +532,13 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
     rough = mix(rough, float(0.12), blood);
     coat = max(coat, blood.mul(0.9));
 
-    // Sweat: darker (wet skin scatters less), glossier.
-    col = col.mul(float(1).sub(wet.mul(0.14)));
-    rough = mix(rough, float(0.3), wet.mul(0.6));
-    coat = max(coat, wet.mul(0.85)).mul(float(1).sub(mouthM));
-    coatRough = mix(float(0.16), float(0.07), wet);
+    // Sweat: damp skin first loses its matte (roughness drops), then a film forms: darker (wet
+    // skin scatters less light back out), a clear-coat highlight, beads where it pools.
+    col = col.mul(float(1).sub(wet.mul(0.08)));
+    rough = rough.sub(damp.mul(0.07));
+    rough = mix(rough, float(0.28), wet.mul(0.7));
+    coat = max(coat, wet.mul(0.8)).mul(float(1).sub(mouthM)).mul(float(1).sub(hairy.mul(0.92)));
+    coatRough = mix(float(0.22), float(0.1), wet);
   }
 
   // --- tattoos -------------------------------------------------------------------------
@@ -444,6 +554,12 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   rough = mix(rough, float(0.85), cloth);
   coat = coat.mul(float(1).sub(cloth));
 
+  // Lookdev debug view (dev/character.html ?dbg=<n>): 1 lash, 2 redness, 3 veins, 4 oil, 5 pores,
+  // 6 cavity, 7 sweat propensity, 8 wetness, 9 static AO. Zero cost when 0 (a uniform branch).
+  const dbgV: N = [z67.z, sB.r, sB.g, sB.b, sA.a, sA.b, fx.x, wet, fx.w];
+  let dbgCol: N = vec3(0);
+  dbgV.forEach((v: N, i: number) => { dbgCol = select(skinDebug.equal(i + 1), vec3(v, v.mul(0.5), float(0.05)), dbgCol); });
+  col = select(skinDebug.greaterThan(0), dbgCol, col);
   m.colorNode = vec4(col, 1) as N;
   m.roughnessNode = rough.clamp(0.08, 0.9) as N;
   m.metalnessNode = float(0) as N;
@@ -451,7 +567,14 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   m.specularIntensityNode = float(1).sub(max(scalpCov, beardCov).mul(0.5)) as N;
   m.clearcoatNode = coat as N;
   m.clearcoatRoughnessNode = coatRough as N;
-  m.specOcclusionNode = det.a.mul(0.35).add(0.65).mul(float(1).sub(cav.max(0).mul(0.4))).mul(float(1).sub(mouthM.mul(0.8)));
+  m.specOcclusionNode = det.a.mul(0.35).add(0.65).mul(float(1).sub(cav.max(0).mul(0.4))).mul(float(1).sub(cavT.max(0).mul(0.4)))
+    .mul(float(1).sub(mouthM.mul(0.8)));
+  // Image-based light: static AO (under the jaw, sockets, nostrils, ears, between fingers) and the
+  // baked grooves, so the bright canvas is not mirrored into every downward-facing crease.
+  // Downward-facing skin sees mostly the fighter's own body, not the lit canvas: without this the
+  // underside of every sweaty jaw and pectoral mirrors the canvas as a white band.
+  const down: N = smoothstep(0.15, 0.8, normalWorld.y.negate()).mul(0.45);
+  m.aoNode = fx.w.mul(float(1).sub(cavT.max(0).mul(0.35))).mul(float(1).sub(mouthM.mul(0.7))).mul(float(1).sub(down)) as N;
   m.thinNode = max(misc.y, earM.mul(0.9));
   m.scatterColorNode = u.scatter;
   m.scatterAmountNode = float(1).sub(u.tone.mul(0.35));

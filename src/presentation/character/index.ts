@@ -3,7 +3,8 @@
  *
  * `createCharacterFactory()` returns the factory the presenter uses through `contract.ts`:
  *  - `preload()` fetches the MakeHuman-derived body asset (static/assets/body/), packs MPFB's UV
- *    region masks and generates the procedural detail textures — once, shared by every fighter;
+ *    region masks, inflates the baked anatomy/region skin maps (skinMaps.ts) and generates the
+ *    procedural detail textures — once, shared by every fighter;
  *  - `create()` builds one fighter (morph, fit, skeleton, skin, hair, kit) and returns a
  *    `CharacterActor`.
  */
@@ -12,10 +13,12 @@ import type { BoutPresentation, CharacterActor, CharacterFactory, QualitySetting
 import { loadBodyAsset } from './asset';
 import { canonical } from './canonical';
 import { loadMasks } from './masks';
+import { loadSkinMaps } from './skinMaps';
 import { makeClothDetail, makeLeatherDetail, makeSkinDetail, makeSweatDetail } from './textures';
 import { FighterActor, type SharedResources } from './actor';
 
 export { FighterActor } from './actor';
+export { skinDebug } from './skinMaterial';
 export { FACE_PRESETS, HAIR_STYLES, HAIR_COLOURS, skinAlbedo, skinPalette } from './appearance';
 
 export interface CharacterFactoryOptions {
@@ -31,12 +34,12 @@ export function createCharacterFactory(opts: CharacterFactoryOptions = {}): Char
     preload(): Promise<void> {
       if (!loading) {
         loading = (async () => {
-          const [asset, masks] = await Promise.all([loadBodyAsset(base), loadMasks(base)]);
+          const [asset, masks, maps] = await Promise.all([loadBodyAsset(base), loadMasks(base), loadSkinMaps(base)]);
           const materials = new Map<string, THREE.Material>();
           shared = {
             asset,
             can: canonical(asset),
-            skinTex: { maskA: masks.maskA, maskB: masks.maskB, detail: makeSkinDetail(), sweat: makeSweatDetail() },
+            skinTex: { maskA: masks.maskA, maskB: masks.maskB, detail: makeSkinDetail(), sweat: makeSweatDetail(), ...maps },
             kitTex: { cloth: makeClothDetail(), leather: makeLeatherDetail() },
             material<M extends THREE.Material>(key: string, make: () => M): M {
               let m = materials.get(key);

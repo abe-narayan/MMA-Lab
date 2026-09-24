@@ -27,6 +27,8 @@ import { BONE_COUNT, BONE_PARENT, B, FACE_CHANNELS, finishRest, type RestSkeleto
 import type { FighterDefinition, FighterRuntime } from '../../sim';
 import { applyTarget, type BodyAsset } from './asset';
 import { resolveFace } from './appearance';
+import { anatomyForm } from './anatomy';
+import { canonical } from './canonical';
 
 type V3 = [number, number, number];
 
@@ -81,7 +83,7 @@ export function bodyParams(def: FighterDefinition, runtime?: FighterRuntime): Bo
   // lean end sits just under average rather than at MakeHuman's gaunt minimum.
   const weight = clamp(0.5 + (bf - 12) * 0.02 + (bulk - 1) * 0.5 + 0.1 * blend.endo - 0.08 * blend.ecto, 0.3, 1);
   const height = clamp(0.5 + (b.heightM - 1.77) * 1.6, 0.15, 0.85);
-  const face = resolveFace(def.appearance);
+  const face = resolveFace(def.appearance, def.id);
   const regional = new Map(face.morphs);
   const neck = (def.physical?.neckStrength ?? 60) / 100;
   const add = (k: string, v: number): void => { regional.set(k, clamp((regional.get(k) ?? 0) + v, -1, 1)); };
@@ -580,7 +582,7 @@ function findLandmarks(asset: BodyAsset, pos: Float32Array, eyeRadius: number): 
     const s = asset.virtualIndex(name);
     return [pos[s * 3], pos[s * 3 + 1], pos[s * 3 + 2]];
   };
-  const eyeL = e('eye-l'), eyeR = e('eye-r');
+  const eyeL = eyeCentre(asset, pos, 'eye-l'), eyeR = eyeCentre(asset, pos, 'eye-r');
   const headW = (s: number): number => {
     let w = 0;
     for (let k = 0; k < 4; k++) if (asset.skinIdx[s * 4 + k] === B.head) w += asset.skinW[s * 4 + k] / 255;
@@ -611,6 +613,41 @@ function findLandmarks(asset: BodyAsset, pos: Float32Array, eyeRadius: number): 
     cheekL: cheek(eyeL, 1), cheekR: cheek(eyeR, -1),
     noseTip, lips,
   };
+}
+
+/**
+ * The eyeball centre for a fitted body. MakeHuman's helper-eye centre drifts against the lids under
+ * the macro and face morphs (up to ~3 mm up, which buries the iris under the upper lid), so the
+ * ball is re-centred on its own lid-margin ring: the ring's fitted mean minus the ring's canonical
+ * offset from the canonical eye centre (scaled by the ring's size change).
+ */
+function eyeCentre(asset: BodyAsset, pos: Float32Array, name: 'eye-l' | 'eye-r'): V3 {
+  const can = canonical(asset);
+  const v = asset.virtualIndex(name);
+  const E = [can.pos[v * 3], can.pos[v * 3 + 1], can.pos[v * 3 + 2]];
+  const nBody = asset.header.counts.body;
+  const cm = [0, 0, 0], fm = [0, 0, 0];
+  const ring: number[] = [];
+  for (let s = 0; s < nBody; s++) {
+    const dx = can.pos[s * 3] - E[0], dy = can.pos[s * 3 + 1] - E[1], dz = can.pos[s * 3 + 2] - E[2];
+    if (dz <= 0.002 || Math.hypot(dx, dy, dz) > 0.0145) continue;
+    ring.push(s);
+    for (let k = 0; k < 3; k++) { cm[k] += can.pos[s * 3 + k]; fm[k] += pos[s * 3 + k]; }
+  }
+  const helper: V3 = [pos[v * 3], pos[v * 3 + 1], pos[v * 3 + 2]];
+  if (ring.length < 6) return helper;
+  for (let k = 0; k < 3; k++) { cm[k] /= ring.length; fm[k] /= ring.length; }
+  // Ring size (mean radius about its centre), canonical vs fitted.
+  let rc = 0, rf = 0;
+  for (const s of ring) {
+    rc += Math.hypot(can.pos[s * 3] - cm[0], can.pos[s * 3 + 1] - cm[1]);
+    rf += Math.hypot(pos[s * 3] - fm[0], pos[s * 3 + 1] - fm[1]);
+  }
+  const k = rc > 0 ? rf / rc : 1;
+  const out: V3 = [fm[0] - (cm[0] - E[0]) * k, fm[1] - (cm[1] - E[1]) * k, fm[2] - (cm[2] - E[2]) * k];
+  // Keep the helper's depth when it is plausible (the ring mean says little about depth).
+  out[2] = 0.5 * out[2] + 0.5 * helper[2];
+  return out;
 }
 
 /** A bump along the normal: gaussian falloff around `c` with radius `rad`, peak `amp` metres. */
@@ -673,6 +710,9 @@ export function buildBody(asset: BodyAsset, def: FighterDefinition, runtime?: Fi
   const f = fitTargets(def, runtime);
   const measures = fit(asset, pos, f);
   const scale = f.heightM / before;
+  // Anatomical form: muscle masses as real displacement, scaled by definition (body fat hides them).
+  const definition = runtime?.rig.definition ?? clamp01(1 - (def.body.bodyFatPct ?? 12) / 25);
+  applyForm(asset, pos, Math.pow(clamp01(definition), 1.2) * (0.7 + 0.5 * params.muscle) * scale);
 
   // Normals: body over its welded triangles, helpers over their own.
   const normal = new Float32Array(asset.srcCount * 3);
@@ -729,6 +769,29 @@ export function buildBody(asset: BodyAsset, def: FighterDefinition, runtime?: Fi
   bump(asset, pos, normal, swellMorphs[5], landmarks.lips, 1.1 * r, 0.006, 0.6);
 
   return { params, targets: f, measures, pos, normal, cavity, jointsA, aToT, rest, faceMorphs, swellMorphs, landmarks, scale };
+}
+
+/**
+ * Displace the body vertices along their normals by `anatomyForm` (evaluated in canonical space,
+ * so every morph gets the same anatomy in the same place) times `amount`.
+ */
+function applyForm(asset: BodyAsset, pos: Float32Array, amount: number): void {
+  if (!(amount > 0)) return;
+  const can = canonical(asset);
+  const nBody = asset.header.counts.body;
+  const nrm = new Float32Array(asset.srcCount * 3);
+  computeNormals(pos, asset.lodIndex[0], asset.renderSrc, nrm);
+  normalizeRange(nrm, 0, nBody);
+  const p: [number, number, number] = [0, 0, 0];
+  const n: [number, number, number] = [0, 0, 0];
+  for (let s = 0; s < nBody; s++) {
+    for (let k = 0; k < 3; k++) { p[k] = can.pos[s * 3 + k]; n[k] = can.normal[s * 3 + k]; }
+    const h = anatomyForm(p, n) * amount;
+    if (h === 0) continue;
+    pos[s * 3] += nrm[s * 3] * h;
+    pos[s * 3 + 1] += nrm[s * 3 + 1] * h;
+    pos[s * 3 + 2] += nrm[s * 3 + 2] * h;
+  }
 }
 
 /** T-pose positions of a built body (src space), for measurement and tests. */
