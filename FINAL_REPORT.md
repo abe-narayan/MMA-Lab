@@ -12,43 +12,38 @@ methods, its relative results are the ones to trust.
 
 ## Final quality gate
 
-> **PLACEHOLDER: to be filled in after the final run. Do not treat the lines below as results.**
->
-> | Check | Command | Result |
-> |---|---|---|
-> | Unit tests | `npm test` | _files: … · tests: … passed / … failed / … skipped / … todo_ |
-> | Typecheck | `npx tsc --noEmit` | _… errors_ |
-> | Production build | `npm run build` | _ok / failed · dist size …_ |
-> | Golden corpus | `npm run golden:check` | _… / … bouts identical_ |
-> | Engine version at the gate | `src/sim/record/recorder.ts` | _…_ |
-> | Commit | `git rev-parse --short HEAD` | _…_ |
+Run on a clean checkout of `main` at `3f80e0d` (the code this report ships with; this commit only adds docs),
+engine **5.0.0**, on the development laptop (Core Ultra 7 256V, 16 GB, Node 24):
 
-**Pending at time of writing** (in the working tree, not committed when this report was written; the gate
-above is where their state gets confirmed):
-- **Realism pass** (`docs/design/REALISM_PASS.md` is still a draft marked "metrics to be filled from the final run";
-  `tests/realism.test.ts`; new `src/sim/ai/footwork.ts`, `ai/scorecard.ts`, `striking/tactics.ts`). This pass targets
-  **engine 6.0.0**. The tree still reads `SIM_ENGINE_VERSION = '5.0.0'`. If the pass lands, every bout digest,
-  the golden fixture, the calibration numbers in §15 and §28 and possibly the "no effect" list in §20 change,
-  and the numbers here that describe engine 5.0.0 become historical.
-- **Performance pass 2** and the **leak fix** (both written up in `docs/design/PHASE8_NOTES.md`, code and tests in
-  the working tree: `tests/presentation.perf2.test.ts`, `tests/presentation.leak.test.ts`,
-  `src/presentation/character/release.ts`).
-- **UI pass 2** (`docs/design/UI_PASS.md`, "UI pass 2"). It covers code splitting, the Match setup and
-  Tournaments redesign, the debug-switch gate (`src/presentation/devFlags.ts`; audit H3: URL switches and
-  `window.__*` globals work only on the dev server or with `?capture=1`) and app-side per-frame costs (audit H4).
-  Its numbers below are copied from that write-up.
+| Check | Command | Result |
+|---|---|---|
+| Unit, integration, replay and determinism tests | `npm test` | **49 / 49 files, 1,471 passed, 0 failed**, 2 skipped, 1 todo (422 s) |
+| Typecheck | `npx tsc --noEmit` | **0 errors** |
+| Production build | `npx vite build` | **ok**, built in 10 s, `dist/` 22 MB (first-screen JS 375 KB gzip) |
+| Golden corpus | `npm run golden:check` | **41 / 41 bouts identical**; recorded and unrecorded runs share every digest |
+| Engine version | `src/sim/record/recorder.ts` | `5.0.0` |
 
-> **PLACEHOLDER: realism pass headline numbers (engine 6.0.0), to be filled in by the coordinator.**
-> Engine version: _…_ · golden fixture regenerated: _yes/no_ · calibration run (bouts, plans): _…_ ·
-> master rows PASS / WIDE / FAIL: _… (engine 5.0.0: 23 / 22 / 80)_ · SLpM _…_ · outcome mix KO-TKO / SUB / DEC _…_ ·
-> tier checks _…/8_ · strategy checks _…/8_ · sim throughput (bouts/s, 3R) _…_ · settings whose "no effect" status
-> changed: _…_
+Notes: the batch-runner determinism test (`calibration.infra`, 1 vs 2 workers) needs about 3 minutes and hit its
+180 s timeout once when the whole suite ran beside other heavy jobs; it passes on its own and in this run. The
+lint step is `tsc` (the project has no separate linter). Browser smoke tests were done by the QA2 pass
+(`docs/design/QA2_FINDINGS.md`) and the per-pass capture scripts, not in CI.
 
-> **PLACEHOLDER: leak fix and UI pass 2 as committed. Confirm or replace after they land.**
-> Leak fix (from `PHASE8_NOTES.md` "Leak fix", pre-commit): WebGL2 heap 39.6 → 49.4 MB over 20 switches, where QA2
-> measured 42 → 182 MB over 14 · commit _…_.
-> UI pass 2 (from `UI_PASS.md`, pre-commit): first-screen JS 1,048 → 375 KB gzip; desktop ready/TTI 458 → 302 ms ·
-> commit _…_.
+**Realism pass: not merged.** It is parked on branch `realism-6.0` (commit `262b6ce`, engine 6.0.0) and
+`main` stays at engine **5.0.0**. Its structural fixes work and its sim tests are green, but it was not
+recalibrated before the deadline: takedown accuracy (26 % vs 38 %), knockdown rate (0.48 vs 0.30 per 15 min),
+outcome mix (28 / 13 / 58 vs 32 / 18 / 49) and KD-to-finish (38 % vs 65 %) moved out of tolerance on a 330-bout
+run, it is ~25–30 % slower per tick, and four UI/presentation tests depend on the old bout content. What it found
+(dead code, not bad numbers) is the most important next step; see §29 and `docs/design/REALISM_PASS.md` on that
+branch: grappling skills were never applied (alias mismatch), the chapter 02 tactical layer was never used at
+contact, feints did nothing, the counter boost never switched off, movement lasted one tick, score belief read a
+field nothing wrote, plan labels were ignored, no rotational KO term. On that branch handedness, balance, grip
+strength, initiative, game plan, plan B, risk-when-behind and heart all affect bouts; on `main` they are still
+badged "No effect on the bout" in the editor (§20).
+
+**Leak fix and UI pass 2** landed in `d8717f5` (with rendering pass 2); final-review fixes in `e516c59`, `3f80e0d`.
+Leak fix: GPU geometries/textures/programs and scene objects flat across 20 bout switches on WebGPU and WebGL2
+(QA2 measured +~40 geometries and ~10 MB heap per switch before); the JS heap still drifts ~0.4 MB per switch
+(cause not found). UI pass 2: first-screen JS 1,048 → 375 KB gzip, desktop ready 458 → 302 ms.
 
 ---
 
@@ -863,9 +858,8 @@ are dropped (`REVIEW_PHASE8_9.md` L9; whether this was fixed was not verified).
 
 ## 28. Known limitations
 
-> **PLACEHOLDER: calibration after the realism pass (engine 6.0.0).** Replace or annotate the engine 5.0.0
-> figures below with the realism pass's final run: master rows PASS / WIDE / FAIL _…_, strategy checks _…/8_,
-> tier checks _…/8_, and which of the misses listed below it closed: _…_
+The calibration below is for engine 5.0.0, which is what `main` ships. The realism pass (branch `realism-6.0`)
+changes these numbers and is not yet recalibrated (see the note at the top of this report).
 
 **Calibration (engine 5.0.0; `docs/CALIBRATION.md`, `PHASE9_TUNING.md` §4–§5):**
 - The master table passes **23 of 125** applicable rows (22 WIDE, 80 FAIL). Core rows pass 23/99, class rows 0/22
@@ -943,25 +937,29 @@ top of this report is the authoritative state.
 
 ## 29. Future improvements (ranked)
 
-1. **Model decisions for the calibration misses.** Add a defence-skill-by-tier term and a wider within-tier spread;
-   a rotational KO term for hooks; reach-keyed range management; late-fight risk for trailing fighters; clinch and
-   ground leg strikes; an unconscious outcome for chokes. Then run the full per-class sample (~2,000 bouts per
-   class).
-2. **Wire the registry mirrors** for striking, submissions and AI, so `--params` tuning reaches them without code
+1. **Finish and merge the realism pass (branch `realism-6.0`).** It already fixes the dead code behind most
+   calibration misses (grappling skills never applied, tactical layer unused at contact, feints, counter boost,
+   one-tick movement, scorecard belief, plan labels, rotational KO term) and makes the eight "no effect" settings
+   work. Remaining: retune takedown accuracy, knockdown rate, outcome mix and KD-to-finish back into tolerance,
+   recover the ~25–30 % per-tick cost, re-pick the four content-dependent UI/presentation test seeds, then run the
+   full per-class sample (~2,000 bouts per class) and merge as engine 6.0.0.
+2. **Remaining model decisions** after that: defence-skill-by-tier term and within-tier spread, clinch and ground
+   leg strikes, an unconscious outcome for chokes, judo-based styles losing too often.
+3. **Wire the registry mirrors** for striking, submissions and AI, so `--params` tuning reaches them without code
    changes.
-3. **Cross-engine determinism.** Use a deterministic math library for the few transcendental functions in the sim,
+4. **Cross-engine determinism.** Use a deterministic math library for the few transcendental functions in the sim,
    then test replays across Chromium, Firefox and Safari.
-4. **Rendering cost.** Cheaper GTAO on handheld shots; a veil material for defocused fence panels; warm-up
+5. **Rendering cost.** Cheaper GTAO on handheld shots; a veil material for defocused fence panels; warm-up
    cancellation on bout switch; removing the WebGL2 Ultra-switch long task; multi-fighter frame rate.
-5. **History on the replay library.** Store the portable profile, about 50× smaller than today.
-6. **Animation.** Grapple-solver pops and interpenetration; more capture for knees, elbows, spins and falls;
+6. **History on the replay library.** Store the portable profile, about 50× smaller than today.
+7. **Animation.** Grapple-solver pops and interpenetration; more capture for knees, elbows, spins and falls;
    directional KO falls; a better celebration take.
-7. **Camera.** A proper chase rig for the follow camera; replay angles that frame the landing strike; referee-aware
+8. **Camera.** A proper chase rig for the follow camera; replay angles that frame the landing strike; referee-aware
    REVERSE choice.
-8. **Settings that do nothing.** Either make game-plan mode, risk when behind and heart matter, or remove them (the
+9. **Settings that do nothing.** Either make game-plan mode, risk when behind and heart matter, or remove them (the
    realism pass may address the first).
-9. **Look.** Crowd detail up close, modelled truss lamps, live LED boards, cloth for officials, a cage door.
-10. **Code health.** Split the >1,500-line files (`grappling/graph.ts` 3,494 lines); wire or remove `ai/multi.ts`;
+10. **Look.** Crowd detail up close, modelled truss lamps, live LED boards, cloth for officials, a cage door.
+11. **Code health.** Split the >1,500-line files (`grappling/graph.ts` 3,494 lines); wire or remove `ai/multi.ts`;
     trim the ~1,100 unused exports (`AUDIT_FINAL.md` M2, M3, L4).
 
 ## 30. Exact commands

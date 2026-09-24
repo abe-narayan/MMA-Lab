@@ -199,11 +199,11 @@ A series of independent, measured passes after Phases 8–9. Each has a write-up
 | UI/UX overhaul (UI pass 1) | Design system; fighter editor profile view with parameter-effect tests; Batch screen (5,000 bouts, 0 errors, fingerprint identical for any worker count); QA2 #4, #5, #7–#10 fixed | `docs/design/UI_PASS.md` | `d1f14bf`, `55c7d66` |
 | Batch runner headroom | Pauses at 88 % CPU/RAM, resumes below 80 % | `scripts/batch/monitor.ts` | `07960bb` |
 | Cleanup | Legacy v3 stack retired. CI determinism on the v4 golden corpus. 31 MB of unused assets removed. `dist/` 53.3 → 18.4 MB | AUDIT_FINAL (resolved items) | `f54d16e`, `fdc9dfd` |
-| Rendering performance 2 | WebGL2 cold load 38.9 s → 9.7–16.0 s. Close-shot scene pass −11 to −23 %. Corner camera clear of the crew. QA2 #1 (WebGPU rebuild hang) and #2 (quality-switch crash) fixed | PHASE8_NOTES "Performance pass 2" | _uncommitted at time of writing_ |
-| Leak fix | QA2 #3: five retainers found. WebGL2 heap over bout switches 42 → 182 MB before, 39.6 → 49.4 MB over 20 switches after; renderer counts flat | PHASE8_NOTES "Leak fix" | _uncommitted at time of writing_ |
-| UI pass 2 | Code splitting: first-screen JS 1,048 → 375 KB gzip; TTI 458 → 302 ms. Step-based Match setup and Tournaments. Debug switches gated (audit H3). App per-frame costs (H4) | UI_PASS "UI pass 2" | _uncommitted at time of writing_ |
-| Realism pass | Engine 6.0.0 (draft) | `docs/design/REALISM_PASS.md` | _placeholder: to be filled when it lands_ |
-| Final documentation | README rewrite, `FINAL_REPORT.md`, this section | `FINAL_REPORT.md` | _uncommitted at time of writing_ |
+| Rendering performance 2 | WebGL2 cold load 38.9 s → 9.7–16.0 s. Close-shot scene pass −11 to −23 %. Corner camera clear of the crew. QA2 #1 (WebGPU rebuild hang) and #2 (quality-switch crash) fixed | PHASE8_NOTES "Performance pass 2" | `d8717f5` |
+| Leak fix | QA2 #3: five retainers found. WebGL2 heap over bout switches 42 → 182 MB before, 39.6 → 49.4 MB over 20 switches after; renderer counts flat | PHASE8_NOTES "Leak fix" | `d8717f5` |
+| UI pass 2 | Code splitting: first-screen JS 1,048 → 375 KB gzip; TTI 458 → 302 ms. Step-based Match setup and Tournaments. Debug switches gated (audit H3). App per-frame costs (H4) | UI_PASS "UI pass 2" | `d8717f5`, `3f80e0d` |
+| Realism pass | Engine 6.0.0: structural fixes (grappling skills never applied, tactical layer unused, feints, counter boost, one-tick movement, scorecard, plan labels, rotational KO). Not recalibrated, so not merged; `main` stays at 5.0.0 | `docs/design/REALISM_PASS.md` (on the branch) | branch `realism-6.0`, `262b6ce` |
+| Final documentation | README rewrite, `FINAL_REPORT.md`, this section | `FINAL_REPORT.md` | `33b7863` + final gate commit |
 
 ## Known gaps carried forward
 
