@@ -28,7 +28,7 @@ import { computeStats, type BoutStats } from './stats';
  * recorded under a different version is reported as `engine-version`, never
  * silently re-verified.
  */
-export const SIM_ENGINE_VERSION = '4.2.0';
+export const SIM_ENGINE_VERSION = '4.3.0';
 
 export interface SimOptions {
   /** Keep every frame. Off in batch runs (09 §1.3.3). */

@@ -830,3 +830,9 @@ A test in `tests/style.test.ts` had asserted equal draws-per-tick for two bouts 
 preferences; it only held because both variants threw the same out-of-range kicks on the same ticks.
 It now asserts what the 09 §2.7 schedule actually guarantees (the per-tick floor); the strict per-tick
 equality test beside it is unchanged.
+
+**C-5 (fixed, engine 4.3.0): "Work!" warning emitted every tick.** Once a ground position had been
+static past the warning threshold, the referee re-issued `refereeWarning` every 0.1 s until work
+resumed or a stand-up. In the Watch demo bout that was 4,071 of 4,654 events (87% of the log). It now
+fires once, on the tick the stall crosses the threshold: 2 warnings, 585 events, same result. No RNG
+draw involved, so the draw schedule is unchanged; the event stream changes, hence the version bump.

@@ -1212,7 +1212,12 @@ export class Referee {
         if (this.rs.ground.standupPolicy === 'none') continue;
         const mult = positionMult(e.position);
         const since = e.sSinceEffort ?? 0;
-        if (since >= this.cfg.standupWarnS * mult) {
+        // "Work!" is said once, on the tick the stall crosses the warning
+        // threshold — not repeated every 0.1 s until something happens. The
+        // unlatched version emitted a warning per tick for as long as a
+        // position stayed static: 87% of a typical bout's event log.
+        const warnAt = this.cfg.standupWarnS * mult;
+        if (since >= warnAt && since - dt < warnAt) {
           this.emit('refereeWarning', -1, e.a, { reason: 'work' }, 'Work!');
         }
         if (since >= this.cfg.standupS * mult) {
