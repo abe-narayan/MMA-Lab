@@ -5,16 +5,13 @@
  */
 import type { Animator } from '../contract';
 import { StandingAnimator, type AnimatorOptions } from './animator';
-import { ensureMotionLibrary } from './clips';
 import './grapple'; // side effect: registers the paired-pose GrappleSolver (integration)
 
 export function createAnimator(opts?: AnimatorOptions): Animator {
-  // Motion capture loads in the background; the animator is procedural until it
-  // arrives and then crossfades onto the capture-driven layers.
-  if (opts?.motion === undefined) void ensureMotionLibrary();
   return new StandingAnimator(opts);
 }
 
 export { StandingAnimator, displaySeparation } from './animator';
 export type { AnimatorOptions } from './animator';
-export { ensureMotionLibrary, registerMotionLibrary, registeredMotionLibrary } from './clips';
+export { registerClipLibrary } from './clips';
+export type { ClipLibrary, MotionClip, ClipQuery } from './clips';
