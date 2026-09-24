@@ -20,6 +20,7 @@ import type { DecisionPolicy, FighterIntent } from '../core/policy';
 import type { World } from '../core/world';
 import type { SimEvent } from './events';
 import { buildSnapshot, type TickSnapshot } from './snapshot';
+import { FrameStore } from './frames';
 import { computeStats, type BoutStats } from './stats';
 
 /**
@@ -222,12 +223,15 @@ export function createSim(config: SimConfig, opts: SimOptions = {}): Sim {
  */
 export function simulate(config: SimConfig, opts: SimOptions = {}): BoutRun {
   const sim = createSim(config, opts);
-  const frames: TickSnapshot[] | undefined = opts.record ? [] : undefined;
-  if (frames) frames.push(sim.snapshot());
+  // Frames go into compact columns (09 §4.5, frames.ts); `run.frames` is a
+  // read-only TickSnapshot[] view over them.
+  const store = opts.record ? new FrameStore() : undefined;
+  if (store) store.push(sim.snapshot());
   while (sim.step()) {
-    if (frames) frames.push(sim.snapshot());
+    if (store) store.push(sim.snapshot());
   }
-  if (frames) frames.push(sim.snapshot());
+  if (store) store.push(sim.snapshot());
+  const frames = store?.view();
   const result = sim.result;
   if (!result) throw new Error('A bout must always end with a BoutResult');
   const events = [...sim.events];

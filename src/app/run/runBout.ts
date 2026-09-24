@@ -30,8 +30,8 @@ import {
   type BoutRun, type SimConfig,
 } from '../../sim';
 import {
-  createRunner, DEFAULT_PROGRESS_TICKS,
-  type FromWorker, type ToWorker,
+  createRunner, DEFAULT_PROGRESS_TICKS, fromWire,
+  type FromWorker, type FromWorkerWire, type ToWorker,
 } from '../workers/simProtocol';
 import type { HistoryEntry } from '../store/types';
 
@@ -133,8 +133,9 @@ export function runBout(config: SimConfig, opts: RunBoutOptions = {}): BoutRunHa
       reject(new BoutCancelled());
     };
 
-    worker.onmessage = (event: MessageEvent<FromWorker>): void => {
-      const msg = event.data;
+    worker.onmessage = (event: MessageEvent<FromWorkerWire>): void => {
+      // Recorded frames arrive as packed columns; rebuild the view.
+      const msg = fromWire(event.data);
       if (msg.id !== id || settled) return;
       if (msg.type === 'progress') {
         opts.onProgress?.({ tick: msg.tick, round: msg.round });

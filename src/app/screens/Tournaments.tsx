@@ -31,8 +31,9 @@ import {
   ARENA_IDS, RULESET_IDS, RULESET_LABELS, pairingWarning,
 } from '../model/matchModel';
 import {
-  SUPPORTED_SIZES, applyResult, bracketPlan, buildBracket, championOf, matchCount, readyMatches,
-  seedOrder, standings, type BracketFormat, type BracketMatch,
+  MAX_NO_DECISION_RUNS, SUPPORTED_SIZES, applyResult, bracketPlan, buildBracket, championOf,
+  flatMatchIndex, matchCount, matchSeed, readyMatches, recordNoDecision, resolveMatch, seedOrder,
+  standings, type BracketFormat, type BracketMatch,
 } from '../model/bracket';
 import {
   CAREER_GAP_DAYS, FRESH, KO_HISTORY_ODDS_RATIO, applyCarryOver, carriedAfter, damageLedger,
@@ -235,8 +236,11 @@ export function Tournaments({
 
     // A flat, stable index so a match's seed never changes when the bracket
     // grows around it.
-    const flat = t.bracket.slice(0, round).reduce((n, r) => n + r.length, 0) + match;
-    const seed = boutSeed(t.id, 'tournament', flat);
+    // A rematch after a draw salts that seed with the attempt number (QA-7):
+    // a new bout, but the same one every time the tournament is replayed.
+    const flat = flatMatchIndex(t.bracket, round, match);
+    const attempts = slot.attempts ?? 0;
+    const seed = matchSeed(boutSeed(t.id, 'tournament', flat), attempts);
 
     const key = `${round}:${match}`;
     setRunning(key);
@@ -260,18 +264,28 @@ export function Tournaments({
         matchStore.putHistory(entry);
 
         const r = outcome.run.result;
-        // A draw or a no-contest has no winner to advance. Rather than pick
-        // one, the screen says so and leaves the match open to be re-run —
-        // which is also what a promotion does.
-        if (typeof r.winner !== 'number') {
-          setMessage(`${methodLabel(r.method)} — no winner to advance. Run the match again `
-            + '(it will use the same seed, so change the settings or the fighters first).');
+        const plan = bracketPlan(t.format, t.size);
+        const outcomeForBracket = resolveMatch(slot, t.entrantIds, r.winner, outcome.run.stats.fighters);
+        if (outcomeForBracket.kind === 'rematch') {
+          // A draw or a no-contest has no winner to advance. The match stays
+          // open for a rematch on a fresh, derived seed (model/bracket.ts).
+          matchStore.putTournament({
+            ...t,
+            bracket: recordNoDecision(t.bracket as BracketMatch[][], round, match),
+          });
+          setMessage(`${methodLabel(r.method)} — no winner to advance. Run the match again for a `
+            + `rematch on a new seed (run ${outcomeForBracket.nextAttempt + 1} of ${MAX_NO_DECISION_RUNS}; `
+            + 'if that is level too, it is decided on knockdowns, significant strikes, takedowns, '
+            + 'submission attempts, control time, then seeding).');
           onRan(outcome);
           onChanged();
           return;
         }
-        const winnerId = r.winner === 0 ? (slot.a as string) : (slot.b as string);
-        const plan = bracketPlan(t.format, t.size);
+        const winnerId = outcomeForBracket.winnerId;
+        if (outcomeForBracket.tieBreak) {
+          setMessage(`${methodLabel(r.method)} again after ${MAX_NO_DECISION_RUNS} runs — `
+            + `${nameOf(winnerId)} advances on the tie-break.`);
+        }
         const next: Tournament = {
           ...t,
           bracket: applyResult(plan, t.bracket as BracketMatch[][], round, match, winnerId, entry.id),
@@ -285,7 +299,7 @@ export function Tournaments({
         setMessage(`The bout failed: ${err instanceof Error ? err.message : String(err)}`);
       },
     );
-  }, [historyById, matchStore, onChanged, onRan, recordById]);
+  }, [historyById, matchStore, nameOf, onChanged, onRan, recordById]);
 
   // ---- render ------------------------------------------------------------
 

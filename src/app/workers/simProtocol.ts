@@ -30,8 +30,9 @@
 
 import {
   computeStats, createSim,
-  type BoutRun, type SimConfig, type TickSnapshot,
+  type BoutRun, type SimConfig,
 } from '../../sim';
+import { FrameStore, isPackedFrames, packFrames, unpackFrames, type PackedFrames } from '../../sim/record/frames';
 
 export interface RunMessage {
   type: 'run';
@@ -52,6 +53,32 @@ export type FromWorker =
   | { type: 'progress'; id: string; tick: number; round: number }
   | { type: 'done'; id: string; run: BoutRun }
   | { type: 'error'; id: string; message: string };
+
+/**
+ * The `done` message as it crosses a real thread boundary. A recorded run's
+ * `frames` is a Proxy view over typed-array columns, which `postMessage`
+ * cannot clone, so the worker shim sends the columns themselves
+ * (`packedFrames`, with their buffers transferred rather than copied) and
+ * `runBout` rebuilds the view on arrival. In-process hosts never see this.
+ */
+export type WireDone = { type: 'done'; id: string; run: Omit<BoutRun, 'frames'>; packedFrames?: PackedFrames };
+export type FromWorkerWire = Exclude<FromWorker, { type: 'done' }> | WireDone;
+
+/** Worker side: a message ready for `postMessage`, and what to transfer. */
+export function toWire(message: FromWorker): { message: FromWorkerWire; transfer: ArrayBuffer[] } {
+  if (message.type !== 'done' || !message.run.frames) return { message, transfer: [] };
+  const { frames, ...run } = message.run;
+  const { packed, transfer } = packFrames(frames);
+  return { message: { type: 'done', id: message.id, run, packedFrames: packed }, transfer };
+}
+
+/** Main-thread side: the inverse of `toWire`. */
+export function fromWire(message: FromWorkerWire): FromWorker {
+  if (message.type !== 'done') return message;
+  const { packedFrames, ...rest } = message as WireDone;
+  if (!isPackedFrames(packedFrames)) return { type: 'done', id: rest.id, run: rest.run as BoutRun };
+  return { type: 'done', id: rest.id, run: { ...rest.run, frames: unpackFrames(packedFrames) } };
+}
 
 /** Ticks between progress messages. 200 ticks is 2 s of fight at the default dt. */
 export const DEFAULT_PROGRESS_TICKS = 200;
@@ -85,14 +112,16 @@ export function createRunner(host: RunnerHost): Runner {
     try {
       const slice = Math.max(1, Math.round(msg.progressEveryTicks || DEFAULT_PROGRESS_TICKS));
       const sim = createSim(msg.config);
-      const frames: TickSnapshot[] | undefined = msg.record ? [] : undefined;
-      if (frames) frames.push(sim.snapshot());
+      // Compact columnar frames (09 §4.5; sim/record/frames.ts), exactly as
+      // `simulate()` keeps them.
+      const store = msg.record ? new FrameStore() : undefined;
+      if (store) store.push(sim.snapshot());
 
       let sinceYield = 0;
       let more = true;
       while (more) {
         more = sim.step();
-        if (frames && more) frames.push(sim.snapshot());
+        if (store && more) store.push(sim.snapshot());
         if (++sinceYield < slice) continue;
         sinceYield = 0;
         host.post({ type: 'progress', id, tick: sim.tick, round: sim.round });
@@ -102,7 +131,8 @@ export function createRunner(host: RunnerHost): Runner {
           return;
         }
       }
-      if (frames) frames.push(sim.snapshot());
+      if (store) store.push(sim.snapshot());
+      const frames = store?.view();
 
       const result = sim.result;
       if (!result) throw new Error('A bout must always end with a BoutResult');

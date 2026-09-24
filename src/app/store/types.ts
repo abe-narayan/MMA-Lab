@@ -84,7 +84,16 @@ export interface Tournament {
   carryOver: 'none' | 'sameNight' | 'career';
   entrantIds: string[];
   /** `[round][match]` — null until the match has been simulated. */
-  bracket: ({ a: string | null; b: string | null; winner: string | null; historyId: string | null })[][];
+  bracket: ({
+    a: string | null; b: string | null; winner: string | null; historyId: string | null;
+    /**
+     * Runs of this match that ended without a winner (draw / no contest).
+     * Absent means 0. It salts the next run's seed (`model/bracket.ts`
+     * `matchSeed`), so a rematch is a new bout but the bracket stays
+     * reproducible from the saved document.
+     */
+    attempts?: number;
+  })[][];
   ruleset: RulesetId;
   arena: ArenaId;
   settings: MatchSettings;

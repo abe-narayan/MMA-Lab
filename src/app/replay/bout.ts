@@ -16,6 +16,7 @@ import {
   type BoutRun, type CommentaryLine, type FighterDefinition, type FighterRuntime,
   type IntentSample, type SimConfig, type TickSnapshot,
 } from '../../sim';
+import { FrameStore } from '../../sim/record/frames';
 
 export interface WatchBout {
   config: SimConfig;
@@ -37,24 +38,27 @@ export interface LoadOptions {
 export function loadWatchBout(config: SimConfig, opts: LoadOptions = {}): WatchBout {
   const every = Math.max(1, Math.round((opts.intentEverySeconds ?? 1) * 10));
   const sim = createSim(config, { maxTicks: opts.maxTicks });
-  const frames: TickSnapshot[] = [];
+  // Compact columnar frames (09 §4.5, sim/record/frames.ts); `run.frames`
+  // is a read-only TickSnapshot[] view over them.
+  const store = new FrameStore();
   const intents: IntentSample[] = [];
 
   const sample = (): void => {
     intents.push({ tick: sim.tick, intents: sim.intents().map((i) => ({ ...i })) });
   };
 
-  frames.push(sim.snapshot());
+  store.push(sim.snapshot());
   while (sim.step()) {
-    frames.push(sim.snapshot());
+    store.push(sim.snapshot());
     // The first sample is taken after the first step, never before it: the
     // policy builds its plans in `prepare()`, which the loop runs on that
     // step, so a pre-step reading would report "no plan at all" for every
     // fighter and the panel would open on a lie.
     if (sim.tick === 1 || sim.tick % every === 0) sample();
   }
-  frames.push(sim.snapshot());
+  store.push(sim.snapshot());
   sample();
+  const frames = store.view();
 
   const result = sim.result;
   if (!result) throw new Error('A bout must always end with a BoutResult');

@@ -14,6 +14,7 @@ import {
   type FighterRuntime, type FighterSnapshot, type IntentSample, type RoundStats,
   type SimEvent, type TickSnapshot,
 } from '../../sim';
+import { FrameStore } from '../../sim/record/frames';
 
 export const CORNERS = ['A', 'B', 'C', 'D', 'E', 'F'] as const;
 export type Corner = (typeof CORNERS)[number];
@@ -91,12 +92,20 @@ export function roundBaselines(
   frames: readonly TickSnapshot[], events: readonly SimEvent[],
 ): Map<number, { landed: number; attempted: number }[]> {
   const out = new Map<number, { landed: number; attempted: number }[]>();
-  const byTick = new Map<number, TickSnapshot>();
-  for (const f of frames) if (!byTick.has(f.tick)) byTick.set(f.tick, f);
+  // Index, not frame: recorded frames decode on access (sim/record/frames.ts),
+  // so holding every decoded frame in a map would rebuild the whole bout as
+  // objects just to read a few of them.
+  const store = FrameStore.of(frames);
+  const byTick = new Map<number, number>();
+  for (let i = 0; i < frames.length; i++) {
+    const tick = store ? (store.tickAt(i) as number) : frames[i].tick;
+    if (!byTick.has(tick)) byTick.set(tick, i);
+  }
   for (const e of events) {
     if (e.kind !== 'roundStart' || out.has(e.round)) continue;
-    const frame = byTick.get(e.tick);
-    if (!frame) continue;
+    const at = byTick.get(e.tick);
+    if (at === undefined) continue;
+    const frame = frames[at];
     out.set(e.round, frame.fighters.map((f) => ({ ...f.sig })));
   }
   return out;

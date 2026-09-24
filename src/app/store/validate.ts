@@ -122,18 +122,42 @@ const DISCIPLINE_KEYS: Readonly<Record<string, CoreDisciplineId>> = {
 // Plausible-but-not-mandatory ranges (01 §2.1 population priors)
 // --------------------------------------------------------------------------
 
-/** `[error low, warn low, warn high, error high]` for each body measurement. */
+/**
+ * `[error low, warn low, warn high, error high]` for each body measurement.
+ * A value below `error low` or above `error high` is refused; one outside the
+ * warn band is accepted with a warning.
+ *
+ * The warn bands are the extremes of the real sport (Struve at 2.13 m is the
+ * tallest fighter the UFC has licensed), not a limit on what may be typed.
+ *
+ * The hard lower bounds (QA-13) reject bodies that cannot be a human
+ * combatant at all, while leaving every merely unusual one as a warning:
+ *  - height 1.0 m: the pooled UFC stature is 177.5 ± 9.5 cm (research/LIT_B
+ *    §2.4, Kirk 2023), so 1.0 m is ~8 SD below the mean;
+ *  - reach 0.8 m and leg reach 0.4 m: a 1.0 m body at the low end of the
+ *    population ape index (1.026 ± 0.028, ibid.), and about half its height
+ *    for the leg (the same ratio as the warn band's 0.75 m at 1.45 m);
+ *  - mass 30 kg: the lightest sanctioned class is atomweight at 47.6 kg
+ *    (research/RULES_JUDGING §2.2), so 30 kg leaves a wide margin for youth
+ *    or what-if builds but not a 10 g fighter;
+ *  - age 12 years: youth grappling and judo start there; the derivation's
+ *    ageing curves are adult ones, so 12-16 still warns;
+ *  - body fat 2 %: below essential fat (≈ 2-3 % in men) a body is not viable.
+ */
 const BODY_RANGES = {
-  // The warn bands are the extremes of the real sport (Struve at 2.13 m is
-  // the tallest fighter the UFC has licensed), not a limit on what may be typed.
-  heightM: [0, 1.45, 2.05, 3],
-  reachM: [0, 1.45, 2.20, 3.5],
-  legReachM: [0, 0.75, 1.25, 2],
-  massKg: [0, 40, 180, 500],
-  ageYears: [0, 16, 50, 120],
+  heightM: [1.0, 1.45, 2.05, 3],
+  reachM: [0.8, 1.45, 2.20, 3.5],
+  legReachM: [0.4, 0.75, 1.25, 2],
+  massKg: [30, 40, 180, 500],
+  ageYears: [12, 16, 50, 120],
   // 4-40 % is the chapter's creator range; outside it is still derivable.
-  bodyFatPct: [0, 4, 40, 75],
+  bodyFatPct: [2, 4, 40, 75],
 } as const;
+
+/** `style.pacing[].outputMult`: `[error low, warn low, warn high, error high]` (QA-12). */
+const PACING_OUTPUT_RANGE = [0, 0.5, 1.5, 3] as const;
+/** `style.pacing[].riskAppetite`: the planner's -2..+2 scale (07 §2.6). */
+const RISK_APPETITE_RANGE = [-2, 2] as const;
 
 // --------------------------------------------------------------------------
 // Issue plumbing
@@ -168,7 +192,7 @@ class Issues {
   ranged(path: string, v: unknown, label: string, r: readonly [number, number, number, number]): void {
     if (!this.finite(path, v, label)) return;
     const [errLo, warnLo, warnHi, errHi] = r;
-    if (v <= errLo || v > errHi) {
+    if (v < errLo || v > errHi) {
       this.error(path, `${label} of ${v} is outside the possible range ${errLo}-${errHi}`);
     } else if (v < warnLo || v > warnHi) {
       this.warn(path, `${label} of ${v} is unusual (typical ${warnLo}-${warnHi})`);
@@ -692,8 +716,17 @@ function validateRecord(record: unknown, body: unknown, iss: Issues): void {
     if (!isObject(record.stanceExposure)) {
       iss.error('record.stanceExposure', 'stanceExposure must be { orthodox, southpaw }');
     } else {
-      iss.counter('record.stanceExposure.orthodox', record.stanceExposure.orthodox, 'orthodox exposure');
-      iss.counter('record.stanceExposure.southpaw', record.stanceExposure.southpaw, 'southpaw exposure');
+      // Not a whole-number counter (QA-14): 01 §4 defaults it to the
+      // *expected* split of a record, 0.8 x / 0.2 x pro.total, so 8.8 on an
+      // 11-fight archetype is the design's own value. Only a negative is wrong.
+      for (const side of ['orthodox', 'southpaw'] as const) {
+        const path = `record.stanceExposure.${side}`;
+        const v = record.stanceExposure[side];
+        if (v === undefined) continue;
+        if (iss.finite(path, v, `${side} exposure`) && (v as number) < 0) {
+          iss.error(path, `${side} exposure cannot be negative (got ${v as number})`);
+        }
+      }
     }
   }
 
@@ -949,8 +982,28 @@ function validateStyle(style: unknown, iss: Issues): void {
           return;
         }
         iss.counter(`style.pacing[${i}].round`, p.round, 'round');
-        iss.finite(`style.pacing[${i}].outputMult`, p.outputMult, 'outputMult');
-        iss.finite(`style.pacing[${i}].riskAppetite`, p.riskAppetite, 'riskAppetite');
+        // QA-12: range-checked, not just finite. `outputMult` scales a
+        // round's work rate: below 0 is meaningless and above 3x is beyond any
+        // pace the energy model (05) can pay for; 0.5-1.5 covers every
+        // shipped plan. `riskAppetite` is the planner's -2..+2 scale (07 §2.6,
+        // `intent.riskAppetite`), which the policy clamps to anyway.
+        if (iss.finite(`style.pacing[${i}].outputMult`, p.outputMult, 'outputMult')) {
+          const v = p.outputMult as number;
+          if (v < PACING_OUTPUT_RANGE[0] || v > PACING_OUTPUT_RANGE[3]) {
+            iss.error(`style.pacing[${i}].outputMult`,
+              `outputMult must be ${PACING_OUTPUT_RANGE[0]}-${PACING_OUTPUT_RANGE[3]} (got ${v})`);
+          } else if (v < PACING_OUTPUT_RANGE[1] || v > PACING_OUTPUT_RANGE[2]) {
+            iss.warn(`style.pacing[${i}].outputMult`,
+              `outputMult of ${v} is unusual (typical ${PACING_OUTPUT_RANGE[1]}-${PACING_OUTPUT_RANGE[2]})`);
+          }
+        }
+        if (iss.finite(`style.pacing[${i}].riskAppetite`, p.riskAppetite, 'riskAppetite')) {
+          const v = p.riskAppetite as number;
+          if (v < RISK_APPETITE_RANGE[0] || v > RISK_APPETITE_RANGE[1]) {
+            iss.error(`style.pacing[${i}].riskAppetite`,
+              `riskAppetite must be ${RISK_APPETITE_RANGE[0]} to +${RISK_APPETITE_RANGE[1]} (got ${v})`);
+          }
+        }
       });
     }
   }

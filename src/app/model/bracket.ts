@@ -509,3 +509,111 @@ export function standings(bracket: readonly BracketMatch[][]): StandingsRow[] {
 export function matchCount(plan: BracketPlan): number {
   return plan.rounds.reduce((n, row) => n + row.length, 0);
 }
+
+// --------------------------------------------------------------------------
+// Matches that end without a winner (QA-7)
+// --------------------------------------------------------------------------
+
+/**
+ * A bracket needs a winner from every match, but a bout can end in a draw or a
+ * no contest (≈ 9 % of even matchups; every sub-only bout without a tap). The
+ * design keeps draws at their real rate rather than suppressing them
+ * (06 §9 note d), so the bracket resolves them the way tournaments do:
+ *
+ *   1. **Rematch.** The match is run again with a fresh seed. The seed is a
+ *      pure function of the tournament id, the match's flat index and the
+ *      attempt number (`matchSeed`), so replaying a tournament from its saved
+ *      document gives the same rematches in the same order. Attempt 0 keeps
+ *      the original seed, so existing brackets reproduce unchanged.
+ *   2. **Tie-break.** If `MAX_NO_DECISION_RUNS` runs in a row end without a
+ *      winner, the last run is decided on the judges' criteria a must-pick
+ *      panel uses (`tieBreakWinner`): knockdowns, then significant strikes
+ *      landed, takedowns landed, submission attempts, control time, and
+ *      finally the higher seed. This guarantees the bracket always finishes
+ *      (a sub-only tournament between two defensive grapplers otherwise could
+ *      draw forever).
+ */
+export const MAX_NO_DECISION_RUNS = 3;
+
+/** Stable flat index of a match: never changes when later rounds fill in. */
+export function flatMatchIndex(bracket: readonly (readonly unknown[])[], round: number, match: number): number {
+  return bracket.slice(0, round).reduce((n, r) => n + r.length, 0) + match;
+}
+
+/**
+ * The seed for the next run of a match. `baseSeed` is the tournament's
+ * original per-match seed (`boutSeed(t.id, 'tournament', flat)`).
+ */
+export function matchSeed(baseSeed: string, attempts: number | undefined): string {
+  const k = Math.max(0, Math.floor(attempts ?? 0));
+  return k === 0 ? baseSeed : `${baseSeed}::rematch-${k}`;
+}
+
+/** Record a run that produced no winner: bump the match's attempt counter. */
+export function recordNoDecision(
+  bracket: readonly BracketMatch[][], round: number, match: number,
+): BracketMatch[][] {
+  const next = bracket.map((row) => row.map((m) => ({ ...m })));
+  const target = next[round]?.[match];
+  if (!target) throw new Error(`No match at round ${round}, match ${match}.`);
+  target.attempts = (target.attempts ?? 0) + 1;
+  return next;
+}
+
+/** The per-fighter counters the tie-break reads; a subset of the sim's `FighterStatBlock`. */
+export interface TieBreakStats {
+  knockdowns: number;
+  sig: { landed: number };
+  takedowns: { landed: number };
+  subAttempts: number;
+  controlSeconds: number;
+}
+
+/**
+ * Decide a drawn bout for bracket purposes (see the block comment above).
+ * `a`/`b` are the stat blocks of the match's two sides; `aIsHigherSeed` is the
+ * last resort. Returns the side that advances.
+ */
+export function tieBreakWinner(a: TieBreakStats, b: TieBreakStats, aIsHigherSeed: boolean): 'a' | 'b' {
+  const criteria: [number, number][] = [
+    [a.knockdowns, b.knockdowns],
+    [a.sig.landed, b.sig.landed],
+    [a.takedowns.landed, b.takedowns.landed],
+    [a.subAttempts, b.subAttempts],
+    [a.controlSeconds, b.controlSeconds],
+  ];
+  for (const [x, y] of criteria) {
+    if (x > y) return 'a';
+    if (y > x) return 'b';
+  }
+  return aIsHigherSeed ? 'a' : 'b';
+}
+
+export type MatchOutcome =
+  | { kind: 'advance'; winnerId: string; tieBreak: boolean }
+  | { kind: 'rematch'; nextAttempt: number };
+
+/**
+ * What a finished run means for its bracket match: a winner advances; a run
+ * without one asks for a rematch until `MAX_NO_DECISION_RUNS` runs have ended
+ * level, and the last of those is settled by `tieBreakWinner`.
+ * `winner` is the sim's `BoutResult.winner` (0 = side a, 1 = side b).
+ */
+export function resolveMatch(
+  m: BracketMatch,
+  entrantIds: readonly string[],
+  winner: number | 'draw' | 'none',
+  fighterStats: readonly TieBreakStats[] | undefined,
+): MatchOutcome {
+  if (m.a === null || m.b === null) throw new Error('resolveMatch needs both sides filled.');
+  if (typeof winner === 'number') return { kind: 'advance', winnerId: winner === 0 ? m.a : m.b, tieBreak: false };
+  const attempts = m.attempts ?? 0;
+  if (attempts + 1 < MAX_NO_DECISION_RUNS) return { kind: 'rematch', nextAttempt: attempts + 1 };
+  const seedA = entrantIds.indexOf(m.a);
+  const seedB = entrantIds.indexOf(m.b);
+  const aHigher = seedA >= 0 && (seedB < 0 || seedA < seedB);
+  const sa = fighterStats?.[0];
+  const sb = fighterStats?.[1];
+  const side = sa && sb ? tieBreakWinner(sa, sb, aHigher) : aHigher ? 'a' : 'b';
+  return { kind: 'advance', winnerId: side === 'a' ? m.a : m.b, tieBreak: true };
+}

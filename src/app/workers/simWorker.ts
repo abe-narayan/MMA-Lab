@@ -12,15 +12,21 @@
  * typecheck inside the app as well.
  */
 
-import { createRunner, type FromWorker, type ToWorker } from './simProtocol';
+import { createRunner, toWire, type FromWorkerWire, type ToWorker } from './simProtocol';
 
 interface WorkerScope {
-  postMessage(message: FromWorker): void;
+  postMessage(message: FromWorkerWire, transfer?: Transferable[]): void;
   onmessage: ((event: { data: ToWorker }) => void) | null;
 }
 
 const scope = self as unknown as WorkerScope;
-const runner = createRunner({ post: (message) => scope.postMessage(message) });
+// Recorded frames travel as typed-array columns, transferred (toWire).
+const runner = createRunner({
+  post: (message) => {
+    const wire = toWire(message);
+    scope.postMessage(wire.message, wire.transfer);
+  },
+});
 
 scope.onmessage = (event): void => {
   void runner.handle(event.data);
