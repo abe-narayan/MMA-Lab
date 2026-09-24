@@ -36,7 +36,7 @@
  */
 import {
   Data3DTexture, LinearFilter, RenderPipeline, UnsignedByteType, RGBAFormat, ClampToEdgeWrapping,
-  NoColorSpace, Vector2, type Camera, type Node, type Scene, type WebGPURenderer,
+  NoColorSpace, Vector2, type Camera, type Node, type Object3D, type Scene, type WebGPURenderer,
 } from 'three/webgpu';
 import {
   Fn, float, int, interleavedGradientNoise, metalness, mix, mrt, normalView, output, pass,
@@ -371,6 +371,57 @@ export class StagePipeline {
     if (this.replayWarm || this.replay.outputNode === this.live.outputNode) return;
     this.replayWarm = true;
     this.replay.render();
+  }
+
+  /**
+   * Compile every material the scene pass will draw, before the first frame
+   * and off the critical path (added by the integration work). three's
+   * `compileAsync` yields to the main thread between objects and, on WebGPU,
+   * creates pipelines asynchronously, so the page stays responsive while the
+   * driver works. It must target the scene pass's own render target and MRT:
+   * node programs and pipelines are cached per render context, so compiling
+   * against the canvas would warm the wrong variants. Hidden objects (LOD
+   * levels, a referee not yet on the floor) and off-screen ones (the far
+   * crowd for a later cut) are included by lifting visibility and frustum
+   * culling for the synchronous collection step only.
+   *
+   * WebGL2 caveat (measured): ANGLE reports the programs ready but does the
+   * driver-level work on the first draw, so there the first frame still
+   * blocks (~12 s on the Arc 140V); drawing objects a few at a time instead
+   * only made the total longer (single draws blocked 2-8 s each).
+   */
+  async compileScene(scene: Scene, onProgress?: (loaded: number, total: number) => void): Promise<void> {
+    const r = this.renderer as unknown as {
+      getRenderTarget(): unknown; setRenderTarget(t: unknown): void; getMRT(): unknown; setMRT(m: unknown): void;
+      compileAsync(s: unknown, c: unknown, t: unknown, p: ((e: ProgressEvent) => void) | null): Promise<void>;
+    };
+    const sp = this.scenePass as { renderTarget: unknown; getMRT(): unknown };
+    const lifted: [Object3D, boolean, boolean][] = [];
+    scene.traverse((o) => {
+      lifted.push([o, o.visible, o.frustumCulled]);
+      o.visible = true;
+      o.frustumCulled = false;
+    });
+    const prevTarget = r.getRenderTarget();
+    const prevMrt = r.getMRT();
+    r.setRenderTarget(sp.renderTarget);
+    r.setMRT(sp.getMRT());
+    try {
+      let done: Promise<void>;
+      try {
+        // Collecting the render list runs synchronously up to compileAsync's
+        // first await, so visibility can be restored straight after.
+        done = r.compileAsync(scene, this.camera, null, onProgress ? (e) => onProgress(e.loaded, e.total) : null);
+      } finally {
+        for (const [o, v, f] of lifted) { o.visible = v; o.frustumCulled = f; }
+      }
+      // The node builds that follow read the renderer's MRT, so the target and
+      // MRT stay bound until they finish (nothing else renders during warm-up).
+      await done;
+    } finally {
+      r.setRenderTarget(prevTarget);
+      r.setMRT(prevMrt);
+    }
   }
 
   dispose(): void {

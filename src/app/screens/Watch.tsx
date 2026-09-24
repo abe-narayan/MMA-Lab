@@ -15,6 +15,11 @@
  * overlay exposing the state graph, the AI's decision state, the tier rows
  * currently firing and the stamina/damage pools.
  *
+ * In 3D the picture is a broadcast: the camera director plans its edit from
+ * the whole recording, the `ReplaySequencer` airs instant replays at natural
+ * pauses (slow motion, extra angles, the REPLAY bug), and the broadcast
+ * graphics (`BroadcastOverlay`) sit on the picture; the side panels stay.
+ *
  * The screen imports the sim only through `src/sim`; the transport, the loader
  * and every derivation live in `src/app/replay`.
  */
@@ -41,6 +46,9 @@ import { ArenaCanvas, CAMERA_MODES, type CameraMode } from '../components/ArenaC
 import { Arena3D } from '../components/Arena3D';
 import type { CameraMode as CameraMode3D, QualityLevel } from '../../presentation/contract';
 import { buildBoutPresentation } from '../../presentation/stage/bout';
+import { ReplaySequencer, planReplays } from '../../presentation/camera';
+import { BroadcastOverlay, makeBroadcastBout } from '../components/broadcast';
+import { EventIndex, advanceBroadcast, manualReplayPlan } from '../replay/broadcast';
 import { gpuLikelyAvailable, isQualityLevel, QUALITY_LEVELS, QUALITY_PRESETS } from '../../presentation/stage/index';
 import '../watch.css';
 
@@ -92,10 +100,12 @@ function readViewPrefs(): ViewPrefs {
 /**
  * QA overrides from the page URL, for capture scripts: `?view=3d|2d`,
  * `?quality=low|medium|high|ultra`, `?scale=0.7`, `?cam=cageside`,
- * `?seek=<tick>`, `?play=1`. They are applied once and never persisted.
+ * `?seek=<tick>`, `?play=1`, `?demo=<seed>[:<archetype index A>:<index B>]`
+ * (which demonstration bout to open). They are applied once and never persisted.
  */
 function urlOverrides(): {
   view?: '3d' | '2d'; quality?: QualityLevel; scale?: number; cam?: CameraMode3D; seek?: number; play?: boolean;
+  demo?: { seed: string; a: number; b: number };
 } {
   if (typeof location === 'undefined') return {};
   const q = new URLSearchParams(location.search);
@@ -111,6 +121,11 @@ function urlOverrides(): {
   const seek = Number(q.get('seek'));
   if (q.has('seek') && Number.isFinite(seek)) out.seek = seek;
   if (q.get('play') === '1') out.play = true;
+  const demo = q.get('demo');
+  if (demo) {
+    const [seed, a, b] = demo.split(':');
+    out.demo = { seed: seed || 'watch-demo', a: Number(a) || 0, b: b === undefined ? 1 : Number(b) || 0 };
+  }
   return out;
 }
 
@@ -123,12 +138,12 @@ function writeViewPrefs(p: ViewPrefs): void {
 }
 
 /** A bout to show when the screen is opened without one — a demonstration. */
-export function demoConfig(seed = 'watch-demo'): SimConfig {
+export function demoConfig(seed = 'watch-demo', a = 0, b = 1): SimConfig {
   const list = Object.values(ARCHETYPES);
   return {
     seed,
     mode: '1v1',
-    fighters: [list[0], list[1]],
+    fighters: [list[a] ?? list[0], list[b] ?? list[1]],
     teams: { teamOf: [0, 1] },
     ruleset: 'mma.unified.3r',
     arena: 'octagon_30',
@@ -178,9 +193,12 @@ export function Watch(props: WatchProps): JSX.Element {
   const [camera3d, setCamera3d] = useState<CameraMode3D>(qa.cam ?? 'broadcast');
   const [notice3d, setNotice3d] = useState<string | null>(null);
   const [backend3d, setBackend3d] = useState<string | null>(null);
-  // Bumped on every jump of the playhead that is not plain playback, so the 3D
-  // view snaps its smoothing filters and drops temporal history.
-  const [seekVersion, setSeekVersion] = useState(0);
+  // Bumped on every jump of the playhead that is not plain playback (seeks,
+  // replay starts/angle changes/returns), so the 3D view snaps its smoothing
+  // filters and drops temporal history. A ref, read by the 3D view in the same
+  // instant as the frame, so one seek is exactly one discontinuity frame.
+  const seekRef = useRef(0);
+  const pendingPlayRef = useRef(false);
   const viewRef = useRef(view);
   viewRef.current = view;
 
@@ -198,7 +216,7 @@ export function Watch(props: WatchProps): JSX.Element {
     // The shell keeps this screen mounted behind a hidden tab, so nothing is
     // simulated until somebody actually opens it.
     if (!active && !bout) return;
-    const target = config ?? demoConfig();
+    const target = config ?? (qa.demo ? demoConfig(qa.demo.seed, qa.demo.a, qa.demo.b) : demoConfig());
     setLoading(true);
     setError(null);
     // Deferred a frame so the "rebuilding" state paints before the sim runs;
@@ -231,6 +249,18 @@ export function Watch(props: WatchProps): JSX.Element {
     return p;
   }, [bout]);
 
+  // The instant-replay schedule (camera module) and the per-frame event window.
+  const sequencer = useMemo(
+    () => (bout ? new ReplaySequencer(planReplays(bout.run.events, bout.run.frames)) : null),
+    [bout],
+  );
+  const seqRef = useRef<ReplaySequencer | null>(null);
+  seqRef.current = sequencer;
+  if (sequencer) sequencer.auto = view === '3d';
+  const eventIndex = useMemo(() => (bout ? new EventIndex(bout.run.events) : null), [bout]);
+  const eventIndexRef = useRef<EventIndex | null>(null);
+  eventIndexRef.current = eventIndex;
+
   useEffect(() => {
     if (!player) return;
     setFrame(0);
@@ -241,12 +271,18 @@ export function Watch(props: WatchProps): JSX.Element {
     setStatRound(0);
     if (qa.seek !== undefined) {
       player.seekTick(qa.seek);
+      seqRef.current?.reset(player.tick);
       setFrame(player.frame);
-      setSeekVersion((v) => v + 1);
+      seekRef.current++;
     }
     if (qa.play) {
-      player.play();
-      setPlaying(true);
+      // In 3D, start once the broadcast is on screen (see `onLive`), not
+      // while the shaders are still compiling behind the loading card.
+      if (viewRef.current === '3d') pendingPlayRef.current = true;
+      else {
+        player.play();
+        setPlaying(true);
+      }
     }
     // `qa` is read once, on purpose.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -261,7 +297,8 @@ export function Watch(props: WatchProps): JSX.Element {
     const step = (now: number): void => {
       const dt = Math.min(0.25, (now - last) / 1000);
       last = now;
-      const a = player.advance(dt);
+      const { alpha: a, jumped } = advanceBroadcast(player, seqRef.current, dt);
+      if (jumped) seekRef.current++;
       setFrame(player.frame);
       // Sub-tick alpha changes every display frame. The 2D board needs it as a
       // prop; the 3D view reads the player directly (`getPlayhead`), so in 3D
@@ -277,21 +314,38 @@ export function Watch(props: WatchProps): JSX.Element {
 
   const getPlayhead = useCallback(() => {
     const p = playerRef.current;
+    const frame = p?.current ?? null;
+    const next = p?.next ?? null;
+    const state = seqRef.current?.state ?? null;
     return {
-      frame: p?.current ?? null,
-      next: p?.next ?? null,
+      frame,
+      next,
       alpha: p?.alpha ?? 0,
-      replay: p?.inInstantReplay ?? false,
+      replay: !!state,
       playbackRate: p?.speed ?? 1,
+      // Two seconds back through the next tick: strikes resolving before the
+      // next frame are already known, so misses and blocks aim correctly.
+      events: frame && eventIndexRef.current ? eventIndexRef.current.forFrame(frame, next) : [],
+      replayState: state,
+      seekVersion: seekRef.current,
     };
   }, []);
 
-  const apply = useCallback((fn: (p: BoutPlayer) => void) => {
+  /**
+   * Run a transport action. `seek` actions (scrub, step, jump to an event)
+   * first end any replay on air, and re-arm the replay schedule from the new
+   * playhead afterwards.
+   */
+  const apply = useCallback((fn: (p: BoutPlayer, seq: ReplaySequencer | null) => void, opts: { seek?: boolean } = {}) => {
     const p = playerRef.current;
     if (!p) return;
+    const seq = seqRef.current;
     const before = p.frame;
-    fn(p);
-    if (p.frame !== before) setSeekVersion((v) => v + 1);
+    const replayBefore = seq?.state ?? null;
+    if (opts.seek && seq?.state) seq.stop(p);
+    fn(p, seq);
+    if (opts.seek) seq?.reset(p.tick);
+    if (p.frame !== before || (seq?.state ?? null) !== replayBefore) seekRef.current++;
     setFrame(p.frame);
     setPlaying(p.playing);
     setSpeed(p.speed);
@@ -301,6 +355,17 @@ export function Watch(props: WatchProps): JSX.Element {
   const seekToTick = useCallback((t: number) => apply((p) => {
     p.pause();
     p.seekTick(t);
+  }, { seek: true }), [apply]);
+
+  /** Every replay goes through the sequencer: slow motion, the REPLAY bug, the replay camera. */
+  const replayLast = useCallback((seconds: number) => apply((p, seq) => {
+    const tick = p.tick;
+    const req = {
+      fromTick: Math.max(0, tick - Math.round(seconds / TICK_SECONDS)), toTick: tick, speed: 0.3,
+      label: `Last ${seconds}s`, eventIndex: -1,
+    };
+    if (seq) seq.play(manualReplayPlan(req, p.events), p);
+    else p.startInstantReplay(req);
   }), [apply]);
 
   // ---- keyboard -----------------------------------------------------------
@@ -313,22 +378,22 @@ export function Watch(props: WatchProps): JSX.Element {
         e.preventDefault();
         apply((p) => p.toggle());
       } else if (e.code === 'ArrowLeft') {
-        apply((p) => p.stepBy(e.shiftKey ? -10 : -1));
+        apply((p) => p.stepBy(e.shiftKey ? -10 : -1), { seek: true });
       } else if (e.code === 'ArrowRight') {
-        apply((p) => p.stepBy(e.shiftKey ? 10 : 1));
+        apply((p) => p.stepBy(e.shiftKey ? 10 : 1), { seek: true });
       } else if (e.code === 'BracketLeft') {
-        apply((p) => p.stepEvent(-1));
+        apply((p) => p.stepEvent(-1), { seek: true });
       } else if (e.code === 'BracketRight') {
-        apply((p) => p.stepEvent(1));
+        apply((p) => p.stepEvent(1), { seek: true });
       } else if (e.code === 'KeyR') {
-        apply((p) => p.showLastSeconds(8));
+        replayLast(8);
       } else if (e.code === 'KeyD') {
         setDebug((d) => !d);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [active, apply]);
+  }, [active, apply, replayLast]);
 
   // ---- derived view-models ------------------------------------------------
   const teamOf = bout?.config.teams.teamOf ?? [0, 1];
@@ -387,11 +452,31 @@ export function Watch(props: WatchProps): JSX.Element {
     () => (bout ? eventWindow(bout.run.events, tick - 12, tick).events : []),
     [bout, tick],
   );
-  // The 3D view wants at least the last two seconds (reactions, crowd pulses).
+  // The 3D view reads its per-frame event window through `getPlayhead`
+  // (through the next tick); this is only the fallback prop.
   const window20 = useMemo(
     () => (bout ? eventWindow(bout.run.events, tick - 20, tick).events : []),
     [bout, tick],
   );
+  const recording = useMemo(
+    () => (bout ? { frames: bout.run.frames, events: bout.run.events } : undefined),
+    [bout],
+  );
+  const broadcastBout = useMemo(() => {
+    if (!bout || !boutPresentation) return null;
+    const rs = resolveRuleset(bout.config.ruleset);
+    const s = bout.config.settings;
+    return makeBroadcastBout({
+      fighters: bout.fighters,
+      runtimes: bout.runtimes,
+      cornerColours: boutPresentation.cornerColours,
+      stats: bout.run.stats,
+      result: bout.run.result,
+      rounds: s.rounds ?? rs.rounds.count,
+      roundSeconds: s.roundSeconds ?? rs.rounds.lengthS,
+      breakSeconds: s.restSeconds ?? rs.rounds.breakS,
+    });
+  }, [bout, boutPresentation]);
   const cards = useMemo(
     () => (bout
       ? scorecardModel(bout.run.events, bout.run.result.judgeTotals, current?.score.hidden ?? true)
@@ -408,6 +493,7 @@ export function Watch(props: WatchProps): JSX.Element {
   const names = bout?.fighters.map((f) => f.short) ?? [];
   const corners = bout?.fighters.map((_, i) => corner(i)) ?? [];
   const replays: readonly InstantReplayRequest[] = player?.availableReplays() ?? [];
+  const replayState = sequencer?.state ?? null;
 
   // ---- render --------------------------------------------------------------
   if (error) {
@@ -436,9 +522,10 @@ export function Watch(props: WatchProps): JSX.Element {
             alpha={alpha}
             events={window20}
             playbackRate={speed}
-            replay={player.inInstantReplay}
-            seekVersion={seekVersion}
+            replay={!!replayState}
+            seekVersion={seekRef.current}
             getPlayhead={getPlayhead}
+            recording={recording}
             camera={{ mode: camera3d, followId }}
             quality={quality}
             renderScale={renderScale ?? undefined}
@@ -447,11 +534,33 @@ export function Watch(props: WatchProps): JSX.Element {
             tickSeconds={TICK_SECONDS}
             active={active}
             onBackend={(b) => setBackend3d(b)}
+            onLive={() => {
+              if (!pendingPlayRef.current) return;
+              pendingPlayRef.current = false;
+              apply((p) => p.play());
+            }}
             onUnavailable={(reason) => {
               setNotice3d(`3D view unavailable (${reason}); showing the 2D board.`);
               setView('2d');
+              if (pendingPlayRef.current) {
+                pendingPlayRef.current = false;
+                apply((p) => p.play());
+              }
             }}
-          />
+          >
+            {broadcastBout
+              ? ({ shot }) => (
+                <BroadcastOverlay
+                  bout={broadcastBout}
+                  frame={current}
+                  events={bout.run.events}
+                  replay={replayState}
+                  replayWipeKey={sequencer?.wipeKey ?? 0}
+                  shot={shot}
+                />
+              )
+              : null}
+          </Arena3D>
         ) : (
           <ArenaCanvas
             frame={current}
@@ -486,7 +595,7 @@ export function Watch(props: WatchProps): JSX.Element {
               onChange={(e) => apply((p) => {
                 p.pause();
                 p.seekFrame(Number(e.target.value));
-              })}
+              }, { seek: true })}
             />
             <span className="frame-read num">
               <b>{(tick * TICK_SECONDS).toFixed(1)}s</b> · tick {tick} / {player.total - 1}
@@ -497,18 +606,18 @@ export function Watch(props: WatchProps): JSX.Element {
             <div className="group">
               <span className="group-label">Frame</span>
               <div className="group-row">
-                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(-10))}>&laquo;</button>
-                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(-1))}>&lsaquo;</button>
-                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(1))}>&rsaquo;</button>
-                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(10))}>&raquo;</button>
+                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(-10), { seek: true })}>&laquo;</button>
+                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(-1), { seek: true })}>&lsaquo;</button>
+                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(1), { seek: true })}>&rsaquo;</button>
+                <button type="button" className="btn btn--icon" onClick={() => apply((p) => p.stepBy(10), { seek: true })}>&raquo;</button>
               </div>
             </div>
 
             <div className="group">
               <span className="group-label">Event</span>
               <div className="group-row">
-                <button type="button" className="btn" onClick={() => apply((p) => p.stepEvent(-1))}>Prev</button>
-                <button type="button" className="btn" onClick={() => apply((p) => p.stepEvent(1))}>Next</button>
+                <button type="button" className="btn" onClick={() => apply((p) => p.stepEvent(-1), { seek: true })}>Prev</button>
+                <button type="button" className="btn" onClick={() => apply((p) => p.stepEvent(1), { seek: true })}>Next</button>
               </div>
             </div>
 
@@ -577,22 +686,36 @@ export function Watch(props: WatchProps): JSX.Element {
             <div className="group">
               <span className="group-label">Instant replay</span>
               <div className="group-row">
-                <button type="button" className="btn" onClick={() => apply((p) => p.showLastSeconds(8))}>
+                <button type="button" className="btn" onClick={() => replayLast(8)}>
                   Last 8s
                 </button>
-                {replays.slice(-3).map((r) => (
+                {replays.slice(-3).map((r) => {
+                  // A planned broadcast replay of the same moment has its angles; else one angle.
+                  const planned = sequencer?.plans.find((pl) => pl.eventIndex === r.eventIndex);
+                  return (
+                    <button
+                      key={`${r.fromTick}-${r.eventIndex}`}
+                      type="button"
+                      className="btn"
+                      title={r.label}
+                      onClick={() => apply((p, seq) => {
+                        if (seq) seq.play(planned ?? manualReplayPlan(r, p.events), p);
+                        else p.startInstantReplay(r);
+                      })}
+                    >
+                      {r.label.slice(0, 22)}
+                    </button>
+                  );
+                })}
+                {player.inInstantReplay || replayState ? (
                   <button
-                    key={`${r.fromTick}-${r.eventIndex}`}
                     type="button"
                     className="btn"
-                    title={r.label}
-                    onClick={() => apply((p) => p.startInstantReplay(r))}
+                    onClick={() => apply((p, seq) => {
+                      if (seq?.state) seq.stop(p);
+                      else p.stopInstantReplay();
+                    })}
                   >
-                    {r.label.slice(0, 22)}
-                  </button>
-                ))}
-                {player.inInstantReplay ? (
-                  <button type="button" className="btn" onClick={() => apply((p) => p.stopInstantReplay())}>
                     Back to live
                   </button>
                 ) : null}

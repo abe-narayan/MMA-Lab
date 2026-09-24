@@ -13,10 +13,18 @@
  *   2. animator.evaluate  → one Pose per fighter;
  *   3. characters: applyPose, setVisualState (from the snapshot's visual fields);
  *   4. forwardKinematics  → WorldPose per fighter (for camera and arena);
- *   5. arena.update       → referee, crowd, screens;
+ *   5. arena.update       → referee placement, crowd, screens;
+ *      referee.update     → the official's body posed from that placement;
  *   6. camera.update      → CameraState → stage camera, DoF, cut;
  *   7. LOD per fighter from camera distance, capped by the preset.
  * then render() draws through the post pipeline and publishes `window.__stats`.
+ *
+ * Integration (docs/design/PHASE8_NOTES.md, "Integration (lead)"): the arena
+ * is seeded from the bout (`cosmeticSeed`, `cornerColours`); the grappling
+ * solver registers through `anim/` itself; a broadcast director gets the whole
+ * recording (`setRecording`), the viewport shape (`setAspect` on resize), the
+ * instant replay on air (`setReplay`) and the user camera (`attachFreeCamera`);
+ * `warmUpAsync` compiles every material before the first visible frame.
  *
  * The presenter only reads sim frames. Nothing here writes to a snapshot, and
  * all cosmetic variation downstream is seeded from `cosmeticSeed`.
@@ -33,7 +41,12 @@ import { createPose, createWorldPose, forwardKinematics, B, type Pose, type Worl
 import { createArenaSet } from './arena';
 import { createCharacterFactory } from './character';
 import { createAnimator } from './anim';
-import { createCameraDirector } from './camera';
+import {
+  attachFreeCamera, createCameraDirector, isBroadcastDirector, makeCameraArena, type ReplayState,
+} from './camera';
+import type { SimEvent, TickSnapshot } from '../sim';
+import { createRefereeActor, type RefereeActor } from './referee';
+import type { ArenaOptions } from './arena';
 import { qualitySettings, defaultQualityFor, FrameMeter, type PassToggles } from './stage/index';
 import { createPlaceholderArena } from './placeholders/arena';
 import { createPlaceholderCharacterFactory, DebugSkeletonActor, restFor } from './placeholders/debugSkeleton';
@@ -54,13 +67,15 @@ export interface StageLike {
   frameTiming(ms: number): void;
   render(): void;
   warmUp(): void;
+  /** Compile the scene's materials without drawing (optional: fakes and old stages lack it). */
+  precompile?(onProgress?: (loaded: number, total: number) => void): Promise<void>;
   info(): { drawCalls: number; triangles: number; internalWidth: number; internalHeight: number };
   dispose(): void;
 }
 
 export interface PresenterDeps {
   createStage(container: HTMLElement, quality: QualitySettings): Promise<StageLike>;
-  createArenaSet(arena: Arena, q: QualitySettings): Promise<ArenaSet | null>;
+  createArenaSet(arena: Arena, q: QualitySettings, options?: ArenaOptions): Promise<ArenaSet | null>;
   createCharacterFactory(): CharacterFactory | null;
   createAnimator(): Animator | null;
   createCameraDirector(): CameraDirector | null;
@@ -154,6 +169,19 @@ export function visualStateFrom(f: FighterSnapshot, blood: boolean, roundTime: n
   };
 }
 
+/** Azimuth of the broadcast director's main camera for this venue. */
+export function hardCameraAngle(bout: BoutPresentation): number {
+  try {
+    return makeCameraArena(bout.arena, null).mainAzimuth;
+  } catch {
+    return 0;
+  }
+}
+
+function round2(x: number): number {
+  return Math.round(x * 100) / 100;
+}
+
 function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : Number.isFinite(x) ? x : 0;
 }
@@ -178,6 +206,10 @@ export class Presenter implements Presenter3D {
   private poses: Pose[] = [];
   private worlds: WorldPose[] = [];
   private request: CameraRequest = { mode: 'broadcast' };
+  private referee: RefereeActor | null = null;
+  private container: HTMLElement | null = null;
+  private recording: { frames: readonly TickSnapshot[]; events: readonly SimEvent[] } | null = null;
+  private replayState: ReplayState | null = null;
   private flags = { debug: false, labels: false };
   private lastShot: CameraState | null = null;
   private readonly meter = new FrameMeter();
@@ -193,6 +225,7 @@ export class Presenter implements Presenter3D {
   }
 
   async mount(container: HTMLElement): Promise<{ backend: 'webgpu' | 'webgl2' }> {
+    this.container = container;
     this.stage = await this.deps.createStage(container, this.quality);
     return { backend: this.stage.backend };
   }
@@ -205,7 +238,14 @@ export class Presenter implements Presenter3D {
 
     let arena: ArenaSet | null = null;
     try {
-      arena = await this.deps.createArenaSet(bout.arena, q);
+      // Seeded from the bout, not the arena id: two bouts in the same venue get
+      // different crowds, and the corner pads wear the bout's corner colours.
+      // The referee keeps to the far side of the action from the hard camera,
+      // so the set is told where the director puts it.
+      arena = await this.deps.createArenaSet(bout.arena, q, {
+        cosmeticSeed: bout.cosmeticSeed, cornerColours: bout.cornerColours,
+        hardCameraAngle: hardCameraAngle(bout),
+      });
     } catch (err) {
       console.warn('[presenter] createArenaSet failed, using the placeholder:', err);
     }
@@ -237,16 +277,70 @@ export class Presenter implements Presenter3D {
     this.camera = camera ?? createPlaceholderCameraDirector();
     this.camera.setBout(bout, this.arena);
     this.camera.setRequest(this.request);
+    this.applyDirectorExtras();
+
+    this.referee = createRefereeActor(bout, hardCameraAngle(bout));
 
     const stage = this.stage;
     if (stage) {
       stage.scene.add(this.arena.object3d);
       stage.scene.environment = (this.arena.environment as Texture | null) ?? null;
       for (const a of this.actors) stage.scene.add(a.object3d);
+      stage.scene.add(this.referee.object3d);
       stage.applyShadowPolicy(stage.scene);
     }
   }
 
+  /** Hand a broadcast director what it needs beyond the contract. */
+  private applyDirectorExtras(): void {
+    const d = this.camera;
+    if (!isBroadcastDirector(d)) return;
+    if (this.recording) d.setRecording(this.recording.frames, this.recording.events);
+    d.setReplay(this.replayState);
+    const aspect = this.aspect();
+    if (aspect) d.setAspect(aspect);
+  }
+
+  private aspect(): number | null {
+    const c = this.container;
+    if (!c || !(c.clientWidth >= 2) || !(c.clientHeight >= 2)) return null;
+    return c.clientWidth / c.clientHeight;
+  }
+
+  /**
+   * The whole recorded bout, once per bout: a broadcast director plans its
+   * edit and its replays' angles up front. Kept and re-applied if the
+   * director is (re)built later.
+   */
+  setRecording(frames: readonly TickSnapshot[], events: readonly SimEvent[]): void {
+    if (this.recording && this.recording.frames === frames && this.recording.events === events) return;
+    this.recording = { frames, events };
+    if (isBroadcastDirector(this.camera)) this.camera.setRecording(frames, events);
+  }
+
+  /** The instant replay on air (`ReplaySequencer.state`), or null for live. */
+  setReplay(state: ReplayState | null): void {
+    this.replayState = state;
+    if (isBroadcastDirector(this.camera)) this.camera.setReplay(state);
+  }
+
+  /**
+   * Drag/wheel control of the free and orbit cameras on `el`. Returns the
+   * detach function; a no-op when the director has no user camera.
+   */
+  attachFreeCamera(el: HTMLElement): () => void {
+    if (!isBroadcastDirector(this.camera)) return () => undefined;
+    return attachFreeCamera(el, this.camera.free);
+  }
+
+  /** Which layer posed each fighter last frame (e.g. "grapple pos.ground_mount ..."). */
+  animLayers(): string[] {
+    const a = this.animator;
+    if (!a) return [];
+    return this.actors.map((_, i) => {
+      try { return a.debug(i).layer; } catch { return 'n/a'; }
+    });
+  }
   private buildActors(): void {
     const bout = this.bout;
     if (!bout || !this.factory) return;
@@ -284,6 +378,8 @@ export class Presenter implements Presenter3D {
     this.overlays = [];
     this.arena?.dispose();
     this.arena = null;
+    this.referee?.dispose();
+    this.referee = null;
     this.animator = null;
     this.camera = null;
     this.bout = null;
@@ -329,6 +425,8 @@ export class Presenter implements Presenter3D {
 
     this.arena.update(input, this.worlds, realDt);
     trace.push('arena');
+    // Not in `trace`: the referee is an extra, not one of the contract modules.
+    this.referee?.update(input, this.arena, this.worlds, realDt);
 
     const shot = this.camera.update(input, this.worlds, realDt);
     this.lastShot = shot;
@@ -398,8 +496,36 @@ export class Presenter implements Presenter3D {
     this.stage?.warmUp();
   }
 
+  /**
+   * Compile every material of the set, the fighters and the referee before
+   * the first visible frame, yielding to the page as it goes (the Watch
+   * screen shows "Preparing broadcast..." meanwhile), then the post pipelines
+   * with one live and one replay frame. Call after `setBout` and one
+   * `update` (so the first shot's camera is in place).
+   */
+  async warmUpAsync(onProgress?: (loaded: number, total: number) => void): Promise<{ sceneMs: number; postMs: number }> {
+    const stage = this.stage;
+    if (!stage) return { sceneMs: 0, postMs: 0 };
+    const t0 = this.deps.now();
+    if (stage.precompile) {
+      try {
+        await stage.precompile(onProgress);
+      } catch (err) {
+        console.warn('[presenter] precompile failed; shaders will compile on the first frame:', err);
+      }
+    }
+    const t1 = this.deps.now();
+    if (this.stage !== stage) return { sceneMs: t1 - t0, postMs: 0 };
+    // The post chains (live, then replay) still compile on their first draw.
+    stage.render();
+    stage.warmUp();
+    return { sceneMs: Math.round(t1 - t0), postMs: Math.round(this.deps.now() - t1) };
+  }
+
   resize(): void {
     this.stage?.resize();
+    const aspect = this.aspect();
+    if (aspect && isBroadcastDirector(this.camera)) this.camera.setAspect(aspect);
   }
 
   stats(): PresenterStats {
@@ -423,6 +549,16 @@ export class Presenter implements Presenter3D {
       renderScale: this.quality.renderScale,
       shot: this.lastShot?.shotName ?? null,
       modules: { ...this.modules },
+      anim: this.animLayers(),
+      referee: this.referee?.placement
+        ? {
+          x: round2(this.referee.placement.x), z: round2(this.referee.placement.z),
+          gesture: this.referee.placement.gesture, crouch: round2(this.referee.placement.crouch),
+        }
+        : null,
+      replay: this.replayState
+        ? `${this.replayState.plan.title} ${this.replayState.segmentIndex + 1}/${this.replayState.plan.segments.length}`
+        : null,
       cpuUpdateMs: Math.round(this.cpu.update * 100) / 100,
       cpuRenderMs: Math.round(this.cpu.render * 100) / 100,
     };
@@ -442,6 +578,7 @@ export class Presenter implements Presenter3D {
     this.clearBout();
     this.stage?.dispose();
     this.stage = null;
+    this.container = null;
   }
 }
 

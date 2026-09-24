@@ -58,6 +58,11 @@ export interface ArenaOptions {
   cosmeticSeed?: string;
   /** BoutPresentation.cornerColours: [red, blue]. */
   cornerColours?: readonly string[];
+  /**
+   * Azimuth of the main (hard) camera, atan2(x, z): the referee keeps to the
+   * far side of the action from it. Default 0 (+z).
+   */
+  hardCameraAngle?: number;
 }
 
 /** The concrete set: the contract plus what the presenter and dev tools read. */
@@ -137,7 +142,7 @@ class Venue implements VenueSet {
     this.blue = o.cornerColours?.[1] ?? DEFAULT_BLUE;
     this.quality = q;
     this.bounds = venueBounds(arena);
-    this.tracker = new RefereeTracker(arena);
+    this.tracker = new RefereeTracker(arena, undefined, o.hardCameraAngle ?? 0);
     this.cu.seedOffset.value = this.seedNum % 65536;
     this.screens.red.value.set(this.red);
     this.screens.blue.value.set(this.blue);

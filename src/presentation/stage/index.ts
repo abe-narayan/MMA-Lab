@@ -252,6 +252,15 @@ export class Stage {
     this.pipeline.render(this.replayOn);
   }
 
+  /**
+   * Compile the scene's materials for the scene pass without drawing, yielding
+   * to the page between objects (integration: the loading state runs while
+   * this does). Call after the set and the bodies are in the scene.
+   */
+  async precompile(onProgress?: (loaded: number, total: number) => void): Promise<void> {
+    await this.pipeline?.compileScene(this.scene, onProgress);
+  }
+
   /** Compile the replay pipeline ahead of the first replay. */
   warmUp(): void {
     this.pipeline?.warmReplay();

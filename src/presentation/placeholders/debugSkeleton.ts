@@ -32,9 +32,33 @@ import {
 
 type Part = 'skin' | 'shorts' | 'glove' | 'none';
 
+/**
+ * What the capsule body wears. `fighter`: shorts in the corner colour, gloves.
+ * `official`: the referee — shirt, trousers and shoes all in the `shorts`
+ * colour slot (black), forearms/neck/head bare, thin latex gloves in the
+ * `glove` slot. Clothes sit a little proud of the skin radii.
+ */
+export type Outfit = 'fighter' | 'official';
+
 /** Radius (m) and surface of each bone's capsule. Fingers are covered by the hand. */
-function boneStyle(name: string): { r: number; part: Part; ball?: boolean } {
+function boneStyle(name: string, outfit: Outfit = 'fighter'): { r: number; part: Part; ball?: boolean } {
   if (name.includes('Hand') && name !== 'LeftHand' && name !== 'RightHand') return { r: 0, part: 'none' };
+  if (outfit === 'official') {
+    switch (name) {
+      case 'Hips': return { r: 0.13, part: 'shorts' };
+      case 'Spine': return { r: 0.13, part: 'shorts' };
+      case 'Spine1': return { r: 0.14, part: 'shorts' };
+      case 'Spine2': return { r: 0.145, part: 'shorts' };
+      case 'LeftShoulder': case 'RightShoulder': return { r: 0.058, part: 'shorts' };
+      case 'LeftArm': case 'RightArm': return { r: 0.06, part: 'shorts' };
+      case 'LeftHand': case 'RightHand': return { r: 0.045, part: 'glove', ball: true };
+      case 'LeftUpLeg': case 'RightUpLeg': return { r: 0.08, part: 'shorts' };
+      case 'LeftLeg': case 'RightLeg': return { r: 0.062, part: 'shorts' };
+      case 'LeftFoot': case 'RightFoot': return { r: 0.05, part: 'shorts' };
+      case 'LeftToeBase': case 'RightToeBase': return { r: 0.04, part: 'shorts' };
+      default: break;
+    }
+  }
   switch (name) {
     case 'Hips': return { r: 0.125, part: 'shorts' };
     case 'Spine': return { r: 0.125, part: 'skin' };
@@ -76,7 +100,9 @@ const _up = new Vector3(0, 1, 0);
  * Bake the capsules for one rest skeleton into a skinned geometry: position,
  * normal, colour, skinIndex, skinWeight.
  */
-export function buildSkeletonGeometry(rest: RestSkeleton, colours: Record<Exclude<Part, 'none'>, Color>): BufferGeometry {
+export function buildSkeletonGeometry(
+  rest: RestSkeleton, colours: Record<Exclude<Part, 'none'>, Color>, outfit: Outfit = 'fighter',
+): BufferGeometry {
   const pos: number[] = [];
   const nrm: number[] = [];
   const col: number[] = [];
@@ -85,7 +111,7 @@ export function buildSkeletonGeometry(rest: RestSkeleton, colours: Record<Exclud
   const skinWeight: number[] = [];
 
   for (let i = 0; i < BONE_COUNT; i++) {
-    const style = boneStyle(BONES[i]);
+    const style = boneStyle(BONES[i], outfit);
     if (style.part === 'none' || style.r <= 0) continue;
     const hx = rest.head[i * 3], hy = rest.head[i * 3 + 1], hz = rest.head[i * 3 + 2];
     const tx = rest.tail[i * 3], ty = rest.tail[i * 3 + 1], tz = rest.tail[i * 3 + 2];
@@ -142,15 +168,20 @@ export class DebugSkeletonActor implements CharacterActor {
   private readonly bones: Bone[];
   private readonly material: MeshStandardMaterial;
 
-  constructor(fighterId: number, opts: { rest?: RestSkeleton; corner: string; glove: GloveKind; overlay?: boolean }) {
+  constructor(fighterId: number, opts: {
+    rest?: RestSkeleton; corner: string; glove: GloveKind; overlay?: boolean;
+    /** Default 'fighter'. 'official': `corner` is the clothing colour, `glove` is ignored (latex). */
+    outfit?: Outfit;
+  }) {
     this.fighterId = fighterId;
     this.rest = opts.rest ?? defaultRest();
     const corner = new Color(opts.corner);
+    const official = opts.outfit === 'official';
     const geo = buildSkeletonGeometry(this.rest, {
       skin: SKIN,
       shorts: corner,
-      glove: gloveColour(opts.glove, corner),
-    });
+      glove: official ? new Color().setRGB(0.05, 0.05, 0.07, 'srgb') : gloveColour(opts.glove, corner),
+    }, opts.outfit ?? 'fighter');
     this.material = new MeshStandardMaterial({
       vertexColors: true,
       roughness: 0.55,

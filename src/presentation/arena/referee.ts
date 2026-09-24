@@ -252,10 +252,17 @@ export class RefereeTracker {
   private primed = false;
   last: RefereePlacement | null = null;
 
-  constructor(private readonly arena: Arena, private readonly maxSpeed = 3.2) {}
+  /**
+   * `hardCameraAngle`: azimuth (atan2(x, z)) of the main broadcast camera, so
+   * he keeps to the far side of the action from it (integration: the camera
+   * module's `CameraArena.mainAzimuth`, passed through `ArenaOptions`).
+   */
+  constructor(
+    private readonly arena: Arena, private readonly maxSpeed = 3.2, private readonly hardCameraAngle = 0,
+  ) {}
 
   update(scene: RefereeScene, simTime: number, dt: number, snap: boolean): RefereePlacement {
-    const t = refereePlacement(scene, this.arena, simTime);
+    const t = refereePlacement(scene, this.arena, simTime, this.hardCameraAngle);
     this.last = t;
     if (!t.present) return t;
     if (snap || !this.primed || dt <= 0) {
