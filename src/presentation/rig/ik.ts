@@ -34,6 +34,15 @@ export interface LimbChain {
   hinge: V3;
 }
 
+/**
+ * Anatomical flexion limits of the middle joints (radians). The elbow limit is
+ * not applied by the standing animator: measured, it made the arm's pole
+ * unstable for fists pulled in near the shoulder (hook windups) and doubled the
+ * one-frame arm pops; it is here for callers that want it.
+ */
+export const ELBOW_MAX_FLEX = 150 * Math.PI / 180;
+export const KNEE_MAX_FLEX = 160 * Math.PI / 180;
+
 export const LIMBS = Object.freeze({
   lArm: { upper: B.lArm, lower: B.lForeArm, end: B.lHand, hinge: [0, -1, 0] } as LimbChain,
   rArm: { upper: B.rArm, lower: B.rForeArm, end: B.rHand, hinge: [0, 1, 0] } as LimbChain,
@@ -57,13 +66,19 @@ const tmpV = new Float32Array(3);
  * `weight` blends from the pose's existing rotations (0) to the solution (1),
  * so IK can fade in over a strike's startup and out over its recovery.
  *
+ * `maxFlex` (radians, optional) is the joint limit of the middle joint: a
+ * target closer to the root than that flexion allows is met at the limit, on
+ * the line toward it (an elbow folds to ~150°, a knee to ~160°; without the
+ * limit a hand pulled in to the shoulder folded the forearm flat onto the
+ * upper arm). Omitted: only the geometric limit (the grappling solver's grips).
+ *
  * Returns how far short of the target the limb fell, in metres (0 when the
  * target was reachable). A strike that falls short is a strike that missed on
  * range, and the caller may want to lean the torso to close the gap.
  */
 export function solveTwoBone(
   pose: Pose, world: WorldPose, rest: RestSkeleton, chain: LimbChain,
-  target: V3, pole: V3, weight = 1,
+  target: V3, pole: V3, weight = 1, maxFlex = Math.PI,
 ): number {
   const { upper, lower, end } = chain;
   const parent = BONE_PARENT[upper];
@@ -110,12 +125,20 @@ export function solveTwoBone(
   ];
   const T: V3 = [A[0] + vx * reach, A[1] + vy * reach, A[2] + vz * reach];
   const eDir = normalize([E[0] - A[0], E[1] - A[1], E[2] - A[2]]);
-  const fDir = normalize([T[0] - E[0], T[1] - E[1], T[2] - E[2]]);
+  let fDir = normalize([T[0] - E[0], T[1] - E[1], T[2] - E[2]]);
 
   // Flexion axis in world space: rotating eDir toward fDir is flexion.
   let h = cross(eDir, fDir);
   if (Math.hypot(h[0], h[1], h[2]) < 1e-6) h = cross(eDir, [px, py, pz]);
   h = normalize(h);
+  // Joint limit: the lower bone opens back to \`maxFlex\` about the same hinge
+  // (the upper bone stays as solved, so a target pulled in to the shoulder
+  // leaves the hand a little short instead of swinging the arm around).
+  if (maxFlex < Math.PI && eDir[0] * fDir[0] + eDir[1] * fDir[1] + eDir[2] * fDir[2] < Math.cos(maxFlex)) {
+    const hx = cross(h, eDir);
+    const c = Math.cos(maxFlex), sn = Math.sin(maxFlex);
+    fDir = normalize([eDir[0] * c + hx[0] * sn, eDir[1] * c + hx[1] * sn, eDir[2] * c + hx[2] * sn]);
+  }
 
   // World rotations that carry the rest frames (d, hRest) onto (dir, h).
   const Qu = frameToFrame(d1, hRest, eDir, h);

@@ -19,7 +19,7 @@ import {
   B, BONE_COUNT, boneIndex, forwardKinematics,
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
-import { LIMBS, solveTwoBone } from '../rig/ik';
+import { KNEE_MAX_FLEX, LIMBS, solveTwoBone } from '../rig/ik';
 import {
   add, at, clamp, cross, dot, len, madd, norm, qconj, qmul, qrot, qslerp, qx, qy, qypr, qz,
   scale, sub, type Frame, type Q, type V3,
@@ -150,6 +150,50 @@ export function createFoot(): FootSpec {
   return { ball: [0, 0, 0], yaw: 0, lift: 0, airPitch: 0, pole: [0, 0, 1], toeFlat: 1, ankle: null };
 }
 
+/** Largest forearm pronation / supination applied toward a wanted palm (radians). */
+const TWIST_MAX = 1.9;
+
+const NECK_YAW = 78 * Math.PI / 180;
+const NECK_FLEX = 55 * Math.PI / 180;
+const NECK_EXT = 60 * Math.PI / 180;
+const NECK_ROLL = 40 * Math.PI / 180;
+
+/** `head` (world) limited to the neck's range relative to `chest` (world). */
+function clampNeck(chest: Q, head: Q): Q {
+  const r = qmul(qconj(chest), head);
+  const [x, y, z, w] = r;
+  // YXZ Euler (yaw, pitch, roll) as `qypr` composes them.
+  const yaw = Math.atan2(2 * (x * z + w * y), 1 - 2 * (x * x + y * y));
+  const pitch = Math.asin(clamp(-2 * (y * z - w * x), -1, 1));
+  const roll = Math.atan2(2 * (x * y + w * z), 1 - 2 * (x * x + z * z));
+  const cy = clamp(yaw, -NECK_YAW, NECK_YAW);
+  const cp = clamp(pitch, -NECK_EXT, NECK_FLEX);
+  const cr = clamp(roll, -NECK_ROLL, NECK_ROLL);
+  if (cy === yaw && cp === pitch && cr === roll) return head;
+  return qmul(chest, qypr(cy, cp, cr));
+}
+
+/** Where footwork keeps a leg's reach (fraction of the leg); `clampPelvis` lowers the hips to stay inside it. */
+export const LEG_REACH = 0.985;
+
+/**
+ * Soft limit on a stepping / standing leg's reach: past `LEG_REACH` of the leg
+ * the ankle target is eased toward (never beyond) 99.8 % of it. Near full
+ * extension the knee angle is extremely sensitive to reach (0.985 L is a 20°
+ * knee, 0.9995 L a 4° one), so a hard clamp snapped the knee straight in one
+ * frame whenever a long step's target left the leg's reach. Kicks and knees
+ * (explicit ankle targets) keep the hard limit: their snap is the technique.
+ */
+function softReach(hip: V3, ankle: V3, legLen: number): V3 {
+  const d = sub(ankle, hip);
+  const r = len(d);
+  const r0 = LEG_REACH * legLen;
+  if (r <= r0) return ankle;
+  const r1 = 0.998 * legLen;
+  const rr = r0 + (r1 - r0) * Math.tanh((r - r0) / (r1 - r0));
+  return madd(hip, d, rr / r);
+}
+
 /** World ankle position for a foot spec on this body. */
 export function ankleOf(rig: RigInfo, side: 0 | 1, f: FootSpec): V3 {
   if (f.ankle) return f.ankle;
@@ -243,7 +287,11 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
       const look = qypr(yawL + hs.yaw, pitchL + hs.pitch, hs.roll);
       qHead = qslerp(rel, look, clamp(hs.lookW, 0, 1));
     }
-    // Limit how far the head may turn from the chest (anatomical ~75 deg).
+    // Limit how far the head may turn from the chest (anatomical neck range:
+    // ~78° of rotation, 55° of flexion, 60° of extension, 40° of side bend). A
+    // look-at past it (a jab turns the chest 60° off the line, a bladed stance
+    // already 45°) used to twist the head round to 100-180° of neck yaw.
+    qHead = clampNeck(chest, qHead);
     const qNeck = qslerp(chest, qHead, 0.42);
     setWorldRot(pose, world, B.neck, B.spine2, qNeck);
     setLocal(pose, B.head, qmul(qconj(qNeck), qHead));
@@ -253,8 +301,9 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
     for (const side of [0, 1] as const) {
       const f = spec.feet[side];
       const chain = side === 0 ? LIMBS.lLeg : LIMBS.rLeg;
-      const ankle = ankleOf(rig, side, f);
-      solveTwoBone(pose, world, rest, chain, ankle, f.pole, 1);
+      let ankle = ankleOf(rig, side, f);
+      if (!f.ankle) ankle = softReach(worldP(world, chain.upper), ankle, rig.legLen);
+      solveTwoBone(pose, world, rest, chain, ankle, f.pole, 1, KNEE_MAX_FLEX);
     }
     forwardKinematics(world, pose, rest);
     for (const side of [0, 1] as const) {
@@ -303,7 +352,12 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
     const want = h.palm;
     const cp = norm(madd(cur, axis, -dot(cur, axis)));
     const wp = norm(madd(want, axis, -dot(want, axis)));
-    const ang = clamp(Math.atan2(dot(axis, cross(cp, wp)), dot(cp, wp)), -2.2, 2.2);
+    // Continuous at the wrap: a wanted palm almost opposite the IK's is
+    // ambiguous (pronate or supinate the long way?), and the old hard clamp at
+    // ±126° flipped the forearm 250° in one frame when it crossed ±180°. Past
+    // 109° the twist eases back to 0 at 180°, the same from either side.
+    const raw = Math.atan2(dot(axis, cross(cp, wp)), dot(cp, wp));
+    const ang = Math.abs(raw) <= TWIST_MAX ? raw : Math.sign(raw) * TWIST_MAX * (Math.PI - Math.abs(raw)) / (Math.PI - TWIST_MAX);
     const lq = getLocal(pose, fore);
     const sa = Math.sin(ang / 2);
     setLocal(pose, fore, qmul(lq, [restAxis[0] * sa, restAxis[1] * sa, restAxis[2] * sa, Math.cos(ang / 2)]));

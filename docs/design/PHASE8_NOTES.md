@@ -1128,3 +1128,319 @@ the wide-shot check); none of them involves the post-roll. `tsc` is clean except
 - The post clock is real time at the last frame; seeking to the same end tick does not restart the
   ceremony (seek away and back).
 - Gaze during the ceremony is a simple look-at; no facial reactions beyond breathing and the KO slack jaw.
+
+### Performance pass
+
+Goal: every broadcast shot ≤ 16 ms GPU at High, 2560×1440 on the Arc 140V (WebGPU) with no visible
+quality loss; WebGL2 cold first load under ~20 s with no main-thread block over ~2 s. Code:
+`stage/lensDof.ts` (new), `stage/programSharing.ts` (new), `stage/profiles.ts` (new), `stage/pipeline.ts`,
+`stage/dynres.ts`, `stage/index.ts`, `stage/skinnedVelocity.ts`, `character/skinMaterial.ts` (branches
+only), small presenter hooks. Tests: `tests/presentation.perf.test.ts` (21). Tools: `scripts/dev/perf-shots.mjs`
+(per-shot, per-pass GPU ms from one page load), `scripts/dev/perf-ab.mjs` (same frame, old vs new paths
+alternated in-page), `scripts/dev/perf-compare-shots.mjs` (same-frame side-by-side PNGs),
+`scripts/dev/load-timeline.mjs --cold` (defeats the driver's shader cache).
+
+**How it was measured, and a warning about the numbers.** `Stage.passTimes(n)` labels every render
+pass's timestamp by its target (`output` = scene pass, `GTAONode.AO`, `TAAUNode.resolve`,
+`LensDof.*`, `canvas` = final quad, ...), holds the page's own frame loop off while it runs, and reports
+the 25th percentile (other work on the GPU only ever adds time). The GPU was shared with other agents'
+captures the whole time: the same configuration measured 11-20 ms from one page load to the next. Only
+in-page A/B (`perf-ab.mjs`: identical frame, blocks of 24 frames alternating old/new, 5 rounds) gives
+trustworthy *differences*; absolute figures below are upper bounds.
+
+**Where the time went (baseline, CAGESIDE, High, 0.6 internal scale):** scene pass 7.9 ms, live DoF
+4.0 ms (three's DepthOfFieldNode: seven passes, two at output resolution, a 64-tap gather reading the
+full-resolution input), GTAO 3.2 ms, TAAU 1.7 ms, the grade texture + separate RCAS pass + final quad
+2.1 ms, bloom 0.6 ms, shadows 0.4 ms — 19.9 ms total. Capsule bodies instead of characters: 14.0 ms.
+
+**What changed (WebGPU frame cost).**
+1. *Lens depth of field* (`lensDof.ts`) replaces three's node on the live handhelds and the replay
+   angles: half-res prefilter (colour + signed CoC), 1/16-res near-CoC tiles, one 24-tap Vogel gather
+   from the half-res texture (scatter-as-gather near layer, min-CoC background, a "behind the
+   occluder" fill), and a composite inline in passes that already exist. 4.0 → 0.7-1.0 ms.
+   Finding: the chain-link fence writes no depth, so neither node can treat it as a near object; its
+   softening on CAGESIDE is the far-field blur of the background behind each wire, and the two look
+   alike (`phase8-perf-cageside-detail.png`). If the arena makes the fence write depth, the near layer
+   will blur it as the thin-lens model intends — worth doing (arena).
+2. *GTAO radius per shot* (`aoRadiusFor`): 0.4 m spans ~40 % of the frame on a close handheld, and every
+   horizon tap misses the texture cache. Held to 15 % of the frame height at the focus distance
+   (0.12-0.4 m; every shot from ~6 m out unchanged). In-page A/B on CORNER: 5.6 → 3.4 ms. Sample count
+   stays 16 (8 would save another ~1.2 ms; not needed).
+3. *Skin branches* (`skinMaterial.ts`): the head-only terms (painted hair, brows, beard/stubble,
+   periorbital tone, lip lines: seven noise evaluations and the trigonometry) run only above the
+   lowest point any of them can reach — below it every one is exactly zero, so the picture is
+   identical; cuts and tattoos run only for a fighter who has them (uniform branches; the tattoo field
+   is a Worley search). `?skinGate=0` / `window.__skinGatesOff` restore the old cost for A/B.
+4. *RCAS folded into the final quad*: the graded image goes to one 8-bit texture and the last pass
+   sharpens, vignettes and adds grain — one full-resolution pass fewer (~0.5 ms).
+5. *GPU-timed dynamic resolution* (`GpuDynamicResolution`): WebGPU timestamps are always on (when the
+   adapter has them) and every 4th frame's GPU time drives the internal scale toward a 15 ms budget
+   within the preset's range (High 0.6-0.8), modelling cost as fixed + variable × scale² (the fixed,
+   output-resolution share is learnt from two operating points), with a dead band, 0.05 steps, at most
+   one change per 0.6 s, and a per-shot memory applied on camera cuts (a cut re-seeds TAA anyway). Unlike
+   the vsync-quantised interval it can *raise* the scale when there is headroom. WebGL2 keeps the old
+   interval controller. `?gpuDynres=0` / `?fixedRes=1` for A/B.
+
+**Per-shot result.** Before = the baseline run at the start of the pass (old interval dynres, mostly
+at its 0.6 floor). A/B = `perf-ab.mjs`, same frame at a fixed 0.7 scale (canvas 2080×1170, internal
+1456×819), old paths vs new, two runs on a busy GPU (medians of 5 blocks). Now = the shipped behaviour
+(GPU-timed dynamic resolution), p25 / median of 90 frames, busy GPU.
+
+| Shot | Before (ms / fps) | A/B run 1: old → new | A/B run 2: old → new | Now: ms p25 / median, internal |
+| --- | --- | --- | --- | --- |
+| MAIN | 11.7 / 56 | 20.9 → 17.8 | 20.9 → 16.7 | 12.8 / 14.5, 1664×936 |
+| MAIN TIGHT | 13.6 / 58 | 25.2 → 19.4 | 28.6 → 22.0 | 14.7 / 16.3, 1664×936 |
+| CAGESIDE | 19.9 / 29 | 30.1 → 18.5 | 41.5 → 27.0 | 14.5 / 15.6, 1456×819 |
+| CAGESIDE LOW | 17.4 / 42 | 17.9 → 13.3 | 25.0 → 16.3 | 14.0 / 15.7, 1456×819 |
+| CORNER (in cage, with cornermen) | 13.9 / 52 | 20.0 → 14.2 | 14.1 → 11.0 | 13.1 / 15.0, 1352×760 |
+| FINISH handheld | 16.3 / 44 | 21.4 → 22.4 (noise) | 17.0 → 14.2 | 13.6 / 14.2, 1560×877 |
+| OVERHEAD | — | 20.5 → 18.5 | 12.4 → 11.6 | — |
+
+On a quiet GPU (an in-page run between other agents' captures) CAGESIDE was 11.0-11.7 ms and MAIN TIGHT
+10.1-10.3 ms at 0.7 scale. The relative savings are the robust result: CAGESIDE −35 % to −38 %, the
+other close shots −20 % to −35 %, the wide shot −15 % to −20 %. Live fps in the headless captures was
+47-54 on the busy machine (capped there by the headless compositor, not the GPU).
+
+**Quality profiles** (`stage/profiles.ts`, for the settings UI): `QUALITY_PROFILES` (label, summary,
+target hardware, measured cost), `recommendQuality()` (adapter facts + `probeGpu()`, a ~0.2 s fixed
+1280×720 workload timed with timestamps; 8.35-8.74 ms on this Arc = `PROBE_REFERENCE_MS`; ≤ 1.3× →
+High, ≤ 2.6× → Medium, else Low; software rasterisers Low; WebGL2 capped at Medium; unknown → Medium;
+Ultra never automatic), `readQualityChoice/writeQualityChoice` (an explicit choice persists and always
+wins), `initialQuality(choice, recommendation)`, and `presenter.recommendedQuality()`. **Not wired**: the
+Watch screen (being redesigned by another agent) still starts on `prefs.quality ?? 'high'` and saves
+every change as a preference; it should call `initialQuality(readQualityChoice(), await
+presenter.recommendedQuality())` and `writeQualityChoice` only on a user action. Measured per profile
+(fixed scale, busy GPU, p25 ms; MAIN / CAGESIDE): Low 4.3 / 7.9, Medium 7.4 / 11.5, High 12.4 / 15.1,
+Ultra 22.1 / 28.0 (Ultra renders at native 2080×1170 here; a discrete-GPU preset).
+
+**WebGL2 cold load.** Recording every GLSL source and every slow GL call of a cold load showed:
+- *One program per body instead of per material.* three names a uniform buffer after its node id
+  (`uniform NodeBuffer_394007 { mat4 buffer394007[52]; }`); each skeleton's bone buffer is its own node,
+  so the 113 KB skin program — ~27 s of ANGLE/FXC compile each on a cold D3D cache — was built for
+  every fighter, the referee and each cornerman; the same for hair, kit and eyes. `programSharing.ts`
+  names reference buffers after their property (`skeleton.boneMatrices`), and the morph-influence and
+  previous-bone buffers after what they hold, so the code (and three's program cache) is shared; each
+  body still binds its own buffers. Motion vectors checked (`?stagePost=view:velocity`, paused frame:
+  mean 2.4; broken would be ~37). Also on WebGPU: 220 → 145 programs at live.
+- *The warm-up compiled the wrong variants.* `compileScene` lifted visibility on lights too, so every lit
+  material was warmed with the Ultra rim lights on (129 KB skin warmed, 113 KB drawn); and three's TAAU
+  hands the velocity node its unjittered projection from a hook registered too late for the first frame,
+  so bodies built then got a second variant. Lights now keep their state, and the stage does the same
+  hand-over around every render (`withUnjittered`), before compile and first draw alike.
+- *The first draws blocked the main thread.* The scene pass is now drawn alone after the async compile
+  and the stage waits on a fence polled every 25 ms (`Stage.gpuIdle`, never blocking) before and between
+  the post-chain warm-ups, so ANGLE's first-draw compiles run while the page and the loading card stay live.
+
+Result (fresh browser profile each run; `--cold` salts every shader so the driver cache cannot help):
+
+| | Before (this pass's start) | After |
+| --- | --- | --- |
+| Shaders compiled | 331 | 148 |
+| Cold: time to live | 187 s (polish pass: 97 s) | 31-43 s on the busy machine (best 15.2 s) |
+| Cold: longest main-thread task | 31.0 s (polish pass: 28.3 s) | 1.6-1.8 s |
+| Warm driver cache: time to live / longest task | 5.4 s / 0.62 s (polish pass, lighter scene) | 10.5 s / 1.6 s |
+| WebGPU (fresh profile): time to live / longest task | — | 19.2-20.7 s / 0.53 s |
+
+Timelines: `phase8-perf-webgl2-cold-before.png`, `-cold-after.png`, `-warm-after.png`.
+
+**Also fixed (review M2c, L6).** Post nodes created per rebuild (SMAA, FXAA, the motion-blur and grade
+`rtt`s, the lens DoF) are disposed; and the scene pass's MRT node is now one per output layout for the
+page's lifetime — render contexts are keyed by it, so each quality or render-scale change used to leave
+every object's render state and uniform buffers behind. Ten High↔Medium switches: textures 64 → 64,
+GPU memory alternating exactly 224/256 MB, uniform buffers 953 → 920 (before: → 2360).
+`snapshotPreviousBones` no longer allocates a Set and a closure per frame.
+
+**Screenshots** (same frame, before left / after right): `phase8-perf-{cageside,cageside-detail,corner,
+main,ground}.png`. The pictures match; the visible differences are the texture of the out-of-focus
+background behind the fence (lens DoF vs three's max filter) and slightly less broad occlusion under the
+chin and arms on the corner shot.
+
+**Not achieved / still open.**
+- ≤ 16 ms on every shot holds with the GPU-timed controller (p25 12.8-14.7 ms, medians 14.2-16.3 ms on a
+  busy GPU; 10-12 ms quiet), not at a *fixed* 0.7 scale on a busy GPU (MAIN TIGHT and CAGESIDE measured
+  17-27 ms in those runs). The controller's 0.6 floor is what guarantees it.
+- WebGL2 cold load is 31-43 s here, not under 20 s: after the fixes the time is the driver compiling 148
+  programs in the background (CPU-bound FXC, starved by other agents' jobs; 15.2 s on a quieter run). The
+  main thread stays free (longest task 1.6-1.8 s). Remaining levers: a lighter WebGL2 skin (noise from
+  textures instead of seven inlined MaterialX noises), and one more skin duplicate caused by TSL emitting
+  the MaterialX helper functions in a different order on the first build.
+- WebGPU loads in a fresh profile take ~20 s (Dawn's shader cache lives in the profile; a returning
+  viewer's is warm).
+- The Watch screen does not use the recommended default yet (see profiles above).
+- The fence writes no depth, so the live DoF cannot model it as a near object (arena).
+- On the corner shot the cornermen can stand between the lens and the seated fighter (corner/camera).
+
+### Animation quality pass
+
+Incremental fixes to the animation system, measured before and after by an automated QA harness. Code:
+`anim/blend.ts` (new: foot-preserving crossfade, floor fix), `anim/stance.ts`, `anim/spec.ts`,
+`anim/animator.ts`, `anim/capture.ts`, `anim/state.ts`, `anim/strikes.ts` / `capStrikes.ts` (knee limit on kick
+legs), `anim/grapple/solver.ts` (floor fix on its output), `rig/ik.ts` (optional flexion limit), `finish/capture.ts`
+(new: captured get-up and celebration), `finish/index.ts`, `finish/timeline.ts` (clinch break), `corner/index.ts`
+(foot-preserving fade). Harness: `scripts/dev/anim-audit-lib.ts` + `scripts/dev/anim-audit.ts`; test
+`tests/presentation.anim-quality.test.ts` (9); captures `scripts/dev/anim-captures.{ts,mjs}`.
+
+**The harness.** Plays a recorded bout through the presenter's own chain (animator → corner staging →
+post-fight staging → FK) at 60 fps, with an extra probe sample on every strike's recorded contact instant, and
+measures the rendered poses only, bucketed by what the body is doing (standing, engaged, down, getting up, corner,
+post-roll): planted-foot sliding (ball on the floor in consecutive frames, cm/frame), hip freeze (sim moving
+> 0.6 m/s, hips < 0.15 m/s), joint limits (elbow / knee hyper-extension and over-flexion, tibial twist on a loaded
+leg, spine twist / flexion / extension / side bend, neck yaw / flexion / extension / roll), pops (a one-frame spike
+in a bone's angular speed or the hips' speed, 2.5× both neighbours and > 6°, not explained by an own contact,
+an incoming contact or a seek), ground penetration (joints with flesh radii), fighter–fighter interpenetration
+(head spheres and torso capsules; limbs into bodies), contact at the recorded instant (weapon to the target
+surface — head sphere, torso capsule, thigh, or the blocking arm — and the IK's own error to its aim), and
+disagreement with the sim (ground but upright, down but upright, standing but low, clinch but apart, stance —
+which foot leads — and facing). The audit set: eight bouts (MMA 3r × 4 incl. heavyweight v flyweight and BJJ v
+judoka, boxing, K-1, amateur novices T0-T1, a 2v2), the first 150 s, the first break and the last 45 s of each
+plus 20 s of post-roll: 137 599 frames. The sim is being tuned while this runs, so the audit plays **cached
+recordings** (`<tmp>/boutlab-anim-audit`, `--rerecord` refreshes) and "before" is the same recordings through
+the pre-pass animation code. `node scripts/dev/heavy.mjs npx tsx scripts/dev/anim-audit.ts --examples` prints
+the table, the worst examples per category (bout, time, fighter, layer) and pop / joint-limit histograms by layer.
+
+**What was wrong, at the root, and the fix.**
+1. *The hips popped 3-5 cm every time a foot left or touched the floor.* The pelvis reach clamp only counted
+   planted feet, so its constraint switched on and off at every lift-off and landing; the bounce amplitude
+   switched too. Now every foot on the floor or stepping binds the clamp, a leg an action takes over releases it
+   gradually (`reachW`), and the bounce eases with the swing.
+2. *Captured step curves were noisy.* A 0.3-0.5 s captured swing is played in 0.1-0.35 s: capture noise in the
+   upper-body residual became 2-4 cm hip jitter, a height curve that dipped to the floor mid-swing jerked the
+   shin, and one take's "swing" was a 1.2 s mis-detected plant. The residual is now tabulated and smoothed at
+   build (also cheaper: no clip sample + FK per frame), the height is one smooth hump through the captured peak,
+   progress is smoothed, swings longer than 0.6 s are rejected, and the foot lifts before it travels and is down
+   before it stops (no skimming).
+3. *The sim moves in 100 ms start-stop steps* (2.3 m/s, 0, 2.3 m/s at right angles); linear interpolation made a
+   velocity step at every tick. The displayed root now follows a uniform quadratic B-spline through the previous,
+   current and next recorded positions: continuous velocity, within 1/8 of the tick-to-tick change of the record,
+   half a tick behind (the one cost: the hip-freeze metric rose from 0.43 % to 1.4 % of moving frames, all ≤ 67 ms
+   at a start). With no next frame (the post-roll) it settles on the frame's own position.
+4. *Near full extension a knee angle is hypersensitive to reach* (0.985 L is 20°, 0.9995 L is 4°), so a long
+   step's target leaving reach snapped the knee straight. Stepping legs get a soft reach limit (`softReach`);
+   kicks keep the hard one.
+5. *Feet landed on the wrong side.* A swing's landing was predicted at lift-off from the velocity then; the body
+   often stops within the swing and a rear foot landed in front of the lead foot. Feet in flight are re-aimed
+   (≤ 2 cm a frame, until 80 % of the swing) and a trained stance never lands the rear foot past the lead one
+   (`keepOrder`, which also walks the feet through a stance switch). Stance disagreement 7.6 % → 2.1 %.
+6. *Actions ended with a snap.* A strike's or a defence's deltas stop at its recorded end: a kick's leg, a block's
+   head, a cross's arm jumped 20-60° in one frame. An action ending now starts a 180 ms fade from the displayed
+   pose (a new strike's contact is protected: the fade ends 50 ms before it).
+7. *Every crossfade dipped and skated the feet* (toes 12 cm under the floor on grapple → standing, 16 cm/frame).
+   `fadeKeepFeet` blends the pose, then pins a foot planted at the same spot in both poses to the target, lets a
+   foot planted elsewhere step there (lifted over the blend) instead of sliding, and keeps every foot above the
+   canvas — all by continuous weights, so no foot switches mode in a frame. Used by the animator's mode and
+   action fades, the corner staging and the post-fight script's blends. Back on his feet after a clinch, the
+   ground or the canvas, the footwork starts from where the feet were drawn instead of teleporting them.
+8. *Nothing under the mat.* Throw arcs rotate whole bodies about a pivot (a thrown uke's feet went 73 cm under the
+   mat) and the solver blends bone by bone: `floorFix` lifts a sunk torso whole and lifts a sunk hand / foot by
+   IK; applied to the pair solver's output and the fall poses.
+9. *Neck and forearm.* The head's look-at was never limited: 100-180° of neck yaw during jabs (chest turned 60°
+   past a bladed stance). Clamped to the neck's range (78° yaw, 55° flexion, 60° extension, 40° roll). The
+   forearm pronation's hard ±126° clamp flipped the forearm 250° in one frame when the wanted palm crossed 180°;
+   it now eases back to 0 at 180° from either side.
+10. *Unengaged grapple frames* (the last frame of a submission: the sim has released the pair but not stood
+   anyone up) were posed standing for a frame; they hold the last pose. Engaged fighters no longer run the
+   standing layers they are overwritten by (cheaper engaged frames).
+
+**Mocap (unused takes, now used).** `finish/capture.ts` retargets the way the capture pass does — each sample FK'd
+on the fighter's own rest skeleton, reduced to body targets (pelvis from the hip line, chest / head relative,
+clavicles, fists and elbows, ankles and knees), solved by `solveSpec` — and places a take by one rigid transform.
+*Get-up*: `ground.get_up_back` / `_face_down` / `_side` chosen by how the loser lies (and the stance variant whose
+chest direction matches his), laid along his body (hips on his hips, legs along his legs), crossfaded from the
+animator's lying pose 0.8 s before the take's rise, which plays at its own speed ending on the script's
+`standUp` (faster only if the script leaves less time); he stands where the take stands and walks to his mark from
+there; 0.6 s handover to the standing figure. *Celebration*: `celebrate.victory_1` (the 5-6 s window with the
+most hands-high time), starting on the winner's spot facing the crowd, blended over the scripted figure through the
+`celebrate` span. Both need the motion library (the presenter registers it); without it the old procedural
+path runs. Still unused: `ground.get_up_crouch` (ends crouched, not standing), `celebrate.victory_2` (walks 1.5 m),
+`pivot.*`, `stance.switch.*`, `walk.*`.
+
+**Clinch stoppage.** A bout that ends tied up on the feet (a TKO against the fence, the bell in a clinch) now gets
+the referee's break: during the post-roll the animator is shown the pair released and standing, stepping apart to
+1.35 m recorded over 0.1-0.65 s, so the footwork walks them out of the clinch facing each other; the script starts
+from where the break leaves them, its blend waits for it, and the referee's wave spot is in the gap. Measured on a
+synthetic double-collar-tie TKO: chests 0.3 m apart at the stoppage, > 0.75 m by 0.8 s; head centres never closer
+than 0.19 m.
+
+**Before / after** (same cached recordings, 137 599 frames; rows at 0 % both sides omitted):
+
+| Metric | Before | After |
+|---|---|---|
+| footSlide.standing (cm/planted frame: mean / p99 / max / >0.5cm) | 0.28 / 6.62 / 43.06 / 9.32% | 0.08 / 1.97 / 54.11 / 4.35% |
+| footSlide.engaged (cm/planted frame: mean / p99 / max / >0.5cm) | 0.22 / 5.67 / 89.54 / 5.18% | 0.22 / 5.96 / 46.96 / 5.46% |
+| footSlide.down (cm/planted frame: mean / p99 / max / >0.5cm) | 2.44 / 12.21 / 21.03 / 70.57% | 1.92 / 7.62 / 8.83 / 64.63% |
+| footSlide.getup (cm/planted frame: mean / p99 / max / >0.5cm) | 1.18 / 5.40 / 5.47 / 43.03% | 0.23 / 4.44 / 5.82 / 13.09% |
+| footSlide.corner (cm/planted frame: mean / p99 / max / >0.5cm) | 0.09 / 2.44 / 92.76 / 3.39% | 0.06 / 1.93 / 39.12 / 2.32% |
+| footSlide.post (cm/planted frame: mean / p99 / max / >0.5cm) | 0.35 / 3.99 / 142.87 / 13.16% | 0.31 / 3.98 / 65.33 / 13.61% |
+| hipFreeze (frames frozen / sim-moving frames, longest ms) | 0.43% (156/36223), 17 | 1.36% (491/36223), 67 |
+| joint.elbowOverflex (% fighter-frames) | 4.32% | 4.34% |
+| joint.kneeOverflex (% fighter-frames) | 0.01% | 0.03% |
+| joint.kneeFootTwist (% fighter-frames) | 1.02% | 0.37% |
+| joint.spineTwist (% fighter-frames) | 0.14% | 0.21% |
+| joint.spineSide (% fighter-frames) | 0.13% | 0.20% |
+| joint.neckYaw (% fighter-frames) | 0.94% | 0.00% |
+| joint.neckFlex (% fighter-frames) | 0.11% | 0.08% |
+| joint.neckExt (% fighter-frames) | 0.01% | 0.00% |
+| joint.neckRoll (% fighter-frames) | 0.03% | 0.00% |
+| pops (unexplained one-frame spikes per fighter-minute) | 335.19 | 104.17 |
+| pops.standing (rot / trans count) | 23231 / 1541 | 4847 / 374 |
+| pops.engaged (rot / trans count) | 3373 / 1 | 3416 / 0 |
+| pops.down (rot / trans count) | 3 / 0 | 3 / 0 |
+| pops.getup (rot / trans count) | 9 / 1 | 5 / 0 |
+| pops.corner (rot / trans count) | 108 / 0 | 105 / 0 |
+| pops.post (rot / trans count) | 153 / 8 | 81 / 4 |
+| groundPen.standing (frames >1cm, max cm) | 0.42%, 13.41 | 0.35%, 9.19 |
+| groundPen.engaged (frames >1cm, max cm) | 6.41%, 73.57 | 0.67%, 28.56 |
+| groundPen.down (frames >1cm, max cm) | 3.04%, 9.22 | 0.00%, 0.00 |
+| groundPen.getup (frames >1cm, max cm) | 37.82%, 18.41 | 0.00%, 0.00 |
+| groundPen.corner (frames >1cm, max cm) | 2.47%, 16.93 | 2.10%, 4.83 |
+| groundPen.post (frames >1cm, max cm) | 4.03%, 43.92 | 0.99%, 19.04 |
+| interpen.standing (frames >2cm, p99 / max cm) | 0.11%, 0.00 / 12.18 | 0.07%, 0.00 / 22.66 |
+| interpen.limbStanding (frames >5cm, max cm) | 4.10%, 16.97 | 3.87%, 16.81 |
+| interpen.engaged (frames >5cm, p99 / max cm) | 9.82%, 9.61 / 24.45 | 9.80%, 9.60 / 24.45 |
+| contact.surface (n, median / p90 / max cm, >5cm) | 386, 1.34 / 8.42 / 48.74, 23.32% | 386, 1.49 / 8.16 / 25.39, 24.35% |
+| contact.inRange (recorded ≤ 1.6 m punch / 1.9 m kick: n, median / p90 / max cm, >5cm) | 385, 1.33 / 8.41 / 48.74, 23.12% | 385, 1.47 / 8.16 / 25.39, 24.16% |
+| contact.aim (IK error: median / p90 / max cm) | 0.97 / 9.71 / 48.93 | 0.96 / 5.10 / 27.48 |
+| disagree.clinchButApart (% of applicable frames) | 1.66% of 26466 | 1.66% of 26466 |
+| disagree.downButUpright (% of applicable frames) | 0.00% of 2655 | 0.00% of 2655 |
+| disagree.facingOff (% of applicable frames) | 0.11% of 131093 | 0.12% of 131068 |
+| disagree.groundButUpright (% of applicable frames) | 0.00% of 35138 | 0.00% of 35138 |
+| disagree.simFacingInfo (% of applicable frames) | 0.81% of 152558 | 0.68% of 152525 |
+| disagree.stanceMismatch (% of applicable frames) | 7.64% of 152042 | 2.12% of 152007 |
+| disagree.standingButLow (% of applicable frames) | 0.00% of 151289 | 0.00% of 151289 |
+| evaluate ms (2 fighters, all modes: mean / p95) | 0.20 / 0.44 | 0.17 / 0.40 |
+| evaluate ms (2 fighters standing: mean / median / p95) | 0.15 / 0.10 / 0.35 | 0.15 / 0.10 / 0.37 |
+
+Reading it: the standing body is where the pass concentrated (pops ÷ 4.7, planted-foot sliding ÷ 2, neck
+violations gone, stance disagreement ÷ 3.6), plus the floor (engaged, down, get-up, post) and the transitions.
+Engaged pops, engaged interpenetration and elbow over-flexion are almost all the grapple solver's own poses (see
+below). Contact: the aim is reached better (IK error p90 9.7 → 5.1 cm, max 49 → 27 cm), the surface distance is
+about the same in the median (1.3 → 1.5 cm) with the worst case halved; 385 of 386 landed/blocked standing strikes are now resolved inside reach (the sim's range
+issue of the standing-animation notes is gone), so the remaining misses are the animation's. Cost of `evaluate`
+(harness, 2 fighters, this machine under load): standing 0.15 → 0.15 ms mean, all modes 0.20 → 0.17 ms.
+
+**Captures** (`docs/screenshots/anim-*.png`, stick figures from the pose data, before row above after):
+`anim-clinch-stoppage` (the first second after a clinch TKO), `anim-getup` (a KO'd fighter 3.5-10.6 s after —
+note the shin through the canvas in the old blend), `anim-celebrate`, `anim-footwork-stopgo` (hips height and a
+toe over stop-go recorded motion), `anim-kick-end` (the kicking thigh's angular speed through a blocked body kick).
+Regenerate: `anim-captures.ts` against the old and the new code, then `anim-captures.mjs before.json after.json`.
+
+**Tried and backed out.** An elbow flexion limit (150°) in the standing arms' IK: it removed few violations
+(most are in grapple poses) and made the arm's pole unstable for fists pulled in near the shoulder (hook
+windups), raising arm pops by a third; `ELBOW_MAX_FLEX` stays available in `rig/ik.ts`, unused. A knee-up pole
+rule in `floorFix`: flipping the pole is itself a pop (a grapple test caught a 71 cm/frame joint jump).
+
+**Still wrong.**
+- One-frame arm pops remain at ~100 per fighter-minute overall: guard hands following a head that moves with
+  the hips, hook windups whose fist path passes close to the shoulder (the elbow orbits), parry / block entries.
+- The grapple solver's own poses: elbows folded past 155° in body locks and cage pins (4 % of all frames),
+  node-held limbs that pop (half guard, mount-technical, side control), 10 % of engaged frames with torsos > 5 cm
+  into each other (throws, sprawl spin-behind), knees that can go under the mat (the floor fix lifts feet and
+  hands only).
+- Standing interpenetration peaks in the post-roll after a submission (the winner rising through the loser,
+  22 cm); corner transitions still slide feet up to 39 cm in a frame at the bell (the walker starts at the
+  recorded, not the displayed, position).
+- Contact: a quarter of landed/blocked standing strikes are more than 5 cm off the target surface at the
+  instant (novice crosses thrown while flinching, blocked jabs aimed at a guard that moved).
+- The sim's stop-go movement is smoothed, not removed: at 10 Hz the feet still take many short steps.
+- The captured celebration is ACCAD's karate performer (a deep lunge rather than a kneel); the get-up plays at the
+  take's speed, so a KO'd man lies still a little longer before a brisk rise.

@@ -21,6 +21,7 @@ import {
   blendPose, createPose, forwardKinematics, type Pose, type WorldPose, BONE_COUNT,
 } from '../../rig/skeleton';
 import { Composer, copy } from './compose';
+import { floorFix } from '../blend';
 import { easeInOut, qAxis, qMul, qRot, type V3 } from './math';
 import type { FlightRequest, PairRequest, StrikeRequest, SubRequest } from './request';
 import { nearestWall, wallPlanes, type WallPlane } from './fence';
@@ -129,11 +130,12 @@ export class GrappleSolverImpl implements GrappleSolver {
     const w = st.fadeDur > 0 ? easeInOut((t - st.fadeStart) / st.fadeDur) : 1;
     writeOut(outA, TMP_A, st.from.get(idA), w);
     writeOut(outB, TMP_B, st.from.get(idB), w);
+    // Nothing under the mat: throw arcs rotate whole bodies about a pivot, and
+    // the cross-fades blend bone by bone (a foot went up to 73 cm under it).
+    floorFix(outA, worldA, ctx.restA);
+    floorFix(outB, worldB, ctx.restB);
     st.last.set(idA, clonePose(outA, st.last.get(idA)));
     st.last.set(idB, clonePose(outB, st.last.get(idB)));
-
-    forwardKinematics(worldA, outA, ctx.restA);
-    forwardKinematics(worldB, outB, ctx.restB);
     this.lastLabel = res.label;
     return { handled: true, label: res.label };
   }

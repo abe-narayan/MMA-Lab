@@ -25,7 +25,7 @@
  */
 import type { MotionClipInfo, MotionLibrary } from '../assets/motionLibrary';
 import { B, forwardKinematics } from '../rig/skeleton';
-import { LIMBS, solveTwoBone } from '../rig/ik';
+import { KNEE_MAX_FLEX, LIMBS, solveTwoBone } from '../rig/ik';
 import {
   DEG, add, bump, clamp, clamp01, dirToWorld, hash01, madd, norm, smooth, sub, toWorld, vlerp,
   windowW, type V3,
@@ -498,7 +498,7 @@ export function capLegPass(
     const chain = kf === 0 ? LIMBS.lLeg : LIMBS.rLeg;
     const base = ankleOf(rig, kf, spec.feet[kf]);
     const target = vlerp(base, A, clamp01(wgt));
-    solveTwoBone(st.pose, w, rig.rest, chain, target, pole, 1);
+    solveTwoBone(st.pose, w, rig.rest, chain, target, pole, 1, KNEE_MAX_FLEX);
     forwardKinematics(w, st.pose, rig.rest);
   }
   return T;

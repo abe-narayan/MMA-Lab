@@ -29,6 +29,10 @@ export interface Swing {
   height: number;
   /** Captured step this swing follows (foot progress / height curves, upper-body residual), if any. */
   cap: SwingProfile | null;
+  /** Heel lift of the foot when it left the floor (the swing's lift starts here, so the foot does not snap). */
+  fromLift: number;
+  /** A deliberate novice cross-step (its landing is not re-aimed in flight). */
+  crossed: boolean;
 }
 
 export interface FootState {
@@ -37,6 +41,8 @@ export interface FootState {
   swing: Swing | null;
   /** sim ms of the last landing. */
   landedAt: number;
+  /** Heel lift this foot was last drawn with while planted. */
+  lift: number;
 }
 
 export interface FootCtl {
@@ -175,8 +181,14 @@ export interface FighterState {
   /** Last display facing (for the frame when the opponent is directly on top). */
   lastYaw: number;
   initialised: boolean;
-  /** Which feet are planted on the floor this frame (for the pelvis reach clamp). */
+  /** Which feet are planted on the floor this frame. */
   planted: [boolean, boolean];
+  /**
+   * How much each foot's target binds the pelvis height (1: planted or stepping,
+   * fading to 0 as an action takes the leg over), so the reach clamp never
+   * switches a constraint on or off in one frame.
+   */
+  reachW: [number, number];
   debugLayer: string;
   /** Scratch: this frame's delta / spec / frame (valid during evaluate). */
   delta: Delta;
@@ -191,6 +203,16 @@ export interface FighterState {
   /** Capture plans of the current strike / defence (keyed so a seek rebuilds them). */
   capAction: { key: string; plan: CapAction | null } | null;
   capDefence: { key: string; plan: CapDefence | null } | null;
+  /** The strike and defence running last frame (`s:id@commit`, `d:motion@contact`), to fade out their end. */
+  actStrike: string;
+  actDefence: string;
+  /**
+   * Where each foot stood in the last displayed pose when the fighter came back
+   * to his feet from a clinch, the ground or the canvas (ball point and yaw), or
+   * null: the footwork starts from there instead of teleporting the feet under
+   * the stance (they then step into it).
+   */
+  feetSeed: [{ ball: V3; yaw: number } | null, { ball: V3; yaw: number } | null] | null;
 }
 
 export function createFighterState(index: number, id: number, rig: RigInfo, tiers: FighterTiers, seed: number): FighterState {
@@ -198,15 +220,15 @@ export function createFighterState(index: number, id: number, rig: RigInfo, tier
     index, id, rig, tiers, seed,
     pose: createPose(), world: createWorldPose(),
     feet: [
-      { ball: [0, 0, 0], yaw: 0, swing: null, landedAt: -1e9 },
-      { ball: [0, 0, 0], yaw: 0, swing: null, landedAt: -1e9 },
+      { ball: [0, 0, 0], yaw: 0, swing: null, landedAt: -1e9, lift: 0 },
+      { ball: [0, 0, 0], yaw: 0, swing: null, landedAt: -1e9, lift: 0 },
     ],
     latch: null, knownAt: 0, contactAim: null, lastMs: -1, stepCount: 0,
     mode: 'standing', modeSince: 0, fade: null, knock: null, prevPosture: 'standing',
-    lastYaw: 0, initialised: false, planted: [true, true], debugLayer: 'L0',
+    lastYaw: 0, initialised: false, planted: [true, true], reachW: [1, 1], debugLayer: 'L0',
     delta: createDelta(), spec: createSpec({ ox: 0, oz: 0, yaw: 0, c: 1, s: 0 }), lastSpec: null,
     displayRoot: [0, 0, 0], displayVel: [0, 0, 0], ikTargets: [],
-    cap: null, capAction: null, capDefence: null,
+    cap: null, capAction: null, capDefence: null, actStrike: '', actDefence: '', feetSeed: null,
   };
 }
 

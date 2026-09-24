@@ -21,7 +21,7 @@ import {
   qy, qypr, scale, smooth, sub, toWorld, bump, type Frame, type V3,
 } from './math';
 import type { BodySpec } from './spec';
-import { ankleOf, worldP, worldQ } from './spec';
+import { LEG_REACH, ankleOf, worldP, worldQ } from './spec';
 import type { Ctx, Delta, FighterState, FootState } from './state';
 import { CH, NCH, clipStance, sampleCurve, stepClip, stepResidual, type SwingProfile } from './capture';
 
@@ -111,13 +111,19 @@ function yawErr(a: number, b: number): number {
 /** Initialise both feet in stance (first frame, or after a seek). */
 export function snapFeet(ctx: Ctx, lay: StanceLayout, fr: Frame): void {
   const des = desiredFeet(ctx, lay, fr);
+  const seed = ctx.st.feetSeed;
   for (const side of [0, 1] as const) {
     const f = ctx.st.feet[side];
-    f.ball = des.ball[side];
-    f.yaw = des.yaw[side];
+    const sd = seed?.[side] ?? null;
+    // Back on his feet from a clinch / the ground: the feet start where they
+    // were drawn (the plant machine then steps them into the stance).
+    f.ball = sd ? [sd.ball[0], 0, sd.ball[2]] : des.ball[side];
+    f.yaw = sd ? sd.yaw : des.yaw[side];
     f.swing = null;
     f.landedAt = ctx.nowMs - 1000;
+    f.lift = 0;
   }
+  ctx.st.feetSeed = null;
 }
 
 export interface FootOut {
@@ -230,13 +236,15 @@ export function updateFeet(ctx: Ctx, lay: StanceLayout, fr: Frame, d: Delta, dtM
     const dur = Math.max(110, (150 + 200 * clamp01(dist0 / (0.6 * s))) * t.stepTime);
     const land = predictFrame(dur, 1.1);
     const to = desiredFeet(ctx, lay, land);
-    let toBall = to.ball[side];
+    let toBall = keepOrder(ctx, side, to.ball[side], fr);
     // Untrained feet cross on lateral steps.
     const lateral = Math.abs((vel[0] * fr.c - vel[2] * fr.s)) / Math.max(1e-6, speed);
+    let crossed = false;
     if (speed > 0.25 && lateral > 0.75 && t.footCross > 0 && hash01(st.seed, st.stepCount, 7) < t.footCross) {
       const other = to.ball[1 - side];
       const across = sub(other, toBall);
       toBall = madd(toBall, across, 1.35);
+      crossed = true;
     }
     st.stepCount++;
     // The captured step for this direction supplies the foot's timing curves
@@ -254,7 +262,26 @@ export function updateFeet(ctx: Ctx, lay: StanceLayout, fr: Frame, d: Delta, dtM
       toBall, toYaw: to.yaw[side],
       height: (0.028 + 0.05 * clamp01(dist0 / (0.5 * s))) * s * (t.stepTime > 1.2 ? 1.25 : 1),
       cap: prof,
+      fromLift: f.lift,
+      crossed,
     };
+  }
+
+  // Re-aim feet in flight: the landing was predicted from the velocity at
+  // lift-off, and the sim's body often stops or turns within the swing (a rear
+  // foot aimed for a body still moving forward landed 10 cm in FRONT of the
+  // lead foot). The landing point drifts toward the current prediction, at most
+  // 2 cm a frame, until 80 % of the swing.
+  for (const side of [0, 1] as const) {
+    const sw = st.feet[side].swing;
+    if (!sw || sw.crossed || d.feet[side].ankleW > 0.02) continue;
+    const u = (now - sw.t0) / sw.dur;
+    if (u >= 0.8) continue;
+    const want = keepOrder(ctx, side, desiredFeet(ctx, lay, predictFrame(sw.t0 + sw.dur - now, 1.1)).ball[side], fr);
+    const dx = want[0] - sw.toBall[0], dz = want[2] - sw.toBall[2];
+    const dl = Math.hypot(dx, dz);
+    const k = dl > 0.02 * s ? (0.02 * s) / dl : 1;
+    sw.toBall = [sw.toBall[0] + dx * k, 0, sw.toBall[2] + dz * k];
   }
 
   const out: [FootOut, FootOut] = [null!, null!];
@@ -263,7 +290,10 @@ export function updateFeet(ctx: Ctx, lay: StanceLayout, fr: Frame, d: Delta, dtM
     if (f.swing) {
       const u = clamp01((now - f.swing.t0) / f.swing.dur);
       const cp = f.swing.cap;
-      const e = cp ? sampleCurve(cp.prog, u) : smooth(u);
+      // The foot leaves the canvas before it travels and is down before it
+      // stops: no skimming along the floor at lift-off and touch-down.
+      const uh = clamp01((u - 0.1) / 0.8);
+      const e = cp ? sampleCurve(cp.prog, uh) : smooth(uh);
       const b = f.swing.fromBall;
       const p: V3 = [
         lerp(b[0], f.swing.toBall[0], e),
@@ -280,6 +310,26 @@ export function updateFeet(ctx: Ctx, lay: StanceLayout, fr: Frame, d: Delta, dtM
     }
   }
   return out;
+}
+
+/**
+ * A trained stance never steps the rear foot past the lead one (or the lead
+ * behind the rear): the landing is held at least 6 cm (scaled) on its own side
+ * of the other foot along the facing (the other foot where it stands, or
+ * where it is landing). A stance switch flips which foot leads, so the same
+ * rule walks the feet through the switch.
+ */
+function keepOrder(ctx: Ctx, side: 0 | 1, ball: V3, fr: Frame): V3 {
+  const o = ctx.st.feet[1 - side];
+  const ob = o.swing ? o.swing.toBall : o.ball;
+  const gap = 0.06 * ctx.st.rig.scale;
+  const fx = fr.s, fz = fr.c; // forward
+  const dz = (ball[0] - ob[0]) * fx + (ball[2] - ob[2]) * fz;
+  const lead = side === ctx.lead;
+  const need = lead ? gap - dz : dz + gap; // > 0: on the wrong side
+  if (need <= 0) return ball;
+  const k = lead ? need : -need;
+  return [ball[0] + fx * k, ball[1], ball[2] + fz * k];
 }
 
 /**
@@ -311,7 +361,11 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
   const fb = 1.75 + 0.55 * hash01(st.seed, 11);
   const ph = 2 * Math.PI * fb * now + hash01(st.seed, 12) * 6.28;
   const flat = clamp01(fat.flatFeet);
-  const bounceA = lay.bounce * d.bounce * (1 - 0.85 * flat) * (feet[0].planted && feet[1].planted ? 1 : 0.4);
+  // The bounce eases off while a foot is in the air (continuous in the swing,
+  // so lifting a foot never drops the hips in one frame).
+  let airborne = 0;
+  for (const side of [0, 1] as const) if (!feet[side].planted) airborne = Math.max(airborne, Math.sin(Math.PI * clamp01(feet[side].swingU)));
+  const bounceA = lay.bounce * d.bounce * (1 - 0.85 * flat) * (1 - 0.6 * airborne);
   // Capture: the performers' rhythm (normalised residuals, `capture.ts`) drives
   // the same channels the procedural sine / noise would, at the tier's amplitudes.
   const idle = d.idle;
@@ -388,14 +442,22 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
     const fs = spec.feet[side];
     const isLead = side === ctx.lead;
     const baseHeel = isLead ? lay.heelLead : lay.heelRear;
+    const plantedHeel = baseHeel * (1 - flat) * d.heel + 5 * DEG * heelBob * (bounceA > 0 ? 1 : 0);
+    // A swinging foot starts from the heel it left the floor with and lands on
+    // the heel it will stand on (a small toe-off early in the swing): no snap
+    // of the foot's pitch at lift-off or touch-down.
+    const u = fo.swingU;
+    const air = fo.planted ? 0 : Math.sin(Math.PI * clamp01(u));
+    const sw = st.feet[side].swing;
     const heel = fo.planted
-      ? (baseHeel * (1 - flat) * d.heel + 5 * DEG * heelBob * (bounceA > 0 ? 1 : 0))
-      : fo.lift;
+      ? plantedHeel
+      : lerp(sw ? sw.fromLift : plantedHeel, plantedHeel, smooth(u)) + 0.15 * air * (1 - u);
     fs.ball = [fo.ball[0], fo.ball[1], fo.ball[2]];
     fs.yaw = fo.yaw + ctl.pivot;
-    fs.lift = lerp(heel, ctl.lift, clamp01(ctl.liftW)) + (fo.planted ? ctl.liftAdd : 0);
+    fs.lift = lerp(heel, ctl.lift, clamp01(ctl.liftW)) + ctl.liftAdd * (1 - air);
     fs.airPitch = fo.airPitch + ctl.airPitch;
-    fs.toeFlat = fo.planted ? 1 : 0.3;
+    fs.toeFlat = 1 - 0.7 * air;
+    if (fo.planted) st.feet[side].lift = fs.lift;
     fs.ankle = null;
     // Knees track between the toes and the opponent (a turned-out rear foot
     // does not drag the rear knee out sideways), a touch outward.
@@ -416,6 +478,7 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
   }
   spec.pelvis = pelvis;
   st.planted = [feet[0].planted && d.feet[0].ankleW <= 0.05, feet[1].planted && d.feet[1].ankleW <= 0.05];
+  st.reachW = [clamp01(1 - d.feet[0].ankleW / 0.35), clamp01(1 - d.feet[1].ankleW / 0.35)];
   if (!spec.free) clampPelvis(spec, st);
 
   // ---- torso, shoulders, head ----------------------------------------------
@@ -437,7 +500,14 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
 const stepRes = new Float64Array(NCH);
 const stepTmp = new Float64Array(NCH);
 
-/** Lower the pelvis until every planted foot is within reach (the IK then lands it exactly). */
+/**
+ * Lower the pelvis until every foot on the floor or stepping is within reach
+ * (the IK then lands it exactly). A stepping foot binds as much as a planted
+ * one — its target moves continuously, so the pelvis height does too — and a
+ * leg an action takes over (a kick, a knee) releases the pelvis gradually
+ * (`reachW`), so no constraint ever switches in one frame (that was the hips
+ * popping 4-5 cm every time a foot left or touched the floor).
+ */
 export function clampPelvis(spec: BodySpec, st: FighterState): void {
   const rig = st.rig;
   const hipsQ = qypr(spec.frame.yaw + spec.pelvisYaw, spec.pelvisPitch, spec.pelvisRoll);
@@ -445,17 +515,21 @@ export function clampPelvis(spec: BodySpec, st: FighterState): void {
   // Never squat more than 12 cm below what the layers asked for: past that a
   // stretched leg lets its heel come up instead.
   const floorY = pelvis[1] - 0.12 * rig.scale;
+  const max = rig.legLen * LEG_REACH;
   for (let it = 0; it < 3; it++) {
+    let drop = 0;
     for (const side of [0, 1] as const) {
-      if (!st.planted[side]) continue;
+      const w = st.reachW[side];
+      if (w <= 0) continue;
       const hip = add(pelvis, qrot(hipsQ, rig.hipOff[side]));
       const ank = ankleOf(rig, side, spec.feet[side]);
-      const max = rig.legLen * 0.985;
       const h = Math.hypot(hip[0] - ank[0], hip[2] - ank[2]);
       const v = hip[1] - ank[1];
       const dd = Math.hypot(h, v);
-      if (dd > max && h < max) pelvis[1] -= v - Math.sqrt(max * max - h * h);
+      if (dd > max && h < max) drop = Math.max(drop, (v - Math.sqrt(max * max - h * h)) * w);
     }
+    if (drop <= 1e-6) break;
+    pelvis[1] -= drop;
   }
   if (pelvis[1] < floorY) pelvis[1] = floorY;
 }

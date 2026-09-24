@@ -19,7 +19,7 @@
  * the hip over). Limbs (pass 2): the striking hand / leg, aimed.
  */
 import { B } from '../rig/skeleton';
-import { LIMBS, solveTwoBone } from '../rig/ik';
+import { KNEE_MAX_FLEX, LIMBS, solveTwoBone } from '../rig/ik';
 import {
   DEG, add, bump, clamp, clamp01, cross, dist, dot, hash01, launch, len, lerp, madd, norm,
   qaxis, qrot, qslerp, scale, settle, smooth, sub, toWorld, dirToWorld, vlerp, windowW,
@@ -946,7 +946,7 @@ export function legPass(
     const chain = kf === 0 ? LIMBS.lLeg : LIMBS.rLeg;
     const base = ankleOf(rig, kf, spec.feet[kf]);
     const target = vlerp(base, ank, clamp01(wgt));
-    solveTwoBone(st.pose, w, rig.rest, chain, target, pole, 1);
+    solveTwoBone(st.pose, w, rig.rest, chain, target, pole, 1, KNEE_MAX_FLEX);
     forwardKinematics(w, st.pose, rig.rest);
     return T;
   }

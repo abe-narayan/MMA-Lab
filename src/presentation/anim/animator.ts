@@ -47,6 +47,7 @@ import { classify, legPass, strikeBody, strikeHands, strikeRootOffset } from './
 import { fighterTiers } from './tier';
 import { strikeTiming, type ActionTiming } from './timing';
 import { separatePair } from './clearance';
+import { fadeKeepFeet, floorFix, footGrounded } from './blend';
 import type { MotionLibrary } from '../assets/motionLibrary';
 import { CapRig, NCH, idleResidual, registeredMotionLibrary } from './capture';
 import {
@@ -96,6 +97,9 @@ export class StandingAnimator implements Animator {
   private readonly tmpPose: Pose = createPose();
   private debugInfo: AnimDebug[] = [];
   private lib: MotionLibrary | null = null;
+  /** Recorded floor positions of the current and the previous tick (the root path's third point). */
+  private tickPos: { tick: number; pos: [number, number][] } | null = null;
+  private prevTickPos: { tick: number; pos: [number, number][] } | null = null;
 
   constructor(private readonly opts: AnimatorOptions = {}) {}
 
@@ -132,8 +136,12 @@ export class StandingAnimator implements Animator {
       st.feet[1].swing = null;
       st.capAction = null;
       st.capDefence = null;
+      st.actStrike = '';
+      st.actDefence = '';
     }
     this.lastNow = -Infinity;
+    this.tickPos = null;
+    this.prevTickPos = null;
     grappleSolver()?.reset();
   }
 
@@ -211,7 +219,12 @@ export class StandingAnimator implements Animator {
         }
         st.mode = mode;
         st.modeSince = snap ? -1e9 : now;
-        if (mode === 'standing' || mode === 'getup') st.initialised = st.initialised && from !== 'down' && from !== 'out';
+        if ((mode === 'standing' || mode === 'getup') && from !== 'standing' && from !== 'getup') {
+          // Re-seat the footwork on the feet as they were last drawn (the clinch,
+          // the ground and the canvas move the body without the plant machine).
+          st.initialised = false;
+          st.feetSeed = snap || !st.lastSpec ? null : groundedFeet(st);
+        }
       }
     }
 
@@ -258,6 +271,7 @@ export class StandingAnimator implements Animator {
       st.displayRoot = fr.pos;
       st.displayVel = fr.vel;
       ctxs.push(ctx);
+      this.actionEndFade(ctx, snap);
     }
 
     // ---- pass 1: bodies ----------------------------------------------------------
@@ -267,6 +281,14 @@ export class StandingAnimator implements Animator {
       st.delta = createDelta();
       if (st.spec.frame.ox === 0 && st.spec.frame.oz === 0) st.spec = createSpec(ctx.frame);
       st.spec.free = false;
+      if (st.mode === 'grapple' && (engagedPair.has(i) || st.lastSpec)) {
+        // Engaged: the pair solver poses him below. Tied up / on the ground with
+        // no engagement recorded (the last frame of a submission: the sim has
+        // released the pair but not yet stood anybody up): hold the last pose
+        // rather than standing him up for a frame.
+        if (!engagedPair.has(i)) st.debugLayer = 'grapple hold';
+        continue;
+      }
       if (st.mode === 'down' || st.mode === 'out') this.bodyDown(ctx);
       else this.bodyStanding(ctx, dtMs, snap);
     }
@@ -275,7 +297,7 @@ export class StandingAnimator implements Animator {
     for (let i = 0; i < n; i++) {
       const ctx = ctxs[i]!;
       const st = ctx.st;
-      if (st.mode === 'down' || st.mode === 'out') continue;
+      if (st.mode === 'down' || st.mode === 'out' || st.mode === 'grapple') continue;
       const g = guardHands(ctx, st.spec, st.delta);
       for (const side of [0, 1] as const) {
         const h = st.spec.hands[side];
@@ -372,8 +394,9 @@ export class StandingAnimator implements Animator {
         const u = (now - st.fade.t0) / st.fade.dur;
         if (u >= 1 || u < 0) st.fade = null;
         else {
-          blendPose(st.pose, st.fade.from, st.pose, smooth(u));
+          // Blend over the planted feet (a plain pose blend dips and skates them).
           forwardKinematics(st.world, st.pose, st.rig.rest);
+          fadeKeepFeet(st.pose, st.world, st.fade.from, 1 - smooth(u), st.rig.rest);
         }
       }
       st.lastSpec = st.spec;
@@ -391,12 +414,64 @@ export class StandingAnimator implements Animator {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * When a strike or a defence ends (or gives way to another), fade from the
+   * last displayed pose over ~180 ms instead of snapping back to the stance:
+   * the layers' deltas stop at the action's recorded end, and a kick's leg,
+   * a block's head or a cross's arm otherwise jumped 20-60° in one frame. A new
+   * strike's contact is protected: the fade is over 50 ms before it lands.
+   */
+  private actionEndFade(ctx: Ctx, snap: boolean): void {
+    const st = ctx.st;
+    const standing = st.mode === 'standing' || st.mode === 'getup';
+    const tm = standing ? ctx.my : null;
+    const ad = standing ? activeDefence(ctx) : null;
+    const ks = tm ? `s:${tm.id}@${Math.round(tm.commit)}` : '';
+    const kd = ad ? `d:${ad.motion}@${Math.round(ad.t.contact)}` : '';
+    const ended = (st.actStrike !== '' && st.actStrike !== ks) || (st.actDefence !== '' && st.actDefence !== kd);
+    st.actStrike = ks;
+    st.actDefence = kd;
+    if (!ended || snap || !standing || !st.lastSpec) return;
+    if (st.fade && ctx.nowMs - st.fade.t0 < st.fade.dur * 0.5) return; // a mode fade is still doing it
+    let dur = 180;
+    if (tm) dur = Math.min(dur, tm.contact - ctx.nowMs - 50);
+    if (dur < 60) return;
+    const from = st.fade?.from ?? createPose();
+    copyPose(from, st.pose);
+    st.fade = { from, t0: ctx.nowMs, dur };
+  }
+
   private placement(F0: TickSnapshot, F1: TickSnapshot | null, alpha: number, n: number, now: number, events: readonly SimEvent[]): FighterFrame[] {
+    // The previous tick's recorded positions (kept while playing tick to tick).
+    if (!this.tickPos || this.tickPos.tick !== F0.tick) {
+      this.prevTickPos = this.tickPos && this.tickPos.tick === F0.tick - 1 ? this.tickPos : null;
+      this.tickPos = { tick: F0.tick, pos: F0.fighters.map((f) => [f.x, f.z] as [number, number]) };
+    }
+    const prev = this.prevTickPos;
+    /**
+     * The root path: a uniform quadratic B-spline through the recorded tick
+     * positions (previous, this, next tick) instead of straight lines between
+     * them. The sim moves in 100 ms steps that start and stop (2.3 m/s, then 0,
+     * then 2.3 m/s at right angles): linear interpolation turned every tick into
+     * a velocity step — a hips jolt and a burst of frantic re-stepping — while
+     * this path has continuous velocity (the recorded velocities, blended over
+     * the tick) and stays within 1/8 of the tick-to-tick change of the record
+     * (it runs half a tick behind). Pure given the three recorded positions.
+     */
     const raw = (fr: TickSnapshot | null, i: number, a: number): V3 => {
       const f0 = F0.fighters[i];
-      const f1 = fr ? fr.fighters[i] : null;
-      if (!f1) return [f0.x, 0, f0.z];
-      return [lerp(f0.x, f1.x, a), 0, lerp(f0.z, f1.z, a)];
+      const f1 = (fr ? fr.fighters[i] : null) ?? f0;
+      // No next frame (the end of the recording, the post-roll): the path
+      // settles onto the frame's own position over a tick of the clock.
+      const s = fr ? clamp01(a) : clamp01((now / 1000 - F0.t) / 0.1);
+      let nx = f1.x, nz = f1.z;
+      if (Math.hypot(nx - f0.x, nz - f0.z) > 0.8) { nx = f0.x; nz = f0.z; } // a reset, not motion
+      const pp = prev?.pos[i];
+      let px: number, pz: number;
+      if (pp && Math.hypot(pp[0] - f0.x, pp[1] - f0.z) <= 0.8) { px = pp[0]; pz = pp[1]; }
+      else { px = 2 * f0.x - nx; pz = 2 * f0.z - nz; } // unknown: constant velocity
+      const wa = 0.5 * (1 - s) * (1 - s), wb = 0.5 + s - s * s, wc = 0.5 * s * s;
+      return [wa * px + wb * f0.x + wc * nx, 0, wa * pz + wb * f0.z + wc * nz];
     };
     const place = (a: number): V3[] => {
       const p: V3[] = [];
@@ -414,14 +489,17 @@ export class StandingAnimator implements Animator {
       return p;
     };
     const pos = place(alpha);
-    const p0 = place(0);
-    const p1 = F1 ? place(1) : p0;
     const span = F1 ? Math.max(0.05, F1.t - F0.t) : 0.1;
+    // Velocity of the displayed root (the path's derivative, by a central difference).
+    const aLo = Math.max(0, alpha - 0.05), aHi = Math.min(1, alpha + 0.05);
+    const p0 = place(aLo);
+    const p1 = F1 && aHi > aLo ? place(aHi) : p0;
+    const dA = Math.max(1e-6, (aHi - aLo) * span);
     const out: FighterFrame[] = [];
     for (let i = 0; i < n; i++) {
       const f = F0.fighters[i];
       const nx = F1 ? F1.fighters[i] ?? null : null;
-      const vel: V3 = F1 ? [(p1[i][0] - p0[i][0]) / span, 0, (p1[i][2] - p0[i][2]) / span] : [0, 0, 0];
+      const vel: V3 = F1 ? [(p1[i][0] - p0[i][0]) / dA, 0, (p1[i][2] - p0[i][2]) / dA] : [0, 0, 0];
       // Opponent: the action's target, else the nearest fighter of another team.
       let opp = -1;
       const tid = f.actionDetail.targetId;
@@ -621,6 +699,7 @@ export class StandingAnimator implements Animator {
     }
     st.debugLayer = `down:${k.kind}${rest ? ' (rest)' : ''}`;
     solveSpec(spec, st.rig, st.pose, st.world, false);
+    floorFix(st.pose, st.world, st.rig.rest);
   }
 
   /** An engaged pair: the registered solver, else the built-in approximation. */
@@ -758,6 +837,21 @@ export class StandingAnimator implements Animator {
     }
     void now;
   }
+}
+
+/** The feet of the last displayed pose that stand on the canvas (ball point and yaw), for re-seating the footwork. */
+function groundedFeet(st: FighterState): FighterState['feetSeed'] {
+  const w = st.world;
+  const out: NonNullable<FighterState['feetSeed']> = [null, null];
+  for (const side of [0, 1] as const) {
+    if (!footGrounded(w, st.rig.rest, side)) continue;
+    const toe = side === 0 ? B.lToe : B.rToe;
+    const ank = side === 0 ? B.lFoot : B.rFoot;
+    const tx = w.pos[toe * 3], tz = w.pos[toe * 3 + 2];
+    const yaw = Math.atan2(tx - w.pos[ank * 3], tz - w.pos[ank * 3 + 2]);
+    out[side] = { ball: [tx, 0, tz], yaw };
+  }
+  return out[0] || out[1] ? out : null;
 }
 
 function lerpFatigue(a: FighterSnapshot['fatigueVisual'], b: FighterSnapshot['fatigueVisual'], t: number): FighterSnapshot['fatigueVisual'] {

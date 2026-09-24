@@ -288,6 +288,13 @@ export interface SwingProfile {
   /** Lift-off / landing clip seconds. */
   tLift: number;
   tLand: number;
+  /**
+   * The upper-body residual (see `stepResidual`) tabulated at SW_N points of the
+   * swing and lightly smoothed: the animation compresses a 0.3-0.5 s captured
+   * swing into 0.1-0.35 s, so per-frame capture noise became 2-4 cm hip jitter;
+   * a table is also cheaper than a clip sample and FK every frame.
+   */
+  res: Float64Array;
 }
 
 const SW_N = 17;
@@ -305,6 +312,9 @@ function buildSwing(rig: CapRig, info: MotionClipInfo, h: number, footSide: 0 | 
   const sorted = [...pool].sort((x, y) => (x[1] - x[0]) - (y[1] - y[0]));
   const [a, b] = sorted[Math.floor(sorted.length / 2)];
   const fps = info.fps;
+  // A "swing" longer than a real step is a mis-detected plant (a hovering or
+  // dragged foot): its curves are not a step's. Procedural for that foot.
+  if ((b - a) / fps > 0.6) return null;
   const pad = 4;
   const fa = Math.max(0, a - pad), fb = Math.min(info.frames - 1, b + pad);
   const prog = new Float32Array(SW_N);
@@ -321,16 +331,47 @@ function buildSwing(rig: CapRig, info: MotionClipInfo, h: number, footSide: 0 | 
     height[k] = Math.max(0, p[1] - (p0[1] + (p1[1] - p0[1]) * k / (SW_N - 1)));
     hmax = Math.max(hmax, height[k]);
   }
-  // Monotone progress 0 -> 1, height normalised to peak 1 (0 at both ends).
+  // Monotone progress 0 -> 1, lightly smoothed (a running max of noisy
+  // capture has flats and steps, which became one-frame shin jerks once a
+  // 0.3-0.5 s captured swing is played in 0.1-0.35 s).
   let run = 0;
   for (let k = 0; k < SW_N; k++) { run = Math.max(run, clamp01(prog[k])); prog[k] = run; }
   prog[0] = 0; prog[SW_N - 1] = 1;
-  for (let k = 0; k < SW_N; k++) height[k] = hmax > 0.005 ? height[k] / hmax : Math.sin(Math.PI * k / (SW_N - 1));
-  height[0] = 0; height[SW_N - 1] = 0;
+  const pr = Float32Array.from(prog);
+  for (let k = 1; k < SW_N - 1; k++) prog[k] = 0.25 * pr[k - 1]! + 0.5 * pr[k]! + 0.25 * pr[k + 1]!;
+  // Height: the captured toe-clearance curves are not single humps (some dip
+  // back to the floor mid-swing — a shuffled double step). Keep what
+  // characterises the step, WHEN the foot is highest, and draw one smooth hump
+  // through it (zero slope at lift-off, the peak and touch-down).
+  let kPeak = 0;
+  for (let k = 0; k < SW_N; k++) if (height[k]! > height[kPeak]!) kPeak = k;
+  const up = hmax > 0.005 ? clamp(kPeak / (SW_N - 1), 0.3, 0.7) : 0.5;
+  for (let k = 0; k < SW_N; k++) {
+    const u = k / (SW_N - 1);
+    const x = u < up ? u / up : (1 - u) / (1 - up);
+    height[k] = x * x * (3 - 2 * x);
+  }
+  const ca = CapRig.channels(f0, new Float64Array(NCH));
+  const cb = CapRig.channels(f1, new Float64Array(NCH));
+  const raw = new Float64Array(SW_N * NCH);
+  const tmp = new Float64Array(NCH);
+  for (let k = 0; k < SW_N; k++) {
+    const x = k / (SW_N - 1);
+    CapRig.channels(rig.frame(h, (a + (b - a) * x) / fps), tmp);
+    for (let c = 0; c < NCH; c++) {
+      let v = tmp[c] - (ca[c] + (cb[c] - ca[c]) * x);
+      if (c >= 3 && c <= 11) v = wrapA(v);
+      raw[k * NCH + c] = v;
+    }
+  }
+  // [1 2 1] smoothing, ends pinned at 0 (the residual is 0 at lift-off and landing).
+  const res = new Float64Array(SW_N * NCH);
+  for (let k = 1; k < SW_N - 1; k++) {
+    for (let c = 0; c < NCH; c++) res[k * NCH + c] = 0.25 * raw[(k - 1) * NCH + c] + 0.5 * raw[k * NCH + c] + 0.25 * raw[(k + 1) * NCH + c];
+  }
   return {
     h, ta: fa / fps, tb: fb / fps, ua: (a - fa) / Math.max(1, fb - fa), ub: (b - fa) / Math.max(1, fb - fa), prog, height,
-    ca: CapRig.channels(f0, new Float64Array(NCH)), cb: CapRig.channels(f1, new Float64Array(NCH)),
-    tLift: a / fps, tLand: b / fps,
+    ca, cb, tLift: a / fps, tLand: b / fps, res,
   };
 }
 
@@ -339,14 +380,12 @@ function buildSwing(rig: CapRig, info: MotionClipInfo, h: number, footSide: 0 | 
  * deviation from the straight line between lift-off and landing (so it is 0 at
  * both ends), in absolute units (metres, radians).
  */
-export function stepResidual(cap: CapRig, p: SwingProfile, u: number, out: Float64Array): Float64Array {
-  const x = clamp01(u);
-  CapRig.channels(cap.frame(p.h, p.tLift + (p.tLand - p.tLift) * x), out);
-  for (let c = 0; c < NCH; c++) {
-    let v = out[c] - (p.ca[c] + (p.cb[c] - p.ca[c]) * x);
-    if (c >= 3 && c <= 11) v = wrapA(v);
-    out[c] = v;
-  }
+export function stepResidual(_cap: CapRig, p: SwingProfile, u: number, out: Float64Array): Float64Array {
+  const x = clamp01(u) * (SW_N - 1);
+  const i = Math.min(SW_N - 2, Math.floor(x));
+  const f = x - i;
+  const r = p.res;
+  for (let c = 0; c < NCH; c++) out[c] = r[i * NCH + c] + (r[(i + 1) * NCH + c] - r[i * NCH + c]) * f;
   return out;
 }
 

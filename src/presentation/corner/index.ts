@@ -32,9 +32,10 @@ import * as THREE from 'three/webgpu';
 import type { Arena, SimEvent, TickSnapshot } from '../../sim';
 import type { BoutPresentation, CharacterFactory, FrameInput, QualitySettings } from '../contract';
 import {
-  B, blendPose, createPose, createWorldPose, forwardKinematics, mulQuat,
+  B, blendPose, copyPose, createPose, createWorldPose, forwardKinematics, mulQuat,
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
+import { fadeKeepFeet } from '../anim/blend';
 import { LIMBS, axisAngle, conjugateInto, solveTwoBone } from '../rig/ik';
 import { FigurePoser } from '../people/figure';
 import { cornerSpots, type CornerSpot } from './spots';
@@ -371,7 +372,14 @@ export class CornerRest {
       }
       // The animator's face (breathing, fatigue) stays.
       target.face.set(poses[i]!.face);
-      blendPose(poses[i]!, poses[i]!, target, st.weight);
+      // Over the planted feet (a plain pose blend dipped them 10 cm into the
+      // canvas and skated them at the bell); a foot planted elsewhere steps.
+      if (st.weight >= 1) copyPose(poses[i]!, target);
+      else {
+        forwardKinematics(this.worlds[i]!, target, rest);
+        fadeKeepFeet(target, this.worlds[i]!, poses[i]!, 1 - st.weight, rest);
+        copyPose(poses[i]!, target);
+      }
     }
     const spots = this.spots;
     if (this.crew) {

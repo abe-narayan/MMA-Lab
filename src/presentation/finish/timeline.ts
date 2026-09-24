@@ -263,14 +263,63 @@ export function displayedEnd(frames: readonly TickSnapshot[]): [P2, P2] | null {
   if (!last || last.fighters.length !== 2) return null;
   const a = last.fighters[0]!;
   const b = last.fighters[1]!;
-  const d = Math.hypot(b.x - a.x, b.z - a.z);
-  if (d < 1e-4) return [[a.x, a.z], [b.x, b.z]];
+  return displayedPair([a.x, a.z], [b.x, b.z]);
+}
+
+/** Where a 1v1 pair recorded at `a`, `b` is drawn (the animator's display compression). */
+export function displayedPair(a: P2, b: P2): [P2, P2] {
+  const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (d < 1e-4) return [[a[0], a[1]], [b[0], b[1]]];
   const dd = displaySeparation(d);
-  const mx = (a.x + b.x) / 2;
-  const mz = (a.z + b.z) / 2;
-  const ux = (b.x - a.x) / d;
-  const uz = (b.z - a.z) / d;
+  const mx = (a[0] + b[0]) / 2;
+  const mz = (a[1] + b[1]) / 2;
+  const ux = (b[0] - a[0]) / d;
+  const uz = (b[1] - a[1]) / d;
   return [[mx - (ux * dd) / 2, mz - (uz * dd) / 2], [mx + (ux * dd) / 2, mz + (uz * dd) / 2]];
+}
+
+/** Recorded centre distance the referee's break opens a clinch to (m). */
+export const CLINCH_BREAK_M = 1.35;
+/** When the break starts and how long it takes (post seconds). */
+export const CLINCH_BREAK_S: [number, number] = [0.1, 0.55];
+
+/**
+ * A bout that ends with the pair tied up standing (a TKO against the fence, the
+ * bell in a clinch): the recorded positions, the unit direction from the first
+ * fighter to the second and how far each steps back.
+ */
+export interface ClinchEnd {
+  a0: P2;
+  b0: P2;
+  dir: P2;
+  /** How far each fighter steps back (recorded metres). */
+  half: number;
+}
+
+export function clinchEnd(frames: readonly TickSnapshot[]): ClinchEnd | null {
+  const last = frames[frames.length - 1];
+  if (!last || last.fighters.length !== 2) return null;
+  const e = last.engagements.find((x) => x.kind !== 'knockdown' && x.b >= 0);
+  if (!e || e.kind === 'ground') return null;
+  const fa = last.fighters[0]!;
+  const fb = last.fighters[1]!;
+  const up = (p: string): boolean => p === 'clinch' || p === 'standing' || p === 'out';
+  if (!up(fa.posture) || !up(fb.posture)) return null;
+  let dx = fb.x - fa.x;
+  let dz = fb.z - fa.z;
+  let d = Math.hypot(dx, dz);
+  if (d < 1e-3) { dx = Math.sin(e.rootYaw); dz = Math.cos(e.rootYaw); d = 0; }
+  const n = Math.hypot(dx, dz) || 1;
+  return { a0: [fa.x, fa.z], b0: [fb.x, fb.z], dir: [dx / n, dz / n], half: Math.max(0, (CLINCH_BREAK_M - d) / 2) };
+}
+
+/** The pair's recorded positions `t` post seconds into a clinch break (pure). */
+export function clinchBreakAt(c: ClinchEnd, t: number): [P2, P2] {
+  const e = smooth((t - CLINCH_BREAK_S[0]) / CLINCH_BREAK_S[1]) * c.half;
+  return [
+    [c.a0[0] - c.dir[0] * e, c.a0[1] - c.dir[1] * e],
+    [c.b0[0] + c.dir[0] * e, c.b0[1] + c.dir[1] * e],
+  ];
 }
 
 /** The winner's celebration spot: away from the loser, toward open canvas, clear of the wall. */
