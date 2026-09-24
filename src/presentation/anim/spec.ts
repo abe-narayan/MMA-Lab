@@ -19,7 +19,7 @@ import {
   B, BONE_COUNT, boneIndex, forwardKinematics,
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
-import { KNEE_MAX_FLEX, LIMBS, solveTwoBone } from '../rig/ik';
+import { KNEE_MAX_FLEX, LIMBS, foldReach, solveTwoBone } from '../rig/ik';
 import {
   add, at, clamp, cross, dot, len, madd, norm, qconj, qmul, qrot, qslerp, qx, qy, qypr, qz,
   scale, sub, type Frame, type Q, type V3,
@@ -37,6 +37,15 @@ export interface HandSpec {
   fistTarget: boolean;
   /** 0 open hand .. 1 tight fist. */
   fist: number;
+  /** The wrist target is exact (an elbow strike's weapon): no guard room (`guardRoom`). */
+  exact?: boolean;
+  /**
+   * How much the forearm is rolled toward `palm` (default 1). A loose arm
+   * swinging past the hip (a kick's counter-swing) lets its palm follow the
+   * arm: rolling it to a fixed palm took the forearm through its 180° wrap
+   * mid-swing (a 50° one-frame roll).
+   */
+  twist?: number;
 }
 
 export interface FootSpec {
@@ -184,15 +193,26 @@ export const LEG_REACH = 0.985;
  * frame whenever a long step's target left the leg's reach. Kicks and knees
  * (explicit ankle targets) keep the hard limit: their snap is the technique.
  */
-function softReach(hip: V3, ankle: V3, legLen: number): V3 {
+function softReach(hip: V3, ankle: V3, rig: RigInfo): V3 {
   const d = sub(ankle, hip);
   const r = len(d);
-  const r0 = LEG_REACH * legLen;
+  // Pass 2: eased in KNEE-ANGLE space. Easing the reach itself (toward 99.8 %
+  // of the leg) still left the knee angle hypersensitive in the eased zone —
+  // 1 cm of target moved the knee 7 → 20° in a frame, the leg pops left while
+  // stepping. Past `LEG_REACH` (a ~20° knee) the knee now opens toward
+  // `MIN_KNEE` exponentially with the excess reach, at the slope it had
+  // there (~7° per cm, falling), so it never snaps and never locks straight.
+  const L1 = rig.thigh, L2 = rig.shin;
+  const r0 = LEG_REACH * rig.legLen; // where the footwork's pelvis clamp keeps planted legs
   if (r <= r0) return ankle;
-  const r1 = 0.998 * legLen;
-  const rr = r0 + (r1 - r0) * Math.tanh((r - r0) / (r1 - r0));
-  return madd(hip, d, rr / r);
+  const rAt = (flex: number): number => Math.sqrt(L1 * L1 + L2 * L2 + 2 * L1 * L2 * Math.cos(flex));
+  const soft = Math.acos(clamp((r0 * r0 - L1 * L1 - L2 * L2) / (2 * L1 * L2), -1, 1)); // ~20°
+  const slope = r0 / (L1 * L2 * Math.sin(soft)); // |dθ/dr| at r0
+  const flex = MIN_KNEE + (soft - MIN_KNEE) * Math.exp(-(r - r0) * slope / (soft - MIN_KNEE));
+  return madd(hip, d, rAt(flex) / r);
 }
+/** The least a standing leg's knee opens to under the soft reach limit (radians). */
+const MIN_KNEE = 5 * Math.PI / 180;
 
 /** World ankle position for a foot spec on this body. */
 export function ankleOf(rig: RigInfo, side: 0 | 1, f: FootSpec): V3 {
@@ -302,7 +322,7 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
       const f = spec.feet[side];
       const chain = side === 0 ? LIMBS.lLeg : LIMBS.rLeg;
       let ankle = ankleOf(rig, side, f);
-      if (!f.ankle) ankle = softReach(worldP(world, chain.upper), ankle, rig.legLen);
+      if (!f.ankle) ankle = softReach(worldP(world, chain.upper), ankle, rig);
       solveTwoBone(pose, world, rest, chain, ankle, f.pole, 1, KNEE_MAX_FLEX);
     }
     forwardKinematics(world, pose, rest);
@@ -318,19 +338,100 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
   }
 
   // Arms.
-  for (const side of [0, 1] as const) {
+  for (const side of [0, 1] as const) solveHand(spec, rig, pose, world, side);
+
+  // Fingers: fist curl.
+  for (const fb of FINGERS) {
+    const fist = spec.hands[fb.side].fist;
+    const a = fist * fb.k * (fb.side === 0 ? -1 : 1);
+    setLocal(pose, fb.bone, fb.thumb ? qy(a * (fb.side === 0 ? 1 : 1) * 0.6) : qz(a));
+  }
+  pose.face.set(spec.face);
+  forwardKinematics(world, pose, rest);
+}
+
+/**
+ * The elbow pole an arm is actually solved with. Two-bone IK bends the elbow
+ * in the plane of the reach line and the pole; when the pole lies on the
+ * reach line — typically a high guard with the glove straight above the
+ * shoulder and the "elbow down" pole straight below it, or a body shot aimed
+ * down toward the pole — that plane is undefined and the elbow flips to the
+ * other side of the arm in one frame (measured: the upper arm swinging 90-180°
+ * in a frame, the arm's pops left while standing). The pole is pushed out to
+ * the arm's own side of the chest as the reach line closes in on the pole line
+ * (either way, within ~30°), continuously, so the elbow plane never
+ * degenerates; elsewhere the layer's pole is used as given.
+ */
+function armPole(world: WorldPose, side: 0 | 1, sh: V3, target: V3, pole: V3): V3 {
+  const v = sub(target, sh);
+  const vl = len(v);
+  const p = sub(pole, sh);
+  const pl = len(p);
+  if (vl < 1e-4 || pl < 1e-4) return pole;
+  const c = Math.abs(dot(v, p) / (vl * pl));
+  const c0 = Math.cos(POLE_CONE);
+  const k = clamp((c - c0) / (1 - c0), 0, 1);
+  if (k <= 0) return pole;
+  const out = qrot(worldQ(world, B.spine2), [side === 0 ? 1 : -1, 0, 0]);
+  const w = k * k * (3 - 2 * k) * pl;
+  return [pole[0] + out[0] * w, pole[1] + out[1] * w, pole[2] + out[2] * w];
+}
+/**
+ * A guard / defence hand is kept in FRONT of its shoulder, at least the reach
+ * of a ~135° elbow away: with a bladed chest the lead shoulder comes forward
+ * under the head-anchored guard, and the glove ended up 8-15 cm from the
+ * shoulder joint, nearly straight above it. There the reach direction swings
+ * tens of degrees for a centimetre of hand motion and the elbow orbited the
+ * shoulder (measured: most of the remaining guard-arm pops, up to 180° a
+ * frame). The target is slid forward along the chest's facing onto that
+ * sphere — continuous, zero outside it.
+ */
+function guardRoom(world: WorldPose, rig: RigInfo, sh: V3, target: V3): V3 {
+  const L1 = rig.upperArm, L2 = rig.foreArm;
+  const r = Math.sqrt(L1 * L1 + L2 * L2 + 2 * L1 * L2 * Math.cos(GUARD_FOLD));
+  const d = sub(target, sh);
+  const dd = dot(d, d);
+  if (dd >= r * r) return target;
+  const f = qrot(worldQ(world, B.spine2), [0, 0, 1]);
+  const b = dot(d, f);
+  // Only for a hand in front of the shoulder (fading in over its first 5 cm):
+  // a hand behind it is not a guard, and sliding it forward through the sphere
+  // would jump.
+  const w = clamp(b / (0.05 * rig.scale), 0, 1);
+  if (w <= 0) return target;
+  const k = -b + Math.sqrt(Math.max(0, b * b - (dd - r * r)));
+  return madd(target, f, k * w * w * (3 - 2 * w));
+}
+/** Elbow flexion whose reach a guard hand is kept outside of (`guardRoom`). */
+const GUARD_FOLD = 135 * Math.PI / 180;
+
+/** Half-angle of the cone about the reach line inside which the elbow pole is pushed out (`armPole`). */
+const POLE_CONE = 30 * Math.PI / 180;
+
+/**
+ * Solve one arm of the spec onto its hand target (two-bone IK; with
+ * `fistTarget` the knuckles, not the wrist, land on it) and roll the forearm
+ * toward the wanted palm. `world` must be current for the chest; it is left
+ * current for this arm.
+ */
+export function solveHand(spec: BodySpec, rig: RigInfo, pose: Pose, world: WorldPose, side: 0 | 1): void {
+  const rest = rig.rest;
+  {
     const h = spec.hands[side];
-    if (h.w <= 0) continue;
+    if (h.w <= 0) return;
     const chain = side === 0 ? LIMBS.lArm : LIMBS.rArm;
-    let target: V3 = h.pos;
+    const sh = worldP(world, chain.upper);
+    // The elbow's fold limit, softly, in target space (see `foldReach`).
+    const fold = (t: V3): V3 => foldReach(sh, t, rig.upperArm, rig.foreArm);
+    const pole = armPole(world, side, sh, h.pos, h.pole);
+    let target: V3 = h.fistTarget || h.exact ? h.pos : guardRoom(world, rig, sh, h.pos);
     if (h.fistTarget) {
       // Aim the wrist so the knuckles, not the wrist, arrive on the target.
-      const sh = worldP(world, chain.upper);
       target = madd(h.pos, norm(sub(h.pos, sh)), -rig.fistLen);
       // Out of reach: keep the fist on the shoulder -> target line (the closest it can get).
       const reachable = len(sub(target, sh)) < rig.armLen * 0.995;
       for (let it = 0; it < (reachable ? 3 : 1); it++) {
-        solveTwoBone(pose, world, rest, chain, target, h.pole, h.w);
+        solveTwoBone(pose, world, rest, chain, fold(target), pole, h.w);
         forwardKinematics(world, pose, rest);
         const fp = fistPoint(world, rig, side);
         const err = sub(h.pos, fp);
@@ -338,7 +439,7 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
         target = add(target, scale(err, h.w));
       }
     } else {
-      solveTwoBone(pose, world, rest, chain, target, h.pole, h.w);
+      solveTwoBone(pose, world, rest, chain, fold(target), pole, h.w);
       forwardKinematics(world, pose, rest);
     }
     // Pronate / supinate the forearm so the palm faces `palm`.
@@ -357,18 +458,10 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
     // ±126° flipped the forearm 250° in one frame when it crossed ±180°. Past
     // 109° the twist eases back to 0 at 180°, the same from either side.
     const raw = Math.atan2(dot(axis, cross(cp, wp)), dot(cp, wp));
-    const ang = Math.abs(raw) <= TWIST_MAX ? raw : Math.sign(raw) * TWIST_MAX * (Math.PI - Math.abs(raw)) / (Math.PI - TWIST_MAX);
+    const ang = (Math.abs(raw) <= TWIST_MAX ? raw : Math.sign(raw) * TWIST_MAX * (Math.PI - Math.abs(raw)) / (Math.PI - TWIST_MAX)) * (h.twist ?? 1);
     const lq = getLocal(pose, fore);
     const sa = Math.sin(ang / 2);
     setLocal(pose, fore, qmul(lq, [restAxis[0] * sa, restAxis[1] * sa, restAxis[2] * sa, Math.cos(ang / 2)]));
   }
-
-  // Fingers: fist curl.
-  for (const fb of FINGERS) {
-    const fist = spec.hands[fb.side].fist;
-    const a = fist * fb.k * (fb.side === 0 ? -1 : 1);
-    setLocal(pose, fb.bone, fb.thumb ? qy(a * (fb.side === 0 ? 1 : 1) * 0.6) : qz(a));
-  }
-  pose.face.set(spec.face);
-  forwardKinematics(world, pose, rest);
 }
+

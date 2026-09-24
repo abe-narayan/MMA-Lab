@@ -9,7 +9,7 @@
  */
 import { B, forwardKinematics } from '../../rig/skeleton';
 import { LIMBS, solveTwoBone } from '../../rig/ik';
-import type { PairRequest } from './request';
+import type { PairRequest, StrikeRequest } from './request';
 import { sampleSocket, restScale } from './sockets';
 import type { SolveBuffers } from './solve';
 import {
@@ -17,64 +17,74 @@ import {
 } from './math';
 
 export function applyStrike(req: PairRequest, b: SolveBuffers): void {
-  const s = req.strike;
-  if (!s) return;
-  const who = s.who === 'a' ? 0 : 1;
-  const tgt = (1 - who) as 0 | 1;
-  const pose = b.poses[who];
-  const world = b.worlds[who];
-  const rest = b.rests[who];
-  const sc = restScale(rest);
-  const p = clamp(s.phase, 0, 1);
-  const c = clamp(s.contactAt, 0.2, 0.9);
-  const left = s.side === 'L';
-  const chain = left ? LIMBS.lArm : LIMBS.rArm;
-  const kind = s.technique.includes('hammer') ? 'hammer' : s.technique.includes('elbow') ? 'elbow' : 'punch';
+  const all = req.strikes ?? (req.strike ? [req.strike] : []);
+  if (all.length === 0) return;
+  // Per striker: the torso turns / postures for every strike in flight (their
+  // envelopes add, each continuous), then each hand runs its latest strike,
+  // starting from where the hand's previous strike has it (strikes overlap:
+  // the next starts before the last is back, and restarting from the base
+  // pose snapped the arm — one-frame pops in every ground-and-pound flurry).
+  let coverMax = 0;
+  let coverStrike: StrikeRequest | null = null;
+  let turnSum = 0;
+  for (const whoK of ['a', 'b'] as const) {
+    const list = all.filter((s) => s.who === whoK);
+    if (list.length === 0) continue;
+    const who = whoK === 'a' ? 0 : 1;
+    const tgt = (1 - who) as 0 | 1;
+    const pose = b.poses[who];
+    const world = b.worlds[who];
+    const rest = b.rests[who];
+    const sc = restScale(rest);
 
-  // Envelope: 0 at rest, 1 at contact.
-  const env = p < c ? smooth(p / c) : 1 - smooth((p - c) / (1 - c));
+    // ---- torso: posture up and turn into the strikes ---------------------------
+    let twist = 0;
+    let lift = 0;
+    for (const s of list) {
+      const p = clamp(s.phase, 0, 1);
+      const c = clamp(s.contactAt, 0.2, 0.9);
+      const env = p < c ? smooth(p / c) : 1 - smooth((p - c) / (1 - c));
+      twist += (s.side === 'L' ? -1 : 1) * 16 * env * (p < c ? smooth((p / c - 0.4) / 0.6) * 2 - 1 : 1);
+      lift += -10 * env;
+    }
+    twist = clamp(twist, -20, 20);
+    lift = Math.max(lift, -12);
+    const q = qMul(qAxis([0, 1, 0], (twist * Math.PI) / 180), qAxis([1, 0, 0], (lift * Math.PI) / 180));
+    setQ(pose.local, B.spine1, qMul(getQ(pose.local, B.spine1), q));
+    forwardKinematics(world, pose, rest);
 
-  // ---- torso: posture up and turn into the strike ------------------------------
-  const twist = (left ? -1 : 1) * 16 * env * (p < c ? smooth((p / c - 0.4) / 0.6) * 2 - 1 : 1);
-  const lift = -10 * env;
-  const q = qMul(qAxis([0, 1, 0], (twist * Math.PI) / 180), qAxis([1, 0, 0], (lift * Math.PI) / 180));
-  setQ(pose.local, B.spine1, qMul(getQ(pose.local, B.spine1), q));
-  forwardKinematics(world, pose, rest);
-
-  // ---- hand path --------------------------------------------------------------
-  const face = sampleSocket('face', b.worlds[tgt], b.rests[tgt]);
-  const sh = getV3(world.pos, chain.upper);
-  const w0 = getV3(world.pos, chain.end);
-  const chestQ = getQ(world.quat, B.spine2);
-  const upW: V3 = [0, 1, 0];
-  const toT = norm(sub(face.p, sh));
-  const outW = qRot(chestQ, [left ? 1 : -1, 0, 0]);
-  let cock: V3;
-  let hit: V3;
-  if (kind === 'hammer') {
-    cock = add(add(sh, scale(upW, 0.42 * sc)), scale(outW, 0.08 * sc));
-    hit = add(face.p, [0, 0.07 * sc, 0]);
-  } else if (kind === 'elbow') {
-    cock = add(add(sh, scale(upW, 0.3 * sc)), scale(outW, 0.22 * sc));
-    // Slice across the face: the hand finishes past it on the far side.
-    hit = add(add(face.p, scale(outW, -0.2 * sc)), [0, 0.1 * sc, 0]);
-  } else {
-    cock = add(add(sh, scale(upW, 0.24 * sc)), add(scale(toT, -0.12 * sc), scale(outW, 0.06 * sc)));
-    hit = madd(face.p, face.n, 0.06 * sc);
+    // ---- hand paths --------------------------------------------------------------
+    const face = sampleSocket('face', b.worlds[tgt], b.rests[tgt]);
+    for (const side of ['L', 'R'] as const) {
+      const mine = list.filter((s) => s.side === side);
+      if (mine.length === 0) continue;
+      const left = side === 'L';
+      const chain = left ? LIMBS.lArm : LIMBS.rArm;
+      const sh = getV3(world.pos, chain.upper);
+      const chestQ = getQ(world.quat, B.spine2);
+      let W = getV3(world.pos, chain.end);
+      for (const s of mine) W = handAt(s, W, sh, chestQ, face, sc, left);
+      const pole = add(add(sh, scale(sub(W, sh), 0.5)), qRot(chestQ, scale(norm([left ? 0.7 : -0.7, -0.5, -0.4]), 0.5)));
+      solveTwoBone(pose, world, rest, chain, W, pole);
+      forwardKinematics(world, pose, rest);
+    }
+    for (const s of list) {
+      const p = clamp(s.phase, 0, 1);
+      const c = clamp(s.contactAt, 0.2, 0.9);
+      const cv = smooth(clamp((p - (c - 0.35)) / 0.25, 0, 1)) * (1 - smooth(clamp((p - c - 0.15) / 0.3, 0, 1)));
+      turnSum += (s.side === 'L' ? -1 : 1) * cv;
+      if (cv > coverMax) { coverMax = cv; coverStrike = s; }
+    }
   }
-  let W: V3;
-  const k1 = 0.55 * c;
-  if (p < k1) W = lerp3(w0, cock, smooth(p / k1));
-  else if (p < c) {
-    const u = (p - k1) / (c - k1);
-    W = lerp3(cock, hit, u * u * (1.6 - 0.6 * u));
-  } else W = lerp3(hit, w0, smooth((p - c) / (1 - c)));
-  const pole = add(add(sh, scale(sub(W, sh), 0.5)), qRot(chestQ, scale(norm([left ? 0.7 : -0.7, -0.5, -0.4]), 0.5)));
-  solveTwoBone(pose, world, rest, chain, W, pole);
-  forwardKinematics(world, pose, rest);
+  if (!coverStrike) return;
+  const s = coverStrike;
+  const tgt = (s.who === 'a' ? 1 : 0) as 0 | 1;
+  const cover = coverMax;
+  // The receiver rolls away from the hand(s) in flight: a signed sum, so a
+  // flurry alternating hands does not flip him from one side to the other.
+  const roll = clamp(turnSum, -1, 1);
 
   // ---- the receiver covers ------------------------------------------------------
-  const cover = smooth(clamp((p - (c - 0.35)) / 0.25, 0, 1)) * (1 - smooth(clamp((p - c - 0.15) / 0.3, 0, 1)));
   if (cover > 0.01) {
     const rp = b.poses[tgt];
     const rw = b.worlds[tgt];
@@ -87,7 +97,7 @@ export function applyStrike(req: PairRequest, b: SolveBuffers): void {
     if (turn > 0) {
       const rq = [rp.rootQuat[0], rp.rootQuat[1], rp.rootQuat[2], rp.rootQuat[3]];
       const spine = qRot(rq, [0, 1, 0]);
-      const nq = qMul(qAxis(spine, (left ? -1 : 1) * 0.75 * turn * cover), rq);
+      const nq = qMul(qAxis(spine, 0.75 * turn * roll), rq);
       rp.rootQuat[0] = nq[0]; rp.rootQuat[1] = nq[1]; rp.rootQuat[2] = nq[2]; rp.rootQuat[3] = nq[3];
       forwardKinematics(rw, rp, rr);
     }
@@ -105,4 +115,39 @@ export function applyStrike(req: PairRequest, b: SolveBuffers): void {
     rp.face[4] = Math.max(rp.face[4], 0.6 * cover); // grimace
   }
   void qConj;
+}
+
+/**
+ * The striking hand of one ground strike at its phase, starting from `w0`
+ * (the rest pose's hand, or where an earlier strike of this hand has it):
+ * base → cocked (above and behind the own shoulder) → the partner's face at
+ * the contact → back to `w0`.
+ */
+function handAt(s: StrikeRequest, w0: V3, sh: V3, chestQ: number[], face: { p: V3; n: V3 }, sc: number, left: boolean): V3 {
+  const p = clamp(s.phase, 0, 1);
+  const c = clamp(s.contactAt, 0.2, 0.9);
+  const kind = s.technique.includes('hammer') ? 'hammer' : s.technique.includes('elbow') ? 'elbow' : 'punch';
+  const upW: V3 = [0, 1, 0];
+  const toT = norm(sub(face.p, sh));
+  const outW = qRot(chestQ, [left ? 1 : -1, 0, 0]);
+  let cock: V3;
+  let hit: V3;
+  if (kind === 'hammer') {
+    cock = add(add(sh, scale(upW, 0.42 * sc)), scale(outW, 0.08 * sc));
+    hit = add(face.p, [0, 0.07 * sc, 0]);
+  } else if (kind === 'elbow') {
+    cock = add(add(sh, scale(upW, 0.3 * sc)), scale(outW, 0.22 * sc));
+    // Slice across the face: the hand finishes past it on the far side.
+    hit = add(add(face.p, scale(outW, -0.2 * sc)), [0, 0.1 * sc, 0]);
+  } else {
+    cock = add(add(sh, scale(upW, 0.24 * sc)), add(scale(toT, -0.12 * sc), scale(outW, 0.06 * sc)));
+    hit = madd(face.p, face.n, 0.06 * sc);
+  }
+  const k1 = 0.55 * c;
+  if (p < k1) return lerp3(w0, cock, smooth(p / k1));
+  if (p < c) {
+    const u = (p - k1) / (c - k1);
+    return lerp3(cock, hit, u * u * (1.6 - 0.6 * u));
+  }
+  return lerp3(hit, w0, smooth((p - c) / (1 - c)));
 }

@@ -319,6 +319,9 @@ export function capStrikeHands(
       const dv: V3 = [c[0] - c0[0] - r * (cE[0] - c0[0]), c[1] - c0[1] - r * (cE[1] - c0[1]), c[2] - c0[2] - r * (cE[2] - c0[2])];
       const h = spec.hands[side];
       h.pos = add(guard.pos[side], scaleV(rot(dv), k));
+      // The kicking side's arm swings down and back past the hip: not a guard,
+      // and its palm follows the arm (no roll toward the guard's palm).
+      if (side === p.side) { h.exact = true; h.twist = 1 - smooth(Math.min(1, envelope(tm, now).body * 1.5)); }
     }
     return aim;
   }
@@ -498,6 +501,7 @@ export function capLegPass(
     const chain = kf === 0 ? LIMBS.lLeg : LIMBS.rLeg;
     const base = ankleOf(rig, kf, spec.feet[kf]);
     const target = vlerp(base, A, clamp01(wgt));
+    st.weapon = { hand: -1, leg: kf, aim: T, ankle: target, pole };
     solveTwoBone(st.pose, w, rig.rest, chain, target, pole, 1, KNEE_MAX_FLEX);
     forwardKinematics(w, st.pose, rig.rest);
   }

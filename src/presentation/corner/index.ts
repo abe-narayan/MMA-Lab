@@ -36,6 +36,7 @@ import {
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
 import { fadeKeepFeet } from '../anim/blend';
+import { displaySeparation } from '../anim/animator';
 import { LIMBS, axisAngle, conjugateInto, solveTwoBone } from '../rig/ik';
 import { FigurePoser } from '../people/figure';
 import { cornerSpots, type CornerSpot } from './spots';
@@ -80,6 +81,24 @@ function frameAt(frames: readonly TickSnapshot[], tick: number): TickSnapshot | 
   return frames[lo] ?? null;
 }
 
+/**
+ * Recorded floor positions as the animator displays them: a 1v1 pair's
+ * separation is compressed (`displaySeparation`). The walk to the corner
+ * starts, and the walk back ends, where the fighter is DRAWN — starting from
+ * the recorded spot made the fade in and out of the break drag the body (and
+ * its feet) across the difference, up to half a metre.
+ */
+function displayed(p: [number, number][]): [number, number][] {
+  if (p.length !== 2) return p;
+  const [a, b] = p as [[number, number], [number, number]];
+  const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  if (d < 1e-4) return p;
+  const dd = displaySeparation(d);
+  const mx = (a[0] + b[0]) / 2, mz = (a[1] + b[1]) / 2;
+  const ux = (b[0] - a[0]) / d, uz = (b[1] - a[1]) / d;
+  return [[mx - ux * dd / 2, mz - uz * dd / 2], [mx + ux * dd / 2, mz + uz * dd / 2]];
+}
+
 /** Every rest period of a recorded bout. Pure. */
 export function breakWindows(frames: readonly TickSnapshot[], events: readonly SimEvent[]): BreakWindow[] {
   const out: BreakWindow[] = [];
@@ -94,8 +113,8 @@ export function breakWindows(frames: readonly TickSnapshot[], events: readonly S
     out.push({
       fromTick: end,
       toTick: start,
-      endPos: a.fighters.map((f) => [f.x, f.z] as [number, number]),
-      startPos: b.fighters.map((f) => [f.x, f.z] as [number, number]),
+      endPos: displayed(a.fighters.map((f) => [f.x, f.z] as [number, number])),
+      startPos: displayed(b.fighters.map((f) => [f.x, f.z] as [number, number])),
       startFacing: b.fighters.map((f, i) => {
         const o = b.fighters[1 - i];
         return o ? Math.atan2(o.x - f.x, o.z - f.z) : f.facing;
@@ -175,9 +194,14 @@ export function restState(w: BreakWindow, i: number, spot: CornerSpot, t: number
   if (tb < walkBack) {
     const r = tb / walkBack;
     const u = ease(r);
+    // He turns to face his opponent over the last steps, while the gait is
+    // still stepping: turning at the mark (the old snap to the start facing
+    // when the walk ended) pivoted planted feet up to 38 cm in a frame.
+    const head = angleLerp(spot.facing, toward(front, s), ease(tb / 0.5));
+    const endTurn = Math.min(0.6, walkBack * 0.45);
     return {
       phase: 'toCentre', x: lerp(front[0], s[0], u), z: lerp(front[1], s[1], u),
-      facing: angleLerp(spot.facing, toward(front, s), ease(tb / 0.5)), seat: 0, weight,
+      facing: angleLerp(head, w.startFacing[i] ?? head, ease((tb - (walkBack - endTurn)) / endTurn)), seat: 0, weight,
       walked: outD + backD * u, speed: speedOf(backD, walkBack, r),
     };
   }

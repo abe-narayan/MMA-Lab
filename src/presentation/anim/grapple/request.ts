@@ -48,5 +48,11 @@ export interface PairRequest {
   mirror: boolean;
   flight: FlightRequest | null;
   sub: SubRequest | null;
+  /** The latest ground strike in flight (null: none). */
   strike: StrikeRequest | null;
+  /**
+   * Every ground strike in flight, oldest first (strikes overlap: the next one
+   * starts before the last is back). Omitted: just `strike`.
+   */
+  strikes?: StrikeRequest[];
 }

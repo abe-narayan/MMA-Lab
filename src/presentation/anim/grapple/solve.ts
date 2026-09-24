@@ -10,7 +10,10 @@
  *   2. heads: gaze at a direction or at a partner socket;
  *   3. limbs whose targets are the mat, the own body or the partner's TORSO;
  *   4. limbs whose targets are on the partner's LIMBS (a hand on a wrist, a
- *      hook on a thigh), twice, so mutual grips settle;
+ *      hook on a thigh), twice, so mutual grips settle; an arm whose grip is
+ *      right beside its own shoulder turns the clavicle away to keep the elbow
+ *      in its range; then grips on the partner's shoulders and limbs once more
+ *      with the clavicles held;
  *   5. hands (palm onto the socket surface, fingers) and feet.
  *
  * Scaling. `s` is a fighter's stature / the reference body's, `sP` the pair's
@@ -192,6 +195,29 @@ export function solvePair(spec: PairSpec, buf: SolveBuffers, contacts?: ContactR
       } else solveLeg(body[k], k, i, st[i], sP, buf, legCache[i][k]?.alt ?? false);
     }
     forwardKinematics(worlds[i], poses[i], rests[i]);
+  }
+  // 4d. grips on the partner's shoulder, then on his limbs, once more, with
+  // every clavicle left where it is: the "shoulder" socket rides on the
+  // clavicle, which the partner's own arm may have turned (to make room for a
+  // grip beside his shoulder) after this grip was solved.
+  // Two rounds (a grip on a shoulder and a hand fighting the gripping wrist
+  // depend on each other): the first may still turn a clavicle for a fold,
+  // the second keeps every clavicle as it is.
+  for (const [onShoulder, keep] of [[true, false], [false, false], [true, true], [false, true]] as const) {
+    for (const i of [0, 1] as const) {
+      const body = bodies[i];
+      let changed = false;
+      for (const k of ['lArm', 'rArm'] as const) {
+        const c = armCache[i][k];
+        if (!c || c.dropped) continue;
+        const used = c.alt && body[k].alt ? body[k].alt! : body[k].to;
+        if (!('on' in used)) continue;
+        if (onShoulder ? !used.on.startsWith('shoulder_') : !isLimbSocket(used.on)) continue;
+        solveArm(body[k], k, i, st[i], sP, buf, c.alt, keep);
+        changed = true;
+      }
+      if (changed) forwardKinematics(worlds[i], poses[i], rests[i]);
+    }
   }
   // 5. hands and feet
   for (const i of [0, 1] as const) {
@@ -419,6 +445,11 @@ function resolveTarget(t: Target, i: 0 | 1, bs: BodyState, sP: number, buf: Solv
 // Arms
 // ---------------------------------------------------------------------------
 
+/** Elbow flexion a grip's reach is kept at or under by moving the shoulder (radians). */
+const GRIP_FOLD = 142 * DEG;
+/** Most the clavicle turns the shoulder away from a too-close grip (radians). */
+const CLAV_ESCAPE = 50 * DEG;
+
 const DEFAULT_ARM_POLE_L: V3 = [0.5, -1, -0.35];
 const DEFAULT_ARM_POLE_R: V3 = [-0.5, -1, -0.35];
 
@@ -427,8 +458,10 @@ interface LegSolve { short: number; alt: boolean }
 const legCache: [Record<string, LegSolve>, Record<string, LegSolve>] = [{}, {}];
 const armCache: [Record<string, ArmSolve>, Record<string, ArmSolve>] = [{}, {}];
 
+
 function solveArm(
   spec: ArmSpec, k: 'lArm' | 'rArm', i: 0 | 1, bs: BodyState, sP: number, buf: SolveBuffers, useAlt = false,
+  keepClavicle = false,
 ): void {
   const pose = buf.poses[i];
   const world = buf.worlds[i];
@@ -471,8 +504,36 @@ function solveArm(
   let rot = qFromTo(d0, d1);
   rot = qPow(rot, 0.18);
   const localClav = qMul(qConj(parentQ), qMul(rot, qMul(parentQ, [0, 0, 0, 1])));
-  setQ(pose.local, clav, localClav);
+  // `keepClavicle` (the last passes): the shoulder stays where the earlier
+  // passes put it — the partner may be holding it.
+  if (!keepClavicle) setQ(pose.local, clav, localClav);
   forwardKinematics(world, pose, rest);
+  // A grip right beside the own shoulder (the hand cupping the partner's elbow
+  // in a collar tie, a cage pin, the locked hands of a rear body lock) would
+  // fold the elbow past its range (measured: 160-170°, 4 % of all frames). The
+  // shoulder girdle makes room instead — the clavicle retracts / elevates the
+  // shoulder away from the hand (up to 50°), so the grip stays exact and the
+  // elbow bends no further than a real one.
+  {
+    const L1 = rest.length[chain.upper]!, L2 = rest.length[chain.lower]!;
+    const rSoft = Math.sqrt(L1 * L1 + L2 * L2 + 2 * L1 * L2 * Math.cos(GRIP_FOLD));
+    const clavLen = Math.max(0.05, dist(getV3(world.pos, chain.upper), cHead));
+    let used = 0;
+    for (let it = 0; it < 3; it++) {
+      const shp = getV3(world.pos, chain.upper);
+      const r = dist(shp, wrist);
+      if (r >= rSoft - 1e-3 || used >= CLAV_ESCAPE || keepClavicle) break;
+      const u = sub(shp, cHead);
+      const axis = cross(sub(wrist, cHead), u);
+      if (len(axis) < 1e-6) break;
+      const a = Math.min(CLAV_ESCAPE - used, (rSoft - r) / clavLen);
+      used += a;
+      const R = qAxis(norm(axis), a); // turns the shoulder away from the hand
+      const wq = getQ(world.quat, clav);
+      setQ(pose.local, clav, qMul(qConj(parentQ), qMul(R, wq)));
+      forwardKinematics(world, pose, rest);
+    }
+  }
 
   const pole = spec.pole ?? (k === 'lArm' ? DEFAULT_ARM_POLE_L : DEFAULT_ARM_POLE_R);
   const sh = getV3(world.pos, chain.upper);

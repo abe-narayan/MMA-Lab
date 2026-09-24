@@ -401,37 +401,82 @@ const toward = (a: P2, b: P2): number => Math.atan2(b[0] - a[0], b[1] - a[1]);
 export { toward };
 
 /**
- * Keep walkers apart: a pure projection over floor points (moving ones yield
- * to fixed ones, equal ones split the difference). `r` is the minimum
- * centre distance per pair. Returns adjusted copies.
+ * Keep walkers apart: a projection over floor points (moving ones yield to
+ * fixed ones, equal ones split the difference). `r` is the minimum centre
+ * distance per pair. Returns adjusted copies.
+ *
+ * `memo` (optional, kept by the caller from frame to frame) makes it
+ * continuous in time: each pair / obstacle that comes within reach keeps the
+ * direction it first met along, and is pushed apart ALONG that direction.
+ * A plain radial projection flips to the other side the instant a walker's
+ * path crosses the other's centre (the referee walking in past the winner
+ * threw him 30-40 cm sideways in one frame, back and forth).
  */
-export function separatePoints(pts: readonly P2[], fixed: readonly boolean[], r: number, obstacles: readonly { p: P2; r: number }[] = []): P2[] {
+export function separatePoints(
+  pts: readonly P2[], fixed: readonly boolean[], r: number, obstacles: readonly { p: P2; r: number }[] = [],
+  memo?: Map<string, P2>,
+): P2[] {
   const out = pts.map((p) => [p[0], p[1]] as P2);
+  /**
+   * Where the relative vector (dx, dz) must be moved to so it is `reach` long:
+   * plainly radially, or, under `memo`, round the side it first came in on —
+   * the approach direction u0 and a lateral side are kept while the pair is
+   * close, the along-u0 part is kept and the lateral part grown to make the
+   * distance, so a walker passes round the other one continuously.
+   */
+  const resolve = (key: string, dx: number, dz: number, reach: number): P2 | null => {
+    const d = Math.hypot(dx, dz);
+    if (!memo) {
+      if (d >= reach) return null;
+      const u: P2 = d > 1e-6 ? [dx / d, dz / d] : [1, 0];
+      return [u[0] * reach, u[1] * reach];
+    }
+    // The path round: straight lines from `R2` out, tangent to the circle of
+    // radius `reach`, then the arc (C¹; lateral speed ≤ 1.5× the walker's).
+    const R2 = reach * 1.2;
+    if (d >= R2 + 0.15) { memo.delete(key); memo.delete(key + ':l'); return null; }
+    let u0 = memo.get(key);
+    let l0 = memo.get(key + ':l');
+    if (!u0 || !l0) {
+      if (d >= R2) return null;
+      u0 = d > 1e-6 ? [dx / d, dz / d] : [1, 0];
+      // The side to pass on (a fixed choice: the left of the approach line).
+      l0 = [-u0[1], u0[0]];
+      memo.set(key, u0);
+      memo.set(key + ':l', l0);
+    }
+    const along = dx * u0[0] + dz * u0[1];
+    const lat = dx * l0[0] + dz * l0[1];
+    const aa = Math.abs(along);
+    if (aa >= R2) return null;
+    const at = reach * reach / R2;
+    const need = aa <= at
+      ? Math.sqrt(reach * reach - aa * aa)
+      : reach * Math.sqrt(1 - (reach / R2) ** 2) * (R2 - aa) / (R2 - at);
+    if (lat >= need) return null;
+    // Keep the along part; the lateral part on the kept side, just long enough.
+    return [u0[0] * along + l0[0] * need, u0[1] * along + l0[1] * need];
+  };
   for (let it = 0; it < 4; it++) {
     for (let i = 0; i < out.length; i++) {
       for (let j = i + 1; j < out.length; j++) {
         const a = out[i]!;
         const b = out[j]!;
-        let dx = b[0] - a[0];
-        let dz = b[1] - a[1];
-        let d = Math.hypot(dx, dz);
-        if (d >= r) continue;
-        if (d < 1e-6) { dx = 1; dz = 0; d = 1e-6; }
-        const need = r - d;
+        const want = resolve(`${i}-${j}`, b[0] - a[0], b[1] - a[1], r);
+        if (!want) continue;
+        const ex = want[0] - (b[0] - a[0]), ez = want[1] - (b[1] - a[1]);
         const fa = fixed[i] ? 0 : fixed[j] ? 1 : 0.5;
         const fb = fixed[j] ? 0 : fixed[i] ? 1 : 0.5;
-        a[0] -= (dx / d) * need * fa; a[1] -= (dz / d) * need * fa;
-        b[0] += (dx / d) * need * fb; b[1] += (dz / d) * need * fb;
+        a[0] -= ex * fa; a[1] -= ez * fa;
+        b[0] += ex * fb; b[1] += ez * fb;
       }
       if (fixed[i]) continue;
-      for (const o of obstacles) {
+      obstacles.forEach((o, k) => {
         const a = out[i]!;
-        const dx = a[0] - o.p[0];
-        const dz = a[1] - o.p[1];
-        const d = Math.hypot(dx, dz);
-        if (d >= o.r || d < 1e-6) continue;
-        a[0] += (dx / d) * (o.r - d); a[1] += (dz / d) * (o.r - d);
-      }
+        const want = resolve(`o${k}-${i}`, a[0] - o.p[0], a[1] - o.p[1], o.r);
+        if (!want) return;
+        a[0] = o.p[0] + want[0]; a[1] = o.p[1] + want[1];
+      });
     }
   }
   return out;

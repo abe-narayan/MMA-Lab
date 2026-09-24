@@ -16,8 +16,8 @@
  *   - chests: the Spine2 joints are kept `CHEST_CLEAR_M` apart by sliding the
  *     pelvises apart (planted feet stay; the pelvis clamp keeps them in reach).
  *
- * Guard hands move with the head that moves; a weapon hand on its target stays
- * there. A pure function of the solved poses and the strike timing (no state),
+ * Guard hands move rigidly with the chest that moves; a weapon hand on its
+ * target stays there. A pure function of the solved poses and the strike timing (no state),
  * so it is continuous in time and identical under play, scrub and seek.
  */
 import { B, type WorldPose } from '../rig/skeleton';
@@ -25,6 +25,7 @@ import { solveSpec } from './spec';
 import { clampPelvis } from './stance';
 import type { Ctx, FighterState } from './state';
 import type { V3 } from './math';
+import { coreCapsules, segSegClosest } from './grapple/capsules';
 
 /** Radius of the sphere standing in for a head (m, at scale 1). */
 export const HEAD_RADIUS_M = 0.1;
@@ -64,7 +65,7 @@ export function clearanceShare(c: Ctx, other: Ctx): number {
 
 /**
  * Lean `st`'s trunk so its head moves about `amount` metres along world
- * direction `u` (horizontal), and carry its guard hands along.
+ * direction `u` (horizontal); `resolveCarryingHands` then brings the guard along.
  */
 function leanAway(st: FighterState, u: V3, amount: number): void {
   const spec = st.spec;
@@ -78,10 +79,89 @@ function leanAway(st: FighterState, u: V3, amount: number): void {
   // +pitch leans forward; -roll tilts toward the body's left (+X).
   spec.spinePitch += f * ang;
   spec.spineRoll -= l * ang;
-  const moved = ang * lever;
-  for (const h of spec.hands) {
-    if (h.w <= 0 || h.fistTarget) continue;
-    h.pos = [h.pos[0] + u[0] * moved, h.pos[1], h.pos[2] + u[2] * moved];
+}
+
+/**
+ * Re-solve a body whose trunk the clearance moved, carrying its guard hands
+ * (and elbow poles) rigidly with the chest: a guard is held relative to the
+ * chest, and moving the hand targets by the head's displacement instead (the
+ * first version) shifted them relative to the chest every frame the
+ * clearance changed — measured, most of the remaining guard-arm pops of
+ * close-range boxers. A weapon on its target stays on its target.
+ */
+function resolveCarryingHands(st: FighterState): void {
+  const before = chestFrame(st);
+  solveSpec(st.spec, st.rig, st.pose, st.world, false);
+  carryHands(st, before);
+}
+
+/** Where the chest (Spine2) is in `st.world` now: position and rotation. */
+export function chestFrame(st: FighterState): { c: V3; q: [number, number, number, number] } {
+  const w = st.world;
+  return { c: chest(w), q: [w.quat[B.spine2 * 4], w.quat[B.spine2 * 4 + 1], w.quat[B.spine2 * 4 + 2], w.quat[B.spine2 * 4 + 3]] };
+}
+
+/**
+ * The trunk was moved and re-solved since `before` (the chest then): carry the
+ * guard / defence hand targets and elbow poles (not a weapon on its target)
+ * rigidly with the chest, and re-solve the arms. Every trunk correction that
+ * runs after the guard is placed (the pair clearance, the strike's reach
+ * assist, the head's slip off the line) goes through here, so the guard never
+ * jumps relative to the body that holds it.
+ */
+export function carryHands(st: FighterState, before: { c: V3; q: [number, number, number, number] }): void {
+  const { c: c0, q: q0 } = before;
+  const now = chestFrame(st);
+  const moved = Math.hypot(now.c[0] - c0[0], now.c[1] - c0[1], now.c[2] - c0[2])
+    + Math.abs(now.q[0] - q0[0]) + Math.abs(now.q[1] - q0[1]) + Math.abs(now.q[2] - q0[2]) + Math.abs(now.q[3] - q0[3]);
+  if (moved < 1e-6) return;
+  const inv: [number, number, number, number] = [-q0[0], -q0[1], -q0[2], q0[3]];
+  let any = false;
+  for (const h of st.spec.hands) {
+    if (h.w <= 0 || h.fistTarget || h.exact) continue;
+    const lp = qrot3(inv, [h.pos[0] - c0[0], h.pos[1] - c0[1], h.pos[2] - c0[2]]);
+    const lo = qrot3(inv, [h.pole[0] - c0[0], h.pole[1] - c0[1], h.pole[2] - c0[2]]);
+    const p = qrot3(now.q, lp), o = qrot3(now.q, lo);
+    h.pos = [now.c[0] + p[0], now.c[1] + p[1], now.c[2] + p[2]];
+    h.pole = [now.c[0] + o[0], now.c[1] + o[1], now.c[2] + o[2]];
+    any = true;
+  }
+  if (any) solveSpec(st.spec, st.rig, st.pose, st.world, true);
+}
+
+function qrot3(q: readonly number[], v: V3): V3 {
+  const x = q[0], y = q[1], z = q[2], s = q[3];
+  const tx = 2 * (y * v[2] - z * v[1]), ty = 2 * (z * v[0] - x * v[2]), tz = 2 * (x * v[1] - y * v[0]);
+  return [v[0] + s * tx + (y * tz - z * ty), v[1] + s * ty + (z * tx - x * tz), v[2] + s * tz + (x * ty - y * tx)];
+}
+
+/**
+ * A free standing fighter (a team bout's third man) never walks into a body
+ * that is tied up or on the ground: his trunk slides off it horizontally
+ * (the engaged bodies are the pair solver's and stay put). Firm-body capsules,
+ * a little inside the skin. Continuous in the poses.
+ */
+export function clearOfBody(free: FighterState, other: FighterState): void {
+  for (let it = 0; it < 2; it++) {
+    let depth = 0;
+    let dx = 0, dz = 0;
+    for (const x of coreCapsules(free.world, free.rig.rest)) {
+      for (const y of coreCapsules(other.world, other.rig.rest)) {
+        const r = segSegClosest(x.a, x.b, y.a, y.b);
+        const d = x.r + y.r - r.d;
+        if (d > depth) { depth = d; dx = r.c1[0] - r.c2[0]; dz = r.c1[2] - r.c2[2]; }
+      }
+    }
+    if (depth <= 0.01) return;
+    let h = Math.hypot(dx, dz);
+    if (h < 1e-4) {
+      dx = free.spec.pelvis[0] - other.world.pos[B.hips * 3]; dz = free.spec.pelvis[2] - other.world.pos[B.hips * 3 + 2];
+      h = Math.hypot(dx, dz) || 1;
+    }
+    const m = depth - 0.005;
+    free.spec.pelvis = [free.spec.pelvis[0] + dx / h * m, free.spec.pelvis[1], free.spec.pelvis[2] + dz / h * m];
+    clampPelvis(free.spec, free);
+    resolveCarryingHands(free);
   }
 }
 
@@ -112,12 +192,8 @@ export function separatePair(a: Ctx, b: Ctx): number {
       for (const [st, s, sign] of [[sa, share, 1], [sb, 1 - share, -1]] as const) {
         const m = need * s * sign;
         st.spec.pelvis = [st.spec.pelvis[0] + ux * m, st.spec.pelvis[1], st.spec.pelvis[2] + uz * m];
-        for (const h of st.spec.hands) {
-          if (h.w <= 0 || h.fistTarget) continue;
-          h.pos = [h.pos[0] + ux * m, h.pos[1], h.pos[2] + uz * m];
-        }
         clampPelvis(st.spec, st);
-        solveSpec(st.spec, st.rig, st.pose, st.world, false);
+        resolveCarryingHands(st);
       }
     }
   }
@@ -147,8 +223,8 @@ export function separatePair(a: Ctx, b: Ctx): number {
     const need = Math.max(0.004, wantH - Math.hypot(dx, dz));
     leanAway(sa, u, need * share);
     leanAway(sb, [-u[0], 0, -u[2]], need * (1 - share));
-    solveSpec(sa.spec, sa.rig, sa.pose, sa.world, false);
-    solveSpec(sb.spec, sb.rig, sb.pose, sb.world, false);
+    resolveCarryingHands(sa);
+    resolveCarryingHands(sb);
   }
   const ha = headCentre(sa.world);
   const hb = headCentre(sb.world);

@@ -35,13 +35,37 @@ export interface LimbChain {
 }
 
 /**
- * Anatomical flexion limits of the middle joints (radians). The elbow limit is
- * not applied by the standing animator: measured, it made the arm's pole
- * unstable for fists pulled in near the shoulder (hook windups) and doubled the
- * one-frame arm pops; it is here for callers that want it.
+ * Anatomical flexion limits of the middle joints (radians). The elbow's is
+ * applied in TARGET space (`foldReach`: a hand target pulled in closer to the
+ * shoulder than ~140° of flexion allows is eased out to at most this fold),
+ * not as a joint clamp in `solveTwoBone`: clamping the joint left the upper
+ * arm solved for the unreachable target, and near full fold the shoulder angle
+ * is hypersensitive to reach (dA/dr → ∞), so the elbow orbited — measured, a
+ * joint clamp raised the arm pops by a third.
  */
 export const ELBOW_MAX_FLEX = 150 * Math.PI / 180;
+/** Where the elbow's soft fold limit starts (radians of flexion). */
+export const ELBOW_SOFT_FLEX = 132 * Math.PI / 180;
 export const KNEE_MAX_FLEX = 160 * Math.PI / 180;
+
+/**
+ * Soft lower reach limit of a two-bone limb (the fold limit in target space):
+ * a target nearer the root than the reach at `softFlex` of flexion is eased
+ * out toward (never inside) the reach at `maxFlex`, along the root→target
+ * line, C¹-continuously (tanh), so the limb never folds past `maxFlex` and a
+ * target sweeping past the shoulder no longer spins the upper arm about it.
+ * `L1`, `L2` are the bone lengths; returns the target unchanged when outside.
+ */
+export function foldReach(root: V3, target: V3, L1: number, L2: number, softFlex = ELBOW_SOFT_FLEX, maxFlex = ELBOW_MAX_FLEX): V3 {
+  const r0 = Math.sqrt(L1 * L1 + L2 * L2 + 2 * L1 * L2 * Math.cos(softFlex));
+  const r1 = Math.sqrt(L1 * L1 + L2 * L2 + 2 * L1 * L2 * Math.cos(maxFlex));
+  const dx = target[0] - root[0], dy = target[1] - root[1], dz = target[2] - root[2];
+  const r = Math.hypot(dx, dy, dz);
+  if (r >= r0 || r < 1e-6) return target;
+  const rr = r0 - (r0 - r1) * Math.tanh((r0 - r) / (r0 - r1));
+  const k = rr / r;
+  return [root[0] + dx * k, root[1] + dy * k, root[2] + dz * k];
+}
 
 export const LIMBS = Object.freeze({
   lArm: { upper: B.lArm, lower: B.lForeArm, end: B.lHand, hinge: [0, -1, 0] } as LimbChain,

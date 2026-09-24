@@ -37,6 +37,7 @@ import { FigurePoser, floorSitPose, type FigureCue, type HandGoal, type V3 } fro
 import { makeCameraArena } from '../camera/geometry';
 import { palmTargetFor } from './grip';
 import { fadeKeepFeet } from '../anim/blend';
+import { LYING_CLEAR_M } from '../anim/animator';
 import { FinishCapture, celebrationStart, type PlacedClip, type RiseWindow } from './capture';
 import { registeredMotionLibrary } from '../anim/capture';
 import type { MotionLibrary } from '../assets/motionLibrary';
@@ -95,6 +96,23 @@ export interface FinishRefereeScript {
 
 const outward = (p: P2): number => (Math.hypot(p[0], p[1]) > 0.05 ? Math.atan2(p[0], p[1]) : 0);
 
+/** `p` moved (if needed) to at least `r` from the segment h→e, on its own side. */
+function offBodyLine(p: P2, h: P2, e: P2, r: number): P2 {
+  const ex = e[0] - h[0], ez = e[1] - h[1];
+  const L2 = ex * ex + ez * ez;
+  const k = L2 > 1e-6 ? Math.max(0, Math.min(1, ((p[0] - h[0]) * ex + (p[1] - h[1]) * ez) / L2)) : 0;
+  const cx = h[0] + ex * k, cz = h[1] + ez * k;
+  let dx = p[0] - cx, dz = p[1] - cz;
+  let d = Math.hypot(dx, dz);
+  if (d >= r) return p;
+  if (d < 1e-4) {
+    // On the line: out to the side (perpendicular), or away from the hips.
+    if (L2 > 1e-6) { const l = Math.sqrt(L2); dx = -ez / l; dz = ex / l; } else { dx = 1; dz = 0; }
+    d = 1;
+  }
+  return [cx + dx / d * r, cz + dz / d * r];
+}
+
 export class FinishStage {
   result: FinishResult | null = null;
   timeline: FinishTimeline | null = null;
@@ -116,6 +134,8 @@ export class FinishStage {
   private atEndBefore = false;
   private script: Script | null = null;
   private refStart: RefereePlacement | null = null;
+  /** Sticky separation directions of the walkers (see `separatePoints`), per script. */
+  private sepMemo = new Map<string, P2>();
   private readonly posers: FigurePoser[];
   private readonly scratch: Pose[];
   private readonly worlds: WorldPose[];
@@ -227,7 +247,7 @@ export class FinishStage {
     this.refPlacement = null;
     this.gripW = 0;
     if (t === null || !tl || !r || poses.length < 2) return false;
-    if (!this.script) this.script = this.build(poses, referee);
+    if (!this.script) { this.script = this.build(poses, referee); this.sepMemo.clear(); }
     const sc = this.script;
     if (!sc) return false;
 
@@ -243,7 +263,7 @@ export class FinishStage {
     const fixed = [holding || attending, holding];
     if (bStanding) { pts.push([pb.x, pb.z]); fixed.push(holding); }
     const obstacles = sc.lying && !bStanding ? sc.lying.points.map((p) => ({ p, r: 0.42 })) : [];
-    const sep = separatePoints(pts, fixed, 0.58, obstacles);
+    const sep = separatePoints(pts, fixed, 0.58, obstacles, this.sepMemo);
     // The referee may kneel close to the downed man; the obstacles keep the others off him.
     const refXZ = attending ? pts[0]! : sep[0]!;
     const aXZ = sep[1]!;
@@ -288,9 +308,14 @@ export class FinishStage {
         hands[0] = { kind: 'up', w: upW, spread: 0.45, pump: amp * (0.5 + 0.5 * Math.sin(ph)) };
         hands[1] = { kind: 'up', w: upW, spread: 0.45, pump: amp * (0.5 + 0.5 * Math.sin(ph + Math.PI)) };
         if (t > cel[0] && t < cel[1]) {
-          // Turn to the crowd: a slow sweep either side of facing out.
+          // Turn to the crowd: a slow sweep either side of facing out, turned
+          // into from (and back to) his path's facing — the celebration of a
+          // decision starts while he is still walking off, and snapping to face
+          // out flipped the body (and its planted feet) in one frame.
           const u = (t - cel[0]) / (cel[1] - cel[0]);
-          cue.facing = outward(sc.cel) + 0.75 * Math.sin(2 * Math.PI * u) * smooth((t - cel[0]) / 0.8);
+          const crowd = outward(sc.cel) + 0.75 * Math.sin(2 * Math.PI * u) * smooth((t - cel[0]) / 0.8);
+          const into = smooth((t - cel[0]) / 0.8) * (1 - smooth((t - (cel[1] - 0.8)) / 0.8));
+          cue.facing = cue.facing + Math.atan2(Math.sin(crowd - cue.facing), Math.cos(crowd - cue.facing)) * into;
           cue.look = [sc.cel[0] + Math.sin(cue.facing) * 9, 3.6, sc.cel[1] + Math.cos(cue.facing) * 9];
         }
       }
@@ -620,8 +645,17 @@ export class FinishStage {
     if (!ends) return null;
     const a = r.winner >= 0 ? r.winner : 0;
     const b = r.winner >= 0 ? r.loser : 1;
-    const A0 = ends[a]!;
+    let A0 = ends[a]!;
     const B0 = ends[b]!;
+    // Ended on the canvas (a submission, a stoppage on the ground): the winner's
+    // recorded spot is on or under the loser. He stands up beside the body, as
+    // the animator draws him (`LYING_CLEAR_M` off its hips–head line), not in it.
+    const lastF = this.frames[this.frames.length - 1];
+    if (lastF && lastF.fighters[b] && lastF.fighters[b]!.posture !== 'standing' && poses[b]) {
+      const w = this.worlds[b]!;
+      forwardKinematics(w, poses[b]!, this.rests[b]!);
+      A0 = offBodyLine(A0, [w.pos[B.hips * 3]!, w.pos[B.hips * 3 + 2]!], [w.pos[B.head * 3]!, w.pos[B.head * 3 + 2]!], LYING_CLEAR_M * this.rests[a]!.statureM / 1.7332);
+    }
     const marks = ceremonyMarks(arena, A0, B0);
     // The downed fighter as the animator lays him (it keeps evaluating the last frame).
     let lying: Lying | null = null;

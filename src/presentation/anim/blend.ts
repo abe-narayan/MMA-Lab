@@ -216,5 +216,86 @@ export function floorFix(pose: Pose, world: WorldPose, rest: RestSkeleton): numb
     forwardKinematics(world, pose, rest);
     worst = Math.max(worst, up);
   }
+  // Knees: a knee under the canvas first swings up about the hip–ankle line
+  // (the only freedom a two-bone leg has with both ends fixed) toward the
+  // nearest angle that clears it — hinge-aware and continuous: a knee just
+  // touching the floor barely moves and never flips to the other side
+  // (flipping the pole was itself a pop). What the (limited) swing leaves is
+  // then taken by raising the knee itself: the thigh aims at the knee lifted
+  // to the floor, and the shin keeps its direction (the foot comes up with it).
+  for (const L of limbs.slice(0, 2)) {
+    const minY = KNEE_FLOOR_R * k;
+    const K = P(world, L.mid);
+    if (K[1] >= minY - 1e-4) continue;
+    const H = P(world, L.chain.upper);
+    const A = P(world, L.end);
+    const eq = L.end * 4;
+    const endQ: [number, number, number, number] = [world.quat[eq]!, world.quat[eq + 1]!, world.quat[eq + 2]!, world.quat[eq + 3]!];
+    const goal = kneeAboveFloor(H, K, A, minY);
+    let knee = goal.knee;
+    let ankle: V3 = A;
+    if (knee[1] < minY) {
+      // The knee on the floor line: the point at thigh length from the hip, at
+      // `minY`, in the knee's own horizontal direction from the hip.
+      const L1 = Math.hypot(K[0] - H[0], K[1] - H[1], K[2] - H[2]);
+      let hx = knee[0] - H[0], hz = knee[2] - H[2];
+      const hl = Math.hypot(hx, hz);
+      if (hl > 1e-5) { hx /= hl; hz /= hl; } else { hx = 0; hz = 1; }
+      const R = Math.sqrt(Math.max(0, L1 * L1 - (H[1] - minY) * (H[1] - minY)));
+      const k2: V3 = [H[0] + hx * R, Math.max(minY, H[1] - L1), H[2] + hz * R];
+      ankle = [A[0] + k2[0] - knee[0], A[1] + k2[1] - knee[1], A[2] + k2[2] - knee[2]];
+      knee = k2;
+    }
+    const mid: V3 = [(H[0] + ankle[0]) / 2, (H[1] + ankle[1]) / 2, (H[2] + ankle[2]) / 2];
+    const pole: V3 = [knee[0] + (knee[0] - mid[0]) * 2, knee[1] + (knee[1] - mid[1]) * 2, knee[2] + (knee[2] - mid[2]) * 2];
+    solveTwoBone(pose, world, rest, L.chain, ankle, pole, 1);
+    forwardKinematics(world, pose, rest);
+    setWorldRot(pose, world, L.end, L.mid, endQ);
+    forwardKinematics(world, pose, rest);
+    worst = Math.max(worst, minY - K[1]);
+  }
   return worst;
+}
+
+/** Knee joints are kept this high (m, scale 1): the knee's flesh radius. */
+const KNEE_FLOOR_R = 0.045;
+/** Most a knee swings about its hip–ankle line to clear the floor (radians). */
+const KNEE_SWING = 1.0;
+
+/**
+ * Where a knee at `K` (hip `H`, ankle `A`) should go to be at least `minY`
+ * high: the nearest point of its circle about the hip–ankle axis that clears
+ * the floor, the circle's centre, and how much the ankle must rise when no
+ * point does.
+ */
+export function kneeAboveFloor(H: V3, K: V3, A: V3, minY: number): { knee: V3; c: V3; lift: number } {
+  const ha: V3 = [A[0] - H[0], A[1] - H[1], A[2] - H[2]];
+  const hl = Math.hypot(ha[0], ha[1], ha[2]) || 1;
+  const u: V3 = [ha[0] / hl, ha[1] / hl, ha[2] / hl];
+  const hk: V3 = [K[0] - H[0], K[1] - H[1], K[2] - H[2]];
+  const t = hk[0] * u[0] + hk[1] * u[1] + hk[2] * u[2];
+  const c: V3 = [H[0] + u[0] * t, H[1] + u[1] * t, H[2] + u[2] * t];
+  const rv: V3 = [K[0] - c[0], K[1] - c[1], K[2] - c[2]];
+  const r = Math.hypot(rv[0], rv[1], rv[2]);
+  if (r < 1e-5) return { knee: K, c, lift: Math.max(0, minY - K[1]) };
+  const d: V3 = [rv[0] / r, rv[1] / r, rv[2] / r];
+  const e: V3 = [u[1] * d[2] - u[2] * d[1], u[2] * d[0] - u[0] * d[2], u[0] * d[1] - u[1] * d[0]];
+  // y(θ) = c.y + r·R·cos(θ − φ); the current knee is θ = 0.
+  const R = Math.hypot(d[1], e[1]);
+  const phi = Math.atan2(e[1], d[1]);
+  const need = R > 1e-6 ? (minY - c[1]) / (r * R) : Infinity;
+  const dlt = Math.atan2(Math.sin(-phi), Math.cos(-phi)); // current angle relative to the top
+  let th = 0;
+  if (need <= 1) {
+    const half = Math.acos(Math.max(-1, need));
+    th = Math.abs(dlt) <= half ? 0 : phi + Math.sign(dlt) * half;
+  } else th = phi;
+  // Continuity: a knee pointing straight down has no "nearer" side to swing up
+  // (the two ways round are equal, and choosing flipped it 80 cm in a frame),
+  // so the swing is limited to `KNEE_SWING` and fades out as the knee points
+  // down; the rest is made up by lifting the leg.
+  th = Math.max(-KNEE_SWING, Math.min(KNEE_SWING, th)) * Math.min(1, Math.max(0, (Math.PI - Math.abs(dlt)) / 0.8));
+  const cs = Math.cos(th), sn = Math.sin(th);
+  const knee: V3 = [c[0] + r * (cs * d[0] + sn * e[0]), c[1] + r * (cs * d[1] + sn * e[1]), c[2] + r * (cs * d[2] + sn * e[2])];
+  return { knee, c, lift: Math.max(0, minY - knee[1]) };
 }

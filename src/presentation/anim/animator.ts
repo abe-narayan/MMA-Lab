@@ -38,21 +38,32 @@ import {
 import { activeDefence, defenceBody, defenceHands, defenceRootOffset, flinch } from './defence';
 import { fallKey, keyToSpec, kneelKey, supineKey, blendKey } from './falls';
 import { condition, hitReactions, incomingFlinch, turnAway } from './reactions';
-import { fistPoint, getLocal, rigInfo, solveSpec, worldP } from './spec';
+import { fistPoint, getLocal, rigInfo, solveHand, solveSpec, worldP } from './spec';
 import { buildBody, clampPelvis, guardHands } from './stance';
 import {
   createDelta, createFighterState, createSpec, type Ctx, type Delta, type FighterState, type KnockInfo,
 } from './state';
-import { classify, legPass, strikeBody, strikeHands, strikeRootOffset } from './strikes';
+import { aimPoint, classify, envelope, legPass, strikeBody, strikeHands, strikeRootOffset } from './strikes';
+import { KNEE_MAX_FLEX, LIMBS, solveTwoBone } from '../rig/ik';
 import { fighterTiers } from './tier';
 import { strikeTiming, type ActionTiming } from './timing';
-import { separatePair } from './clearance';
+import { carryHands, chestFrame, clearOfBody, separatePair } from './clearance';
 import { fadeKeepFeet, floorFix, footGrounded } from './blend';
 import type { MotionLibrary } from '../assets/motionLibrary';
 import { CapRig, NCH, idleResidual, registeredMotionLibrary } from './capture';
 import {
   capActionFor, capDefenceBody, capDefenceFor, capLegPass, capStrikeBody, capStrikeHands, type CapAction,
 } from './capStrikes';
+
+/**
+ * Width (in sim ticks) of the trailing average that smooths the displayed root
+ * path (`placement`). 1 = the quadratic B-spline (50 ms behind the record);
+ * smaller follows the record more closely and ramps velocity changes faster.
+ */
+export const ROOT_SMOOTH = 0.5;
+
+/** A standing fighter's root is kept this far off a lying body's hips–head line (m, scale 1). */
+export const LYING_CLEAR_M = 0.5;
 
 /** Displayed centre-to-centre distance for a recorded one (1v1). */
 export function displaySeparation(d: number): number {
@@ -127,6 +138,10 @@ export class StandingAnimator implements Animator {
       st.initialised = false;
       st.latch = null;
       st.contactAim = null;
+      st.contactFinal = null;
+      st.weapon = null;
+      st.handF = null;
+      st.clearSide = 0;
       st.fade = null;
       st.knock = null;
       st.mode = 'standing';
@@ -213,8 +228,12 @@ export class StandingAnimator implements Animator {
       if (mode !== st.mode) {
         const from = st.mode;
         if (!snap && st.lastSpec) {
-          const dur = mode === 'getup' ? 0.55 : from === 'grapple' || mode === 'grapple' ? 0.25 : mode === 'down' ? 0.1 : 0.2;
-          st.fade = { from: createPose(), t0: now, dur: dur * 1000 };
+          // Up off a partner still on the canvas (a submission's winner, a
+          // scramble to the feet): slide out, then rise (see `Fade.slide`).
+          const offBody = from === 'grapple' && (mode === 'standing' || mode === 'getup')
+            && this.st.some((o, j) => j !== i && j < n && F0.fighters[j]?.posture !== 'standing' && (o.mode === 'grapple' || o.mode === 'down' || o.mode === 'out'));
+          const dur = offBody ? 0.6 : mode === 'getup' ? 0.55 : from === 'grapple' || mode === 'grapple' ? 0.25 : mode === 'down' ? 0.1 : 0.2;
+          st.fade = { from: createPose(), t0: now, dur: dur * 1000, slide: offBody };
           copyPose(st.fade.from, st.pose);
         }
         st.mode = mode;
@@ -301,7 +320,7 @@ export class StandingAnimator implements Animator {
       const g = guardHands(ctx, st.spec, st.delta);
       for (const side of [0, 1] as const) {
         const h = st.spec.hands[side];
-        h.pos = g.pos[side]; h.pole = g.pole[side]; h.palm = g.palm[side]; h.w = 1; h.fist = g.fist; h.fistTarget = false;
+        h.pos = g.pos[side]; h.pole = g.pole[side]; h.palm = g.palm[side]; h.w = 1; h.fist = g.fist; h.fistTarget = false; h.exact = false; h.twist = 1;
       }
       const ad = activeDefence(ctx);
       if (ad) defenceHands(ctx, ad, st.spec, g);
@@ -321,6 +340,7 @@ export class StandingAnimator implements Animator {
           h.pos = vlerp(h.pos, add(worldP(st.world, side === 0 ? B.lLeg : B.rLeg), [0, 0.12, 0]), r * 0.8);
         }
       }
+      followHands(st, g, dtMs, snap, now);
       (st as unknown as { guard: typeof g }).guard = g;
       solveSpec(st.spec, st.rig, st.pose, st.world, true);
     }
@@ -330,11 +350,21 @@ export class StandingAnimator implements Animator {
       const ctx = ctxs[i]!;
       const st = ctx.st;
       st.ikTargets = [];
+      st.weapon = null;
       if (st.mode !== 'standing' && st.mode !== 'getup') continue;
       const tm = ctx.my;
       if (!tm) continue;
       const info = classify(tm.id, ctx.lead);
-      const g = (st as unknown as { guard: ReturnType<typeof guardHands> }).guard;
+      const g0 = (st as unknown as { guard: ReturnType<typeof guardHands> }).guard;
+      // The striking hand's path starts from (and returns to) its guard as a
+      // KNUCKLE point: the guard is a wrist target, the strike a fist target,
+      // and starting the fist on the guard's wrist point pushed the glove a
+      // fist-length forward in the strike's first frame (an arm pop at every
+      // punch's start and end).
+      const g = info.hand === -1 ? g0 : {
+        ...g0, pos: [g0.pos[0], g0.pos[1]] as [V3, V3],
+      };
+      if (info.hand !== -1) g.pos[info.hand] = fistPoint(st.world, st.rig, info.hand);
       const plan = this.plan(ctx, tm, info);
       const cap = st.cap;
       const hands = (): V3 | null => (plan && cap
@@ -342,6 +372,9 @@ export class StandingAnimator implements Animator {
         : strikeHands(ctx, tm, info, st.spec, g));
       const aim = hands();
       solveSpec(st.spec, st.rig, st.pose, st.world, true);
+      // The trunk corrections below move the chest after the guard hand was
+      // placed on it: the guard is carried along (`carryHands`).
+      const chest0 = chestFrame(st);
       if (aim && info.hand !== -1) {
         const elbow = info.kind === 'elbow';
         const act = tm.activeEnd - tm.contact;
@@ -353,7 +386,9 @@ export class StandingAnimator implements Animator {
           });
         }
       }
+      if (aim && info.hand !== -1) st.weapon = { hand: info.hand, leg: -1, aim, ankle: null, pole: null };
       this.headClearance(ctx, info.hand === 0 ? -1 : 1);
+      carryHands(st, chest0);
       if (info.leg !== -1) {
         const T = plan && cap
           ? capLegPass(cap, ctx, tm, info, st.spec, st.delta, false, plan)
@@ -386,19 +421,50 @@ export class StandingAnimator implements Animator {
       if (b >= 0 && b < n) done.add(b);
       this.engaged(e, F1, input, ff, ctxs, now);
     }
+    // A free fighter (team bouts) keeps off the bodies of an engaged pair.
+    if (done.size > 0) {
+      for (let i = 0; i < n; i++) {
+        if (!free(i)) continue;
+        for (const j of done) clearOfBody(this.st[i], this.st[j]);
+      }
+    }
 
-    // ---- fades, face, output ---------------------------------------------------------------
+    // ---- fades ---------------------------------------------------------------------------------
+    const fadeW: number[] = [];
     for (let i = 0; i < n; i++) {
       const st = this.st[i];
+      fadeW.push(0);
       if (st.fade) {
         const u = (now - st.fade.t0) / st.fade.dur;
         if (u >= 1 || u < 0) st.fade = null;
         else {
           // Blend over the planted feet (a plain pose blend dips and skates them).
           forwardKinematics(st.world, st.pose, st.rig.rest);
-          fadeKeepFeet(st.pose, st.world, st.fade.from, 1 - smooth(u), st.rig.rest);
+          let from = st.fade.from;
+          if (st.fade.slide) {
+            // First 40 %: the old pose slides out level to above where he
+            // stands; then the ordinary blend stands him up there.
+            const k = smooth(Math.min(1, u / 0.4));
+            from = this.tmpPose;
+            copyPose(from, st.fade.from);
+            from.rootPos[0] += (st.pose.rootPos[0] - from.rootPos[0]) * k;
+            from.rootPos[2] += (st.pose.rootPos[2] - from.rootPos[2]) * k;
+            fadeW[i] = 1 - smooth(clamp01((u - 0.3) / 0.7));
+          } else fadeW[i] = 1 - smooth(u);
+          fadeKeepFeet(st.pose, st.world, from, fadeW[i], st.rig.rest);
         }
       }
+    }
+
+    // ---- contact: weapons re-solved on the final poses --------------------------------------
+    for (let i = 0; i < n; i++) {
+      const ctx = ctxs[i]!;
+      if (ctx.st.weapon && ctx.my && (ctx.st.mode === 'standing' || ctx.st.mode === 'getup')) this.contactPass(ctx, fadeW[i]);
+    }
+
+    // ---- face, output ------------------------------------------------------------------------
+    for (let i = 0; i < n; i++) {
+      const st = this.st[i];
       st.lastSpec = st.spec;
       if (out[i]) copyPose(out[i], st.pose);
       const tm = ctxs[i]!.my;
@@ -413,6 +479,61 @@ export class StandingAnimator implements Animator {
   }
 
   // -------------------------------------------------------------------------
+
+  /**
+   * The weapon on the target at the recorded instant, whatever ran after the
+   * strike pass aimed it. The strike pass (2b) aims at the defender's body as
+   * solved THEN; the defender's own strike, the pair clearance (which also
+   * re-solves the legs from the spec, dropping a kick's re-aimed leg) and the
+   * crossfades still move both bodies afterwards — measured, a quarter of the
+   * landed / blocked strikes ended more than 5 cm off the surface they struck.
+   * Here, last, the aim point is taken again on the final poses and the weapon
+   * limb is re-solved to its strike-pass target moved by how far the aim moved
+   * (weighted by the strike's extension, so the windup is untouched; the fist
+   * that struck stays where it struck: the latched aim becomes the final one).
+   * The limb is only re-solved to where the strike pass already put it, so
+   * without any later change this is the identity.
+   */
+  private contactPass(ctx: Ctx, fade: number): void {
+    const st = ctx.st;
+    const wp = st.weapon!;
+    const tm = ctx.my!;
+    const now = ctx.nowMs;
+    if (now < tm.commit || now > tm.end) return;
+    const e = envelope(tm, now);
+    const info = classify(tm.id, ctx.lead);
+    // How far the aim moved since the strike pass took it (before contact and
+    // on the frame the fist lands; after that the latched aim is already final).
+    let drift: V3 = [0, 0, 0];
+    const latching = !e.before && !!st.contactAim && st.contactAim !== st.contactFinal;
+    if (e.before || latching) {
+      const aimNow = aimPoint(ctx, tm, info);
+      if (aimNow) {
+        const k = e.before ? e.ext : 1;
+        drift = [(aimNow[0] - wp.aim[0]) * k, (aimNow[1] - wp.aim[1]) * k, (aimNow[2] - wp.aim[2]) * k];
+        if (latching) { st.contactAim = aimNow; st.contactFinal = aimNow; }
+      }
+    }
+    const w = 1 - fade;
+    if (w <= 0) return;
+    const rig = st.rig;
+    forwardKinematics(st.world, st.pose, rig.rest);
+    if (wp.hand !== -1) {
+      const h = st.spec.hands[wp.hand];
+      h.pos = add(h.pos, drift);
+      h.pole = add(h.pole, drift);
+      const w0 = h.w;
+      h.w = w0 * w;
+      solveHand(st.spec, rig, st.pose, st.world, wp.hand);
+      h.w = w0;
+    } else if (wp.leg !== -1 && wp.ankle && wp.pole) {
+      const chain = wp.leg === 0 ? LIMBS.lLeg : LIMBS.rLeg;
+      solveTwoBone(st.pose, st.world, rig.rest, chain, add(wp.ankle, drift), add(wp.pole, drift), w, KNEE_MAX_FLEX);
+    }
+    forwardKinematics(st.world, st.pose, rig.rest);
+    const t = st.ikTargets.find((x) => x.name === 'aim' || x.name === 'kick');
+    if (t) t.pos = add(t.pos, drift);
+  }
 
   /**
    * When a strike or a defence ends (or gives way to another), fade from the
@@ -449,14 +570,16 @@ export class StandingAnimator implements Animator {
     }
     const prev = this.prevTickPos;
     /**
-     * The root path: a uniform quadratic B-spline through the recorded tick
-     * positions (previous, this, next tick) instead of straight lines between
-     * them. The sim moves in 100 ms steps that start and stop (2.3 m/s, then 0,
-     * then 2.3 m/s at right angles): linear interpolation turned every tick into
-     * a velocity step — a hips jolt and a burst of frantic re-stepping — while
-     * this path has continuous velocity (the recorded velocities, blended over
-     * the tick) and stays within 1/8 of the tick-to-tick change of the record
-     * (it runs half a tick behind). Pure given the three recorded positions.
+     * The root path: the straight-line path through the recorded tick
+     * positions, averaged over a trailing window of `ROOT_SMOOTH` ticks. The
+     * sim moves in 100 ms steps that start and stop (2.3 m/s, then 0, then
+     * 2.3 m/s at right angles): linear interpolation turned every tick into a
+     * velocity step — a hips jolt and a burst of frantic re-stepping — while
+     * the averaged path has continuous velocity (each step's velocity ramps in
+     * over the window). A one-tick window is the uniform quadratic B-spline
+     * (the first pass: half a tick, 50 ms, behind — the hips visibly froze at
+     * every start); the half-tick window keeps the velocity continuous with a
+     * 25 ms lag. Only the previous, this and the next tick are needed. Pure.
      */
     const raw = (fr: TickSnapshot | null, i: number, a: number): V3 => {
       const f0 = F0.fighters[i];
@@ -470,8 +593,14 @@ export class StandingAnimator implements Animator {
       let px: number, pz: number;
       if (pp && Math.hypot(pp[0] - f0.x, pp[1] - f0.z) <= 0.8) { px = pp[0]; pz = pp[1]; }
       else { px = 2 * f0.x - nx; pz = 2 * f0.z - nz; } // unknown: constant velocity
-      const wa = 0.5 * (1 - s) * (1 - s), wb = 0.5 + s - s * s, wc = 0.5 * s * s;
-      return [wa * px + wb * f0.x + wc * nx, 0, wa * pz + wb * f0.z + wc * nz];
+      // Trailing box average of the linear path over ROOT_SMOOTH ticks (see
+      // `ROOT_SMOOTH`): P0 - (w-s)²/2w·D0 + s²/2w·D1 while the box straddles
+      // the tick, P0 + (s - w/2)·D1 once it is inside it.
+      const w = ROOT_SMOOTH;
+      const d0x = f0.x - px, d0z = f0.z - pz, d1x = nx - f0.x, d1z = nz - f0.z;
+      if (s >= w) return [f0.x + (s - w / 2) * d1x, 0, f0.z + (s - w / 2) * d1z];
+      const k0 = (w - s) * (w - s) / (2 * w), k1 = s * s / (2 * w);
+      return [f0.x - k0 * d0x + k1 * d1x, 0, f0.z - k0 * d0z + k1 * d1z];
     };
     const place = (a: number): V3[] => {
       const p: V3[] = [];
@@ -489,6 +618,7 @@ export class StandingAnimator implements Animator {
       return p;
     };
     const pos = place(alpha);
+    this.clearOfLying(F0, pos, n);
     const span = F1 ? Math.max(0.05, F1.t - F0.t) : 0.1;
     // Velocity of the displayed root (the path's derivative, by a central difference).
     const aLo = Math.max(0, alpha - 0.05), aHi = Math.min(1, alpha + 0.05);
@@ -523,6 +653,65 @@ export class StandingAnimator implements Animator {
       out.push({ snap: f, next: nx, pos: pos[i], vel, yaw, opp, timing });
     }
     return out;
+  }
+
+  /**
+   * A fighter the sim has on his feet is never drawn standing inside a body
+   * that lies on the canvas (his opponent tapped under him, knocked down, or
+   * still on the ground after a scramble): the recorded spot of a submission's
+   * winner is on top of the loser, and standing him up there raised him
+   * through the loser's body (up to 22 cm of standing interpenetration in the
+   * post-roll). His displayed root is kept `LYING_CLEAR_M` off the lying
+   * body's hips–head line, on the side he was on when it began (sticky, so
+   * the push never jumps across the body), and the footwork steps there.
+   */
+  private clearOfLying(F0: TickSnapshot, pos: V3[], n: number): void {
+    for (let i = 0; i < n; i++) {
+      const st = this.st[i];
+      const f = F0.fighters[i];
+      if (!f || f.posture !== 'standing' || F0.engagements.some((e) => e.kind !== 'knockdown' && (e.a === i || e.b === i))) { st.clearSide = 0; continue; }
+      let touched = false;
+      for (let j = 0; j < n; j++) {
+        if (j === i) continue;
+        const o = this.st[j];
+        const fj = F0.fighters[j];
+        if (!fj || !o.lastSpec || fj.posture === 'standing' || (o.mode !== 'grapple' && o.mode !== 'down' && o.mode !== 'out')) continue;
+        const w = o.world;
+        const hx = w.pos[B.hips * 3], hz = w.pos[B.hips * 3 + 2];
+        // A body lying (or sitting / kneeling) low; the clearance fades in as
+        // its head comes down (full below 0.9 m, none above 1.25 m), so a
+        // grappler rising or crouching never switches it on in one frame.
+        const low = clamp01((1.25 * o.rig.scale - w.pos[B.head * 3 + 1]) / (0.35 * o.rig.scale));
+        if (low <= 0) continue;
+        const ex = w.pos[B.head * 3] - hx, ez = w.pos[B.head * 3 + 2] - hz;
+        const L2 = ex * ex + ez * ez;
+        const p = pos[i];
+        const k = L2 > 1e-6 ? clamp(((p[0] - hx) * ex + (p[2] - hz) * ez) / L2, 0, 1) : 0;
+        const cx = hx + ex * k, cz = hz + ez * k;
+        let dx = p[0] - cx, dz = p[2] - cz;
+        const d = Math.hypot(dx, dz);
+        const R = LYING_CLEAR_M * st.rig.scale;
+        if (d >= R) continue;
+        touched = true;
+        // Side of the body's line he is on (sticky while he is close).
+        const sideNow = L2 > 1e-6 ? Math.sign(ex * (p[2] - hz) - ez * (p[0] - hx)) || 1 : 1;
+        if (st.clearSide === 0) st.clearSide = sideNow;
+        if (L2 > 1e-6 && (k > 0 && k < 1)) {
+          // Beside the line: out along its perpendicular, on the sticky side.
+          const l = Math.sqrt(L2);
+          const nx = -ez / l * st.clearSide, nz = ex / l * st.clearSide;
+          const lat = dx * nx + dz * nz;
+          const push = (R - lat) * low;
+          if (push > 0) { p[0] += nx * push; p[2] += nz * push; }
+        } else if (d > 1e-4) {
+          // Past an end: radially.
+          p[0] += (cx + dx / d * R - p[0]) * low; p[2] += (cz + dz / d * R - p[2]) * low;
+        } else {
+          p[0] += R * low;
+        }
+      }
+      if (!touched) st.clearSide = 0;
+    }
   }
 
   private bodyStanding(ctx: Ctx, dtMs: number, snap: boolean): void {
@@ -607,7 +796,7 @@ export class StandingAnimator implements Animator {
     if (!h.fistTarget && !elbow) return;
     const y0 = spec.pelvis[1];
     let moved = 0;
-    const cap = 0.14 * st.rig.scale * weight;
+    const cap = 0.2 * st.rig.scale * weight;
     for (let it = 0; it < 4; it++) {
       const wp = elbow ? worldP(st.world, hand === 0 ? B.lForeArm : B.rForeArm) : fistPoint(st.world, st.rig, hand);
       const goal = elbow ?? h.pos;
@@ -623,6 +812,28 @@ export class StandingAnimator implements Animator {
       if (spec.pelvis[1] < y0 - 0.06) spec.pelvis[1] = y0 - 0.06;
       solveSpec(spec, st.rig, st.pose, st.world, false);
       if (elbow) retarget();
+    }
+    // Still short (a square or turned body jabbing from the far shoulder): turn
+    // the chest so the punching shoulder comes round toward the target, up to
+    // 20° more than the technique's own turn.
+    if (elbow) return;
+    let turned = 0;
+    const maxTurn = 20 * DEG * weight;
+    for (let it = 0; it < 2; it++) {
+      const wp = fistPoint(st.world, st.rig, hand);
+      const err = Math.hypot(h.pos[0] - wp[0], h.pos[1] - wp[1], h.pos[2] - wp[2]);
+      if (err < 0.02 || turned >= maxTurn) break;
+      const c = worldP(st.world, B.spine2);
+      const s = worldP(st.world, hand === 0 ? B.lArm : B.rArm);
+      const ax = s[0] - c[0], az = s[2] - c[2], bx = h.pos[0] - c[0], bz = h.pos[2] - c[2];
+      const th = Math.atan2(az * bx - ax * bz, ax * bx + az * bz);
+      // Proportional to the shortfall, so it fades in continuously from 2 cm.
+      const mag = Math.min(Math.abs(th) * 0.6, (err - 0.02) / 0.25, maxTurn - turned);
+      const step = Math.sign(th) * mag;
+      if (Math.abs(step) < 0.01) break;
+      turned += Math.abs(step);
+      spec.spineYaw += step;
+      solveSpec(spec, st.rig, st.pose, st.world, false);
     }
   }
 
@@ -831,12 +1042,70 @@ export class StandingAnimator implements Animator {
           h.w = 1;
           h.fist = 0.2;
           h.fistTarget = false;
+          h.exact = false;
+          h.twist = 1;
         }
         solveSpec(st.spec, st.rig, st.pose, st.world, true);
       }
     }
     void now;
   }
+}
+
+/** Natural frequency (rad/s) of the guard hands' critically damped follow (~45 ms lag on a ramp). */
+const HAND_FOLLOW_W = 45;
+
+/**
+ * The guard and defence hands follow their targets with a critically damped
+ * spring in the CHEST frame (so they move rigidly with the body, and only the
+ * target's own motion relative to the chest is smoothed). The guard is placed
+ * off the head, and the head moves with the neck's look, the reactions and the
+ * captured idle loops (whose wrap is not seamless): measured, three quarters
+ * of the one-frame arm pops while standing were a hand target that jumped
+ * 2-40 cm relative to the chest in one frame, and elbow poles jumped too. A
+ * joint clamp only hides such a jump; the follow spreads it over ~4 frames and
+ * keeps the hands' velocity continuous. The followed guard is also what a
+ * strike starts from and returns to (`g.pos`), so there is no seam there.
+ * Exact closed-form update (stable for any frame time); reset on a seek.
+ */
+function followHands(st: FighterState, g: ReturnType<typeof guardHands>, dtMs: number, snap: boolean, now: number): void {
+  const cq = [st.world.quat[B.spine2 * 4], st.world.quat[B.spine2 * 4 + 1], st.world.quat[B.spine2 * 4 + 2], st.world.quat[B.spine2 * 4 + 3]] as [number, number, number, number];
+  const c = worldP(st.world, B.spine2);
+  const inv: [number, number, number, number] = [-cq[0], -cq[1], -cq[2], cq[3]];
+  const toL = (p: V3): V3 => qrotV(inv, [p[0] - c[0], p[1] - c[1], p[2] - c[2]]);
+  const toW = (p: V3): V3 => add(qrotV(cq, p), c);
+  // Fresh after a seek, or back on his feet after a while in another mode.
+  const fresh = snap || !st.handF || now - st.handF[0].at > 100 || now < st.handF[0].at;
+  if (fresh) st.handF = [{ p: [0, 0, 0], v: [0, 0, 0], q: [0, 0, 0], qv: [0, 0, 0], at: now }, { p: [0, 0, 0], v: [0, 0, 0], q: [0, 0, 0], qv: [0, 0, 0], at: now }];
+  const dt = dtMs / 1000;
+  const w = HAND_FOLLOW_W;
+  const ex = Math.exp(-w * dt);
+  const step = (x: V3, v: V3, target: V3): void => {
+    for (let k = 0; k < 3; k++) {
+      const ch = x[k] - target[k];
+      const tmp = (v[k] + w * ch) * dt;
+      v[k] = (v[k] - w * tmp) * ex;
+      x[k] = target[k] + (ch + tmp) * ex;
+    }
+  };
+  for (const side of [0, 1] as const) {
+    const h = st.spec.hands[side];
+    const f = st.handF![side];
+    const tp = toL(h.pos), tq = toL(h.pole);
+    if (fresh) { f.p = tp; f.q = tq; f.v = [0, 0, 0]; f.qv = [0, 0, 0]; }
+    else { step(f.p, f.v, tp); step(f.q, f.qv, tq); }
+    h.pos = toW(f.p);
+    h.pole = toW(f.q);
+    f.at = now;
+    g.pos[side] = h.pos;
+    g.pole[side] = h.pole;
+  }
+}
+
+function qrotV(q: readonly number[], v: V3): V3 {
+  const x = q[0], y = q[1], z = q[2], s = q[3];
+  const tx = 2 * (y * v[2] - z * v[1]), ty = 2 * (z * v[0] - x * v[2]), tz = 2 * (x * v[1] - y * v[0]);
+  return [v[0] + s * tx + (y * tz - z * ty), v[1] + s * ty + (z * tx - x * tz), v[2] + s * tz + (x * ty - y * tx)];
 }
 
 /** The feet of the last displayed pose that stand on the canvas (ball point and yaw), for re-seating the footwork. */

@@ -163,7 +163,18 @@ export function envelope(tm: ActionTiming, now: number): Env {
 /** Estimated distance from the attacker's root to the target surface (pass 1). */
 function reachNeed(ctx: Ctx, region: Region): number {
   const depth = region === 'head' ? 0.1 : region === 'body' ? 0.13 : 0.08;
-  return ctx.dist - depth * (ctx.opp ? ctx.opp.rig.scale : 1);
+  // A defender whose head / chest sits back behind his hips (a pull, a high
+  // guard leaning away) is further than the hips say: read where the target
+  // was drawn last frame. Measured, jabs landed 15-20 cm short of heads that
+  // were 20 cm behind their hips.
+  let back = 0;
+  const o = ctx.opp;
+  if (o && o.lastSpec && (region === 'head' || region === 'body')) {
+    const p = worldP(o.world, region === 'head' ? B.head : B.spine2);
+    const r = ctx.st.displayRoot;
+    back = clamp(Math.hypot(p[0] - r[0], p[2] - r[2]) - ctx.dist, 0, 0.3);
+  }
+  return ctx.dist + back - depth * (o ? o.rig.scale : 1);
 }
 
 /** How far forward (local z) the body must travel for this strike to reach. */
@@ -791,6 +802,7 @@ export function strikeHands(ctx: Ctx, tm: ActionTiming, info: StrikeInfo, spec: 
       pole = madd(E, sub(E, p), 0.5);
       palm = locDir([-out, 0, -0.5]);
       g.fistTarget = false;
+      g.exact = true; // the elbow point is the weapon: no guard room
       g.pos = p; g.pole = pole; g.palm = normV(palm); g.w = 1; g.fist = 1;
       if (info.spin) {
         g.pos = vlerp(G, p, clamp01(ext * 1.3));
@@ -838,6 +850,8 @@ function kickArms(ctx: Ctx, tm: ActionTiming, info: StrikeInfo, spec: BodySpec, 
     : add(worldP(w, B.spine1), dirToWorld(fr, [(kf === 0 ? 1 : -1) * 0.25 * s, 0.1 * s, 0.1 * s]));
   const noReset = st.tiers.kick.kickReturnSkip;
   g.pos = vlerp(guard.pos[kf], swing, x * (0.8 + 0.2 * noReset));
+  g.exact = true; // a counter-swing past the hip, not a guard: no guard room
+  g.twist = 1 - smooth(Math.min(1, x * 1.5)); // and its palm follows the arm
   const cover = add(worldP(w, B.head), dirToWorld(fr, [(other === 0 ? 1 : -1) * 0.02 * s, -0.02 * s, 0.14 * s]));
   const o = spec.hands[other];
   o.pos = vlerp(guard.pos[other], cover, x * (1 - 0.7 * noReset));
@@ -946,6 +960,7 @@ export function legPass(
     const chain = kf === 0 ? LIMBS.lLeg : LIMBS.rLeg;
     const base = ankleOf(rig, kf, spec.feet[kf]);
     const target = vlerp(base, ank, clamp01(wgt));
+    st.weapon = { hand: -1, leg: kf, aim: T, ankle: target, pole };
     solveTwoBone(st.pose, w, rig.rest, chain, target, pole, 1, KNEE_MAX_FLEX);
     forwardKinematics(w, st.pose, rig.rest);
     return T;

@@ -526,7 +526,11 @@ export function clampPelvis(spec: BodySpec, st: FighterState): void {
       const h = Math.hypot(hip[0] - ank[0], hip[2] - ank[2]);
       const v = hip[1] - ank[1];
       const dd = Math.hypot(h, v);
-      if (dd > max && h < max) drop = Math.max(drop, (v - Math.sqrt(max * max - h * h)) * w);
+      // A foot beyond reach horizontally asks for the most drop the floor below
+      // allows (it used to ask for none: the hips fell up to 12 cm as a
+      // stepping foot's target moved out, then jumped back up in one frame
+      // the instant it passed the leg's horizontal reach).
+      if (dd > max) drop = Math.max(drop, (v - Math.sqrt(Math.max(0, max * max - h * h))) * w);
     }
     if (drop <= 1e-6) break;
     pelvis[1] -= drop;

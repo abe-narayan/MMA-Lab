@@ -10,7 +10,7 @@ import { B } from '../rig/skeleton';
 import {
   add, cross, dot, lerp, madd, norm, qrot, scale, sub, vlerp, type V3,
 } from './math';
-import { fistPoint, worldP, worldQ } from './spec';
+import { worldP, worldQ } from './spec';
 import type { FighterState } from './state';
 import type { Region } from './timing';
 
@@ -106,9 +106,11 @@ export function blockPoint(inp: AimInput, forearm: boolean): V3 {
   let best: V3 = t;
   let bestD = Infinity;
   for (const side of [0, 1] as const) {
-    const p = forearm
-      ? vlerp(worldP(d.world, side === 0 ? B.lForeArm : B.rForeArm), worldP(d.world, side === 0 ? B.lHand : B.rHand), 0.45)
-      : fistPoint(d.world, d.rig, side);
+    // A kick / knee / elbow meets the forearm; a punch the glove's cuff over
+    // the wrist (the padded part a high guard turns to the punch). It used to
+    // aim at the knuckles' point, 8.5 cm past the wrist and outside the arm:
+    // measured, over half the blocked punches ended > 5 cm off the blocking arm.
+    const p = vlerp(worldP(d.world, side === 0 ? B.lForeArm : B.rForeArm), worldP(d.world, side === 0 ? B.lHand : B.rHand), forearm ? 0.45 : 0.85);
     // Distance from the segment src -> t.
     const ab = sub(t, src);
     const k = Math.max(0, Math.min(1, dot(sub(p, src), ab) / Math.max(1e-6, dot(ab, ab))));
@@ -117,7 +119,7 @@ export function blockPoint(inp: AimInput, forearm: boolean): V3 {
     if (dd < bestD) { bestD = dd; best = p; }
   }
   // Land on the outside of the glove.
-  return madd(best, approachDir(inp, best), (forearm ? 0.05 : 0.055) * d.rig.scale);
+  return madd(best, approachDir(inp, best), 0.05 * d.rig.scale);
 }
 
 /** A miss: past the head on one side and over-extended. */

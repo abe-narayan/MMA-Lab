@@ -21,6 +21,7 @@
  *                 translation jumps;
  *   groundPen     joints (with their flesh radius) below the floor;
  *   interpen      head spheres and torso capsules of different fighters
+ *                 (engaged pairs also on the pair solver's firm-body capsules)
  *                 overlapping (standing: > 2 cm; engaged: > 5 cm);
  *   contact       at the recorded contact instant of every landed / blocked
  *                 standing strike, the weapon's distance to the target surface
@@ -48,6 +49,7 @@ import { MotionLibrary, type MotionManifest } from '../../src/presentation/asset
 import { buildBoutPresentation } from '../../src/presentation/stage/bout';
 import { restFor } from '../../src/presentation/placeholders/debugSkeleton';
 import { CornerRest } from '../../src/presentation/corner';
+import { coreCapsules } from '../../src/presentation/anim/grapple/capsules';
 import { FinishStage } from '../../src/presentation/finish';
 import type { BoutPresentation, FrameInput } from '../../src/presentation/contract';
 import {
@@ -202,7 +204,7 @@ export interface AuditResult {
   jointFrames: number;
   pops: { rot: Record<Bucket, number>; trans: Record<Bucket, number>; perMin: number };
   groundPen: Record<Bucket, Stat>;
-  interpen: { standing: Stat; engaged: Stat; limbStanding: Stat };
+  interpen: { standing: Stat; engaged: Stat; limbStanding: Stat; engagedCore: Stat };
   contact: { surface: Stat; inRange: Stat; aim: Stat; count: number; missing: number };
   disagree: Record<string, number>;
   disagreeBase: Record<string, number>;
@@ -227,7 +229,7 @@ function newResult(): AuditResult {
     jointFrames: 0,
     pops: { rot: per(() => 0), trans: per(() => 0), perMin: 0 },
     groundPen: per(() => new Stat(1)),
-    interpen: { standing: new Stat(2), engaged: new Stat(5), limbStanding: new Stat(5) },
+    interpen: { standing: new Stat(2), engaged: new Stat(5), limbStanding: new Stat(5), engagedCore: new Stat(2) },
     contact: { surface: new Stat(5), inRange: new Stat(5), aim: new Stat(3), count: 0, missing: 0 },
     disagree: {},
     disagreeBase: {},
@@ -258,6 +260,7 @@ export function mergeResults(rs: AuditResult[]): AuditResult {
     o.interpen.standing.merge(r.interpen.standing);
     o.interpen.engaged.merge(r.interpen.engaged);
     o.interpen.limbStanding.merge(r.interpen.limbStanding);
+    o.interpen.engagedCore.merge(r.interpen.engagedCore);
     o.contact.surface.merge(r.contact.surface);
     o.contact.inRange.merge(r.contact.inRange);
     o.contact.aim.merge(r.contact.aim);
@@ -781,6 +784,15 @@ export function audit(rec: Recording, opts: AuditOptions = {}): AuditResult {
         const which = dHH * 100 >= depth - 1e-6 ? 'head-head' : dTT * 100 >= depth - 1e-6 ? 'torso-torso' : 'head-torso';
         if (eng) {
           R.interpen.engaged.add(depth);
+          // The firm body (the pair solver's capsules: pelvis, belly, ribs,
+          // chest, shoulder line, head — a little inside the skin, so pressing
+          // contact is allowed): the crude hips–neck capsule above is as thick
+          // at the neck as at the belly and counts a head pressed beside a
+          // neck (over-under, front headlock) as 5-12 cm inside the torso.
+          let core = 0;
+          for (const x of coreCapsules(wi, rec.rests[i]!)) for (const y of coreCapsules(wj, rec.rests[j]!)) core = Math.max(core, x.r + y.r - segSeg(x.a, x.b, y.a, y.b));
+          R.interpen.engagedCore.add(core * 100);
+          if (core > 0.02) note('interpen:engagedCore', { bout: rec.spec.name, t: tLabel, fighter: i, what: 'firm body cm', value: core * 100, layer: an.debug(i).layer });
           if (depth > 5) note('interpen:engaged', { bout: rec.spec.name, t: tLabel, fighter: i, what: `${which} cm`, value: depth, layer: an.debug(i).layer });
         } else if (both || buckets[i] === 'post' || buckets[i] === 'down' || buckets[j] === 'down') {
           R.interpen.standing.add(depth);
@@ -904,6 +916,7 @@ export function summarize(r: AuditResult): Record<string, string> {
   o['interpen.standing (frames >2cm, p99 / max cm)'] = `${pc(ip.standing.over, ip.standing.n)}, ${f2(ip.standing.pct(0.99))} / ${f2(ip.standing.max)}`;
   o['interpen.limbStanding (frames >5cm, max cm)'] = `${pc(ip.limbStanding.over, ip.limbStanding.n)}, ${f2(ip.limbStanding.max)}`;
   o['interpen.engaged (frames >5cm, p99 / max cm)'] = `${pc(ip.engaged.over, ip.engaged.n)}, ${f2(ip.engaged.pct(0.99))} / ${f2(ip.engaged.max)}`;
+  o['interpen.engagedCore (firm-body capsules: frames >2cm, p99 / max cm)'] = `${pc(ip.engagedCore.over, ip.engagedCore.n)}, ${f2(ip.engagedCore.pct(0.99))} / ${f2(ip.engagedCore.max)}`;
   const c = r.contact;
   o['contact.surface (n, median / p90 / max cm, >5cm)'] = `${c.surface.n}, ${f2(c.surface.pct(0.5))} / ${f2(c.surface.pct(0.9))} / ${f2(c.surface.max)}, ${pc(c.surface.over, c.surface.n)}`;
   o['contact.inRange (recorded ≤ 1.6 m punch / 1.9 m kick: n, median / p90 / max cm, >5cm)'] = `${c.inRange.n}, ${f2(c.inRange.pct(0.5))} / ${f2(c.inRange.pct(0.9))} / ${f2(c.inRange.max)}, ${pc(c.inRange.over, c.inRange.n)}`;
@@ -923,5 +936,7 @@ export const AUDIT_BOUTS: AuditBoutSpec[] = [
   { name: 'amateur-novices', seed: 'anim-audit-5', ruleset: 'mma.amateur', fighters: ['arch.brand_new_brawler', 'arch.gym_fit_beginner'] },
   { name: 'mma-heavy-v-fly', seed: 'anim-audit-6', ruleset: 'mma.unified.3r', fighters: ['arch.heavyweight_power_puncher', 'arch.flyweight_volume_striker'] },
   { name: 'mma-bjj-v-judoka', seed: 'anim-audit-7', ruleset: 'mma.unified.3r', fighters: ['arch.bjj_guard_player', 'arch.judoka'] },
+  // Ends in a submission (the winner gets up off the loser; pass 2 of the QA).
+  { name: 'mma-sub-finish', seed: 'anim-sub-7', ruleset: 'mma.unified.3r', fighters: ['arch.champion_complete', 'arch.brand_new_brawler'] },
   { name: 'teams-2v2', seed: 'anim-audit-8', ruleset: 'mma.unified.3r', mode: 'teams', teamOf: [0, 0, 1, 1], fighters: ['arch.regional_pro_allrounder', 'arch.pressure_boxer', 'arch.thai_striker', 'arch.sambo_grappler'] },
 ];

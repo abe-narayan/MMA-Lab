@@ -12,7 +12,7 @@ import type { BoutPresentation, FrameInput } from '../src/presentation/contract'
 import type { GrappleContext } from '../src/presentation/anim/grappleApi';
 import { grappleSolver } from '../src/presentation/anim/grappleApi';
 import {
-  BONE_COUNT, createPose, createWorldPose, forwardKinematics, type Pose, type RestSkeleton,
+  B, BONE_COUNT, createPose, createWorldPose, forwardKinematics, type Pose, type RestSkeleton,
 } from '../src/presentation/rig/skeleton';
 import {
   GENERIC_NODES, GrappleSolverImpl, NODE_POSES, likelyDestination, scaledRest,
@@ -122,6 +122,29 @@ describe('grapple: key poses', () => {
         if (w.limb > LIMB_TOL) bad.push(`${p.id} ${ha}/${hb} limb ${(w.limb * 100).toFixed(0)} cm`);
         const low = Math.min(lowestPoint(bodyCapsules(wa, rest(ha))), lowestPoint(bodyCapsules(wb, rest(hb))));
         if (low < FLOOR_TOL) bad.push(`${p.id} ${ha}/${hb} below the mat ${(low * 100).toFixed(0)} cm`);
+      }
+    }
+    expect(bad).toEqual([]);
+  });
+
+  it('no elbow folds past its range (155°) in any key pose, for any size pairing', () => {
+    // Animation quality pass 2: a grip beside the own shoulder (collar tie,
+    // cage pin, rear body lock) folded the elbow to 160-170°; the shoulder
+    // girdle now makes room (solve.ts, the clavicle escape).
+    const bad: string[] = [];
+    const flex = (w: typeof wa, sh: number, el: number, ha: number): number => {
+      const u = [w.pos[el * 3] - w.pos[sh * 3], w.pos[el * 3 + 1] - w.pos[sh * 3 + 1], w.pos[el * 3 + 2] - w.pos[sh * 3 + 2]];
+      const v = [w.pos[ha * 3] - w.pos[el * 3], w.pos[ha * 3 + 1] - w.pos[el * 3 + 1], w.pos[ha * 3 + 2] - w.pos[el * 3 + 2]];
+      const c = (u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / (Math.hypot(u[0], u[1], u[2]) * Math.hypot(v[0], v[1], v[2]));
+      return Math.acos(Math.max(-1, Math.min(1, c))) * 180 / Math.PI;
+    };
+    for (const p of POSITIONS) {
+      for (const [ha, hb] of SIZES) {
+        solve(req(p.id), ha, hb);
+        for (const [who, w] of [['a', wa], ['b', wb]] as const) {
+          const e = Math.max(flex(w, B.lArm, B.lForeArm, B.lHand), flex(w, B.rArm, B.rForeArm, B.rHand));
+          if (e > 155) bad.push(`${p.id} ${ha}/${hb} ${who} elbow ${e.toFixed(0)}°`);
+        }
       }
     }
     expect(bad).toEqual([]);

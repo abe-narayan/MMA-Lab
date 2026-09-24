@@ -145,6 +145,12 @@ export interface Fade {
   from: Pose;
   t0: number;
   dur: number;
+  /**
+   * Getting up off a body still on the canvas: the old (grapple) pose first
+   * slides out sideways at its own height to where he stands, then the blend
+   * lifts him — so he rises beside the body, not through it.
+   */
+  slide?: boolean;
 }
 
 export interface KnockInfo {
@@ -213,6 +219,33 @@ export interface FighterState {
    * the stance (they then step into it).
    */
   feetSeed: [{ ball: V3; yaw: number } | null, { ball: V3; yaw: number } | null] | null;
+  /**
+   * This frame's weapon as the strike pass aimed it (null: no strike): the aim
+   * point it used, and for a kick the leg's solved ankle target and knee pole.
+   * The contact pass re-solves the weapon on the FINAL poses from these.
+   */
+  weapon: WeaponLock | null;
+  /** The latched contact aim once the contact pass has made it final (identity compare). */
+  contactFinal: V3 | null;
+  /**
+   * Guard / defence hand targets and elbow poles as drawn, in the chest frame,
+   * with their velocities: the critically damped follow of pass 2a (null until
+   * the first standing frame after a reset).
+   */
+  handF: [HandFollow, HandFollow] | null;
+  /** Which side of a lying body the standing root is kept on (±1; 0: none). */
+  clearSide: number;
+}
+
+export interface HandFollow { p: V3; v: V3; q: V3; qv: V3; at: number }
+
+export interface WeaponLock {
+  hand: -1 | 0 | 1;
+  leg: -1 | 0 | 1;
+  aim: V3;
+  /** Kicks: the ankle target and pole the strike pass solved the leg to. */
+  ankle: V3 | null;
+  pole: V3 | null;
 }
 
 export function createFighterState(index: number, id: number, rig: RigInfo, tiers: FighterTiers, seed: number): FighterState {
@@ -228,7 +261,7 @@ export function createFighterState(index: number, id: number, rig: RigInfo, tier
     lastYaw: 0, initialised: false, planted: [true, true], reachW: [1, 1], debugLayer: 'L0',
     delta: createDelta(), spec: createSpec({ ox: 0, oz: 0, yaw: 0, c: 1, s: 0 }), lastSpec: null,
     displayRoot: [0, 0, 0], displayVel: [0, 0, 0], ikTargets: [],
-    cap: null, capAction: null, capDefence: null, actStrike: '', actDefence: '', feetSeed: null,
+    cap: null, capAction: null, capDefence: null, actStrike: '', actDefence: '', feetSeed: null, weapon: null, contactFinal: null, handF: null, clearSide: 0,
   };
 }
 

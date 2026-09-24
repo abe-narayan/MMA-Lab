@@ -25,6 +25,9 @@ import { floorFix } from '../blend';
 import { easeInOut, qAxis, qMul, qRot, type V3 } from './math';
 import type { FlightRequest, PairRequest, StrikeRequest, SubRequest } from './request';
 import { nearestWall, wallPlanes, type WallPlane } from './fence';
+import { TECH } from '../timing';
+import { coreCapsules, segSegClosest } from './capsules';
+import type { RestSkeleton } from '../../rig/skeleton';
 import type { Arena } from '../../../sim';
 
 const EDGE_BY_ID = new Map(GRAPPLING_EDGES.map((e) => [e.id, e] as const));
@@ -52,8 +55,22 @@ interface PairState {
   fadeStart: number;
   fadeDur: number;
   lastTime: number;
-  /** Striker phase memory: once the contact resolves the snapshot stops reporting phase. */
-  strike: { id: number; action: string; phase: number; t: number; total: number } | null;
+  /** The output separation's root pushes as drawn (followed), their velocities, and when. */
+  sepA: V3; sepB: V3; sepVA: V3; sepVB: V3; sepT: number;
+}
+
+/** Natural frequency (rad/s) of the output separation's follow. */
+const SEP_FOLLOW_W = 25;
+
+/** Critically damped follow of `x` (velocity `v`) toward `target` over `dt` s (exact closed form). */
+function springTo(x: V3, v: V3, target: readonly number[], dt: number, w: number): void {
+  const ex = Math.exp(-w * dt);
+  for (let k = 0; k < 3; k++) {
+    const ch = x[k]! - target[k]!;
+    const tmp = (v[k]! + w * ch) * dt;
+    v[k] = (v[k]! - w * tmp) * ex;
+    x[k] = target[k]! + (ch + tmp) * ex;
+  }
 }
 
 function pairKey(e: EngagementSnapshot): string {
@@ -103,7 +120,8 @@ export class GrappleSolverImpl implements GrappleSolver {
     const idB = e.b;
     if (!st) {
       st = {
-        key: res.key, last: new Map(), from: new Map(), fadeStart: t, fadeDur: 0, lastTime: t, strike: null,
+        key: res.key, last: new Map(), from: new Map(), fadeStart: t, fadeDur: 0, lastTime: t,
+        sepA: [0, 0, 0], sepB: [0, 0, 0], sepVA: [0, 0, 0], sepVB: [0, 0, 0], sepT: -1,
       };
       if (!input.discontinuity) {
         // Engaging from the standing animator's pose (what arrived in out*).
@@ -125,11 +143,38 @@ export class GrappleSolverImpl implements GrappleSolver {
       st.key = res.key;
     }
     st.lastTime = t;
-    rememberStrike(st, ctx, req.strike);
 
     const w = st.fadeDur > 0 ? easeInOut((t - st.fadeStart) / st.fadeDur) : 1;
     writeOut(outA, TMP_A, st.from.get(idA), w);
     writeOut(outB, TMP_B, st.from.get(idB), w);
+    // The pair solver keeps each key pose's bodies apart, but a throw's rigid
+    // rotation, a blend between two keys or a cross-fade can still put one
+    // torso inside the other (measured: 3.6 % of engaged frames over 2 cm on
+    // the firm body, up to 21 cm). Push the output apart the same way.
+    // The push follows its target through a critically damped spring (a
+    // throw sweeps the bodies through each other over a few frames, and the
+    // raw push would jump with it); a seek or a fresh engagement starts on it.
+    {
+      const a0: V3 = [outA.rootPos[0], outA.rootPos[1], outA.rootPos[2]];
+      const b0: V3 = [outB.rootPos[0], outB.rootPos[1], outB.rootPos[2]];
+      separateOutput(outA, outB, worldA, worldB, ctx.restA, ctx.restB);
+      const ta: V3 = [outA.rootPos[0] - a0[0], outA.rootPos[1] - a0[1], outA.rootPos[2] - a0[2]];
+      const tb: V3 = [outB.rootPos[0] - b0[0], outB.rootPos[1] - b0[1], outB.rootPos[2] - b0[2]];
+      const dt = Math.min(0.1, Math.max(0, t - st.sepT));
+      const fresh = st.sepT < 0;
+      st.sepT = t;
+      // Stored by fighter (the lower id first), not by role: roles swap on a reversal.
+      const aLo = e.a < e.b;
+      for (const [push, target, vel, out, o0, w, r] of [
+        [aLo ? st.sepA : st.sepB, ta, aLo ? st.sepVA : st.sepVB, outA, a0, worldA, ctx.restA],
+        [aLo ? st.sepB : st.sepA, tb, aLo ? st.sepVB : st.sepVA, outB, b0, worldB, ctx.restB],
+      ] as const) {
+        if (fresh) { push[0] = target[0]; push[1] = target[1]; push[2] = target[2]; vel[0] = vel[1] = vel[2] = 0; }
+        else if (dt > 0) springTo(push, vel, target, dt, SEP_FOLLOW_W);
+        out.rootPos[0] = o0[0] + push[0]; out.rootPos[1] = o0[1] + Math.max(0, push[1]); out.rootPos[2] = o0[2] + push[2];
+        forwardKinematics(w, out, r);
+      }
+    }
     // Nothing under the mat: throw arcs rotate whole bodies about a pivot, and
     // the cross-fades blend bone by bone (a foot went up to 73 cm under it).
     floorFix(outA, worldA, ctx.restA);
@@ -163,6 +208,7 @@ function tierOf(ctx: GrappleContext, id: number): number {
 }
 
 export function buildRequest(ctx: GrappleContext, st: PairState | null): PairRequest {
+  void st;
   const { engagement: e, nextEngagement: n, input, a, b } = ctx;
   const variant = {
     postured: e.posture === 'postured',
@@ -191,13 +237,15 @@ export function buildRequest(ctx: GrappleContext, st: PairState | null): PairReq
     };
   }
 
+  const strikes = strikeRequests(ctx);
   return {
     node: e.node,
     variant,
     mirror,
     flight,
     sub: subRequest(ctx),
-    strike: strikeRequest(ctx, st),
+    strike: strikes.length ? strikes[strikes.length - 1]! : null,
+    strikes,
   };
 }
 
@@ -232,38 +280,53 @@ const GROUND_STRIKES = new Set([
   'tech.gnp_punch', 'tech.gnp_elbow', 'tech.gnp_hammerfist', 'tech.bottom_punch', 'tech.bottom_elbow',
 ]);
 
-function strikeRequest(ctx: GrappleContext, st: PairState | null): StrikeRequest | null {
+/**
+ * The ground strike being thrown now, timed like the standing strikes
+ * (`timing.ts`): the sim reports a ground strike's action with no stage and a
+ * start tick that follows the clock, and carries its contact instant only
+ * while it is pending (then in the strike event). The phase used to be read
+ * from the snapshot's phase / start tick, so every tick restarted it and
+ * flipped the striking hand — measured, most of the one-frame arm and chest
+ * pops of held ground positions (half guard, closed guard, kneeling top).
+ * Now: every contact instant this fighter has in flight (pending on this or
+ * the next frame) or just resolved (events), the catalogue's startup / active
+ * / recovery scaled to the recorded total, and the hand chosen from the
+ * contact instant, so a strike is one continuous motion.
+ */
+function strikeRequests(ctx: GrappleContext): StrikeRequest[] {
   const { a, b, input } = ctx;
+  const now = input.simTime * 1000;
+  const out: { s: StrikeRequest; start: number; c: number }[] = [];
   for (const [who, f] of [['a', a], ['b', b]] as const) {
-    if (!GROUND_STRIKES.has(f.action)) continue;
-    const d = f.actionDetail;
-    let phase: number;
-    const nextF = input.next?.fighters[f.id];
-    if (f.actionStage !== 'none') {
-      phase = f.actionPhase;
-      if (nextF && nextF.action === f.action && nextF.actionStage !== 'none') {
-        phase += (nextF.actionPhase - f.actionPhase) * input.alpha;
-      } else if (d.totalMs > 0) phase += (input.alpha * 100) / d.totalMs;
-    } else if (st?.strike && st.strike.id === f.id && st.strike.action === f.action) {
-      phase = st.strike.phase + ((input.simTime - st.strike.t) * 1000) / Math.max(200, st.strike.total);
-    } else {
-      phase = 0.8;
+    const cands: { c: number; tech: string; total: number }[] = [];
+    for (const fr of [input.frame, input.next]) {
+      const g = fr?.fighters[f.id];
+      if (!fr || !g || !GROUND_STRIKES.has(g.action) || g.actionDetail.contactTick <= fr.tick) continue;
+      cands.push({ c: g.actionDetail.contactTick * 100 + g.actionDetail.contactOffsetMs, tech: g.action, total: g.actionDetail.totalMs });
     }
-    const contactMs = (d.contactTick - d.startTick) * 100 + d.contactOffsetMs;
-    const contactAt = d.totalMs > 0 && contactMs > 0 ? Math.min(0.85, Math.max(0.25, contactMs / d.totalMs)) : 0.5;
-    // Alternate hands strike to strike (the sim's `side` is the stance lead).
-    const side: 'L' | 'R' = (d.startTick & 1) === 1 ? 'L' : 'R';
-    return { who, technique: f.action, phase: Math.min(1, Math.max(0, phase)), contactAt, side };
+    for (const ev of input.events) {
+      if (ev.kind !== 'strike' || ev.actor !== f.id) continue;
+      const tech = (ev as { detail: { technique: string } }).detail.technique;
+      if (GROUND_STRIKES.has(tech)) cands.push({ c: ev.tick * 100 + ev.subMs, tech, total: f.action === tech ? f.actionDetail.totalMs : 0 });
+    }
+    for (const k of cands) {
+      if (out.some((o) => o.s.who === who && Math.abs(o.c - k.c) < 0.5)) continue; // pending and resolved: one strike
+      const spec = TECH.get(k.tech);
+      const su = spec ? spec.startupMs : 220, ac = spec ? spec.activeMs : 50, rc = spec ? spec.recoveryMs : 300;
+      const total = k.total > 0 ? k.total : su + ac + rc;
+      const start = k.c - su * (total / (su + ac + rc));
+      if (now < start || now > start + total) continue;
+      out.push({
+        start, c: k.c,
+        s: {
+          who, technique: k.tech, phase: Math.min(1, Math.max(0, (now - start) / total)),
+          contactAt: Math.min(0.85, Math.max(0.25, su / (su + ac + rc))),
+          side: (Math.round(k.c / 100) & 1) === 1 ? 'L' : 'R',
+        },
+      });
+    }
   }
-  return null;
-}
-
-function rememberStrike(st: PairState, ctx: GrappleContext, s: StrikeRequest | null): void {
-  if (!s) { st.strike = null; return; }
-  const f = s.who === 'a' ? ctx.a : ctx.b;
-  if (f.actionStage !== 'none') {
-    st.strike = { id: f.id, action: f.action, phase: s.phase, t: ctx.input.simTime, total: f.actionDetail.totalMs };
-  }
+  return out.sort((x, y) => x.start - y.start).map((o) => o.s);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +412,58 @@ function isNeutral(p: Pose): boolean {
   if (p.rootPos[0] !== 0 || p.rootPos[1] !== 0 || p.rootPos[2] !== 0) return false;
   for (let i = 0; i < 12; i++) if (Math.abs(p.local[i * 4 + 3] - 1) > 1e-6) return false;
   return true;
+}
+
+/** Firm-body overlap left alone by the output separation (m): pressing contact. */
+const OUT_SLOP = 0.012;
+
+/**
+ * Slide two output poses apart where their firm-body capsules (torso, shoulder
+ * line, head) overlap by more than `OUT_SLOP`: the higher-hipped body moves
+ * (the man on top comes up / off), similar heights share it, and a body up on
+ * its feet only slides horizontally (nobody floats) and is never pushed down.
+ * Continuous in the poses (the push is the overlap), so it adds no pops.
+ */
+function separateOutput(pa: Pose, pb: Pose, wa: WorldPose, wb: WorldPose, ra: RestSkeleton, rb: RestSkeleton): void {
+  forwardKinematics(wa, pa, ra);
+  forwardKinematics(wb, pb, rb);
+  for (let it = 0; it < 4; it++) {
+    // The push: as deep as the deepest overlap, along the depth-weighted mean
+    // of every overlapping pair's separation direction (the single deepest
+    // pair's direction switched from frame to frame as capsules crossed).
+    let depth = 0;
+    let dir: V3 = [0, 0, 0];
+    for (const x of coreCapsules(wa, ra)) {
+      for (const y of coreCapsules(wb, rb)) {
+        const r = segSegClosest(x.a, x.b, y.a, y.b);
+        const d = x.r + y.r - r.d;
+        if (d <= OUT_SLOP * 0.5) continue;
+        depth = Math.max(depth, d);
+        const u = [r.c1[0] - r.c2[0], r.c1[1] - r.c2[1], r.c1[2] - r.c2[2]];
+        const ul = Math.hypot(u[0]!, u[1]!, u[2]!);
+        if (ul > 1e-5) { dir[0] += u[0]! / ul * d; dir[1] += u[1]! / ul * d; dir[2] += u[2]! / ul * d; }
+      }
+    }
+    if (depth <= OUT_SLOP) return;
+    let dl = Math.hypot(dir[0], dir[1], dir[2]);
+    if (dl < 1e-5) { dir = [pa.rootPos[0] - pb.rootPos[0], 0, pa.rootPos[2] - pb.rootPos[2]]; dl = Math.hypot(dir[0], dir[1], dir[2]) || 1; }
+    dir = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
+    const ya = pa.rootPos[1], yb = pb.rootPos[1];
+    // The higher-hipped body takes more of it — continuously.
+    const wA = Math.min(1, Math.max(0, 0.5 + (ya - yb) / 0.3));
+    const push = depth - OUT_SLOP * 0.5;
+    for (const [p, w, r, k, sgn] of [[pa, wa, ra, wA, 1], [pb, wb, rb, 1 - wA, -1]] as const) {
+      if (k <= 0) continue;
+      let d: V3 = [dir[0] * sgn, dir[1] * sgn, dir[2] * sgn];
+      const s = r.statureM / 1.7332;
+      if (p.rootPos[1] > 0.55 * s || d[1] < 0) {
+        const h = Math.hypot(d[0], d[2]);
+        d = h > 1e-3 ? [d[0] / h, 0, d[2] / h] : [0, 0, 0];
+      }
+      p.rootPos[0] += d[0] * push * k; p.rootPos[1] += d[1] * push * k; p.rootPos[2] += d[2] * push * k;
+      forwardKinematics(w, p, r);
+    }
+  }
 }
 
 const FACE_TMP = new Float32Array(16);

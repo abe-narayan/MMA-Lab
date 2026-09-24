@@ -1444,3 +1444,122 @@ rule in `floorFix`: flipping the pole is itself a pop (a grapple test caught a 7
 - The sim's stop-go movement is smoothed, not removed: at 10 Hz the feet still take many short steps.
 - The captured celebration is ACCAD's karate performer (a deep lunge rather than a kneel); the get-up plays at the
   take's speed, so a KO'd man lies still a little longer before a brisk rise.
+
+### Animation quality pass 2
+
+A second pass on the "still wrong" list above, measured with the same harness. Code: `anim/animator.ts`,
+`anim/spec.ts`, `anim/state.ts`, `anim/strikes.ts`, `anim/capStrikes.ts`, `anim/targets.ts`, `anim/clearance.ts`,
+`anim/blend.ts`, `anim/grapple/{solver,solve,strikes,request}.ts`, `rig/ik.ts`, `corner/index.ts`,
+`finish/{index,timeline}.ts`. Harness additions: a firm-body interpenetration metric (`interpen.engagedCore`: the
+grapple capsules without the soft limbs) and a ninth audit bout ending in a submission (`mma-sub-finish`); the
+"before" column is the pre-pass code re-run through the updated harness on the same cached recordings.
+Diagnostics: `scripts/dev/anim-contact-diag.ts` (splits a contact miss into surface / IK / drift / out-of-reach),
+`scripts/dev/anim-pop-diag.ts` (arm pops by cause). Tests: 7 new in `presentation.anim-quality.test.ts`, 1 in
+`presentation.grapple.test.ts` (no key pose folds an elbow past 155°, any size pairing).
+
+**What was wrong, at the root, and the fix.**
+1. *Strikes missed the surface at the contact instant (18 % > 5 cm).* Three causes. (a) The weapon was aimed
+   before the defender's own later corrections (pair clearance, fades, head clearance) moved the target; a final
+   contact pass now re-aims the weapon on the finished poses (the drift of the aim point from when it was
+   aimed), for fists and shins, latching the aim through the contact frame. (b) Blocked punches aimed at a point
+   8.5 cm past the blocking glove; they now aim at the glove's cuff / forearm, just on its surface. (c) Close-range
+   punches (a head that had moved back) fell short: the reach assist looks at where the target actually is and may
+   turn the chest up to 20° to reach it. Strikes start from the knuckles (the old guard point was the glove's
+   centre, a visible hop at launch).
+2. *Grapple elbows folded past 155° (2.7 % of all frames).* A grip right beside its own shoulder (collar tie, cage
+   pin, locked hands of a rear body lock), worst with a big man on a small one. The arm solver now retracts /
+   elevates the clavicle away from a hand closer than a 142° fold would allow (up to 50°), and the grips on the
+   partner's shoulders or limbs are re-solved after (the socket moved with that clavicle). All arm IK also has a
+   smooth lower reach limit (`foldReach`, tanh, C¹) so a target inside the shoulder can no longer ask for 170°.
+   `ELBOW_MAX_FLEX` now documents the anatomical range the tests check; the IK uses the soft fold, not a clamp.
+3. *Knees under the mat (1.35 % of engaged frames, 30 cm).* `floorFix` only lifted feet and hands. It now swings
+   the knee about the hip-ankle axis toward "up" (capped, faded as the knee points down) and then raises the knee
+   first (thigh rotated about the hip, ankle carried), so the knee's hinge is respected and nothing flips.
+4. *Torsos in each other (3.6 % of engaged frames > 2 cm firm).* The pair solver's output is separated along the
+   depth-weighted mean direction of every overlapping core capsule pair (the lower body stays down, an upright one
+   slides horizontally), through a critically damped spring so the separation never pops. Strikes on the ground
+   (ground and pound, knees in the clinch) are now requested from the recorded contacts and the catalogue's
+   startup / active / recovery with a chain per hand — the old code kept only the latest strike and reset the
+   torso twist between two punches (half the engaged pops).
+5. *Arm pops (~100 per fighter-minute).* Guard hands followed a head that moves with the hips and every trunk
+   correction; the elbow pole sat on the reach line of a glove held above the shoulder (undefined plane → flip);
+   hook windups pulled the fist inside the shoulder. Guard hands now follow their target in the chest frame through
+   a critically damped spring (ω 45/s, reset on seeks), trunk corrections carry the hands rigidly with the chest,
+   guard hands keep room in front of the shoulder (at most a 135° fold), the pole is pushed off the reach line
+   (smoothstep in |cos|), and a kick's counter-swing arm fades its forearm twist. Knee-space soft reach for the
+   stepping legs (no knee-angle kink when a step leaves reach).
+6. *Post-submission, the winner rose through the loser.* The standing fighter's drawn root is pushed ≥ 0.5 m
+   off a lying body's hips-head line (sticky side), the fade from the grapple slides him out level over its first
+   40 % before standing him up, and the post-fight script's first point starts off the loser's body line. Walkers
+   passing each other keep the side they met on and follow a tangent-line / arc path (C¹) instead of a radial
+   projection that flipped sides.
+7. *Corner transitions slid a foot up to 38 cm.* The walk to the corner started at the recorded position, the
+   standing animator draws a compressed separation; both ends now use the displayed position, and the facing turns
+   over the last part of the walk instead of in one frame.
+8. *Hip freeze from root smoothing.* The B-spline was replaced by a trailing box average of the linear path over
+   half a tick (`ROOT_SMOOTH`): continuous velocity, a quarter tick of lag instead of half.
+
+**Before / after** (same cached recordings, 9 bouts, 140 399 frames; rows at 0 % both sides omitted):
+
+| Metric | Before | After |
+|---|---|---|
+| footSlide.standing (cm/planted frame: mean / p99 / max / >0.5cm) | 0.08 / 2.07 / 32.89 / 4.60% | 0.08 / 2.01 / 44.85 / 4.38% |
+| footSlide.engaged (cm/planted frame: mean / p99 / max / >0.5cm) | 0.24 / 6.02 / 95.17 / 6.14% | 0.22 / 5.31 / 95.17 / 6.08% |
+| footSlide.corner (cm/planted frame: mean / p99 / max / >0.5cm) | 0.06 / 1.81 / 38.06 / 2.50% | 0.06 / 1.74 / 20.83 / 2.56% |
+| footSlide.post (cm/planted frame: mean / p99 / max / >0.5cm) | 0.28 / 4.01 / 76.47 / 12.57% | 0.29 / 4.10 / 48.72 / 13.28% |
+| hipFreeze (frames frozen / sim-moving frames, longest ms) | 1.31% (564/42960), 100 | 1.05% (451/42960), 83 |
+| joint.elbowOverflex (% fighter-frames) | 2.72% | 0.17% |
+| joint.kneeOverflex (% fighter-frames) | 0.01% | 0.01% |
+| joint.kneeFootTwist (% fighter-frames) | 0.43% | 0.46% |
+| joint.spineTwist (% fighter-frames) | 0.43% | 0.43% |
+| joint.spineSide (% fighter-frames) | 0.41% | 0.41% |
+| pops (unexplained one-frame spikes per fighter-minute) | 118.10 | 42.15 |
+| pops.standing (rot / trans count) | 4402 / 300 | 2535 / 287 |
+| pops.engaged (rot / trans count) | 5336 / 0 | 643 / 2 |
+| pops.corner (rot / trans count) | 66 / 0 | 50 / 0 |
+| pops.post (rot / trans count) | 95 / 0 | 110 / 13 |
+| groundPen.standing (frames >1cm, max cm) | 0.38%, 9.18 | 0.44%, 9.19 |
+| groundPen.engaged (frames >1cm, max cm) | 1.35%, 30.41 | 0.02%, 11.17 |
+| groundPen.corner (frames >1cm, max cm) | 2.10%, 4.53 | 2.08%, 4.53 |
+| groundPen.post (frames >1cm, max cm) | 0.48%, 17.69 | 0.46%, 17.69 |
+| interpen.standing (frames >2cm, p99 / max cm) | 0.06%, 0.00 / 16.55 | 0.06%, 0.00 / 12.01 |
+| interpen.limbStanding (frames >5cm, max cm) | 1.19%, 17.46 | 1.38%, 16.85 |
+| interpen.engaged (frames >5cm, p99 / max cm) | 8.79%, 11.82 / 22.85 | 8.29%, 9.39 / 22.72 |
+| interpen.engagedCore (firm-body capsules: frames >2cm, p99 / max cm) | 3.63%, 4.19 / 21.31 | 1.30%, 2.24 / 20.78 |
+| contact.surface (n, median / p90 / max cm, >5cm) | 305, 1.22 / 6.87 / 33.34, 18.36% | 305, 0.68 / 3.23 / 16.45, 5.25% |
+| contact.aim (IK error: median / p90 / max cm) | 0.95 / 11.08 / 36.73 | 0.96 / 10.04 / 19.08 |
+| disagree.clinchButApart (% of applicable frames) | 2.03% of 29032 | 2.04% of 29032 |
+| disagree.facingOff (% of applicable frames) | 1.50% of 142318 | 1.54% of 142319 |
+| disagree.stanceMismatch (% of applicable frames) | 2.87% of 158311 | 2.83% of 158319 |
+| evaluate ms (2 fighters, all modes: mean / p95) | 0.21 / 0.49 | 0.24 / 0.55 |
+| evaluate ms (2 fighters standing: mean / median / p95) | 0.18 / 0.10 / 0.43 | 0.19 / 0.11 / 0.49 |
+
+(The evaluate rows are both runs back to back under the same machine load; everything else is deterministic.)
+Reading it: pops ÷ 2.8 (engaged ÷ 8), elbow over-flexion ÷ 16, knees under the mat gone, firm-body
+interpenetration ÷ 2.8, contact misses ÷ 3.5 with the median surface distance halved, corner and post-roll foot
+slide worst cases halved, hip freeze down a fifth. Cost: +0.03 ms mean, +0.06 ms p95 for two fighters.
+
+**Captures** (`docs/screenshots/anim2-*.png`, stick figures from the pose data, before row above after):
+`anim2-contact` (strikes at the contact instant), `anim2-submission` (the winner getting up from under a
+submitted man), `anim2-grips` (tie-up key poses for a 1.93 m v 1.65 m pairing: elbow 161-164° → 142°),
+`anim2-guard` (a boxer's lead upper-arm speed over 2.5 s), `anim2-gnp` (ground and pound). Regenerate:
+`scripts/dev/anim2-captures.ts` against the old and the new code, then `anim2-captures.mjs before.json after.json`.
+
+**Tried and backed out.** Rigidly re-attaching shoulder-socket grips after the clavicle escape (broke the throw
+test's hand-to-socket threshold; re-solving the grip arms in rounds works). A doubled knee lift (40 cm knee jumps).
+A per-pair separation without a spring (36-79 cm pops when the overlap set changed). A sticky radial walker
+separation (one 65 cm jump when a walker passed straight through).
+
+**Still wrong.**
+- Contact: 5.25 % of landed / blocked strikes are still > 5 cm off (16 of 305): jabs thrown at very close range
+  where the fist has no room to extend, and a few out of reach even with the chest turn. Just over the 5 % target.
+- Elbows: 0.17 % of frames, all one situation — the defender of a rear-naked choke with a body triangle
+  hand-fighting the choking arm at his own throat (160-163°). Pulling down on an arm at your own neck folds the
+  elbow that far in life too; retargeting the grips lower would leave the socket.
+- Standing pops remain (~2 500 rotation pops, mostly the shins in the captured footwork layer at plant / lift and
+  strike launches the explained-pop filter misses); the post-roll gained a few pops (95 → 110, 13 translation) from
+  the slide-out fade and the walkers' arc path; standing foot-slide worst frame rose (33 → 45 cm, one frame).
+- Firm-body interpenetration 1.30 % of engaged frames (throws, sprawl spin-behind): the spring that removes the
+  separation pops lags fast transitions. At post t = 0 the submission pose itself overlaps 12 cm.
+- Evaluate cost: mean 0.24 ms for two fighters is within the ~0.3 ms budget, but p95 is 0.55 ms (0.49 before);
+  the contact pass, the chest-frame hand spring and the carry-hands re-solve are the new work to trim.
