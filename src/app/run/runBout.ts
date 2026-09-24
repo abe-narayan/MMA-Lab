@@ -29,10 +29,13 @@ import {
   SIM_ENGINE_VERSION, toReplayFile,
   type BoutRun, type SimConfig,
 } from '../../sim';
+// The wire types only: the runner (and with it the engine) is imported
+// lazily by the main-thread fallback, so the first screen does not download
+// the simulation engine it runs in a worker anyway.
 import {
-  createRunner, DEFAULT_PROGRESS_TICKS, fromWire,
+  DEFAULT_PROGRESS_TICKS, fromWire,
   type FromWorker, type FromWorkerWire, type ToWorker,
-} from '../workers/simProtocol';
+} from '../workers/simWire';
 import type { HistoryEntry } from '../store/types';
 
 export interface BoutProgress {
@@ -179,26 +182,31 @@ function runOnMainThread(
     settle = { resolve, reject };
   });
 
-  const runner = createRunner({
-    post: (msg: FromWorker) => {
-      if (msg.type === 'progress') onProgress?.({ tick: msg.tick, round: msg.round });
-      else if (msg.type === 'done') settle.resolve(msg.run);
-      else settle.reject(new Error(msg.message));
-    },
-    yieldControl: () => new Promise<void>((done) => {
-      if (typeof setTimeout === 'function') setTimeout(done, 0);
-      else void Promise.resolve().then(done);
-    }),
+  let cancelled = false;
+  const runnerP = import('../workers/simProtocol').then(({ createRunner }) => {
+    const runner = createRunner({
+      post: (msg: FromWorker) => {
+        if (msg.type === 'progress') onProgress?.({ tick: msg.tick, round: msg.round });
+        else if (msg.type === 'done') settle.resolve(msg.run);
+        else settle.reject(new Error(msg.message));
+      },
+      yieldControl: () => new Promise<void>((done) => {
+        if (typeof setTimeout === 'function') setTimeout(done, 0);
+        else void Promise.resolve().then(done);
+      }),
+    });
+    if (!cancelled) void runner.handle(message);
+    return runner;
   });
-
-  // A cancelled run posts nothing, so the rejection is raised here rather
-  // than waiting for a `done` that will never come.
-  void runner.handle(message);
+  runnerP.catch((err: unknown) => settle.reject(err));
 
   return {
     promise,
     cancel: () => {
-      void runner.handle({ type: 'cancel', id: message.id });
+      // A cancelled run posts nothing, so the rejection is raised here rather
+      // than waiting for a `done` that will never come.
+      cancelled = true;
+      void runnerP.then((runner) => runner.handle({ type: 'cancel', id: message.id }), () => undefined);
       settle.reject(new BoutCancelled());
     },
   };

@@ -18,7 +18,7 @@ import { makeClothDetail, makeLeatherDetail, makeSkinDetail, makeSweatDetail } f
 import { FighterActor, type SharedResources } from './actor';
 
 export { FighterActor } from './actor';
-export { skinDebug } from './skinMaterial';
+export { skinDebug, setSkinVariant, skinVariant, type SkinVariant } from './skinMaterial';
 export { FACE_PRESETS, HAIR_STYLES, HAIR_COLOURS, skinAlbedo, skinPalette } from './appearance';
 
 export interface CharacterFactoryOptions {

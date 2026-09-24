@@ -26,7 +26,7 @@ import {
   EMPTY_QUERY, SORT_LABELS, applyQuery, weightClassesPresent,
   type DatabaseQuery, type SortKey,
 } from '../model/filterModel';
-import { DISCIPLINE_LABELS, weightClassLabel } from '../model/fieldMeta';
+import { DISCIPLINE_LABELS, topDisciplineLabel, weightClassLabel } from '../model/fieldMeta';
 import { metresToFeetInches, metresToInches } from '../model/units';
 import { previewImport, type ImportPreview } from '../model/importModel';
 import { NAME_MAX } from '../store/validate';
@@ -203,9 +203,13 @@ export function FighterDatabase({
         <div>
           <h1 className="page-title">Fighters</h1>
           <p className="page-sub">
-            {records.length} fighters: {records.length - custom} built-in archetypes (read-only presets — open
-            one and save to make your own copy) and {custom} of your own.{' '}
-            <span className="fdb-count mono">showing {visible.length} of {records.length}</span>
+            {records.length - custom} built-in presets and {custom} of your own. Presets are read-only:
+            open one and save it to make your own copy.
+            {visible.length !== records.length
+              ? <>{' '}<span className="fdb-count">Showing {visible.length} of {records.length}.</span></>
+              : null}
+            {/* Announced when a filter changes the list (visible only while filtered). */}
+            <span className="visually-hidden" role="status">showing {visible.length} of {records.length} fighters</span>
           </p>
         </div>
         <div className="page-actions">
@@ -364,7 +368,7 @@ export function FighterDatabase({
                       {s.reachCm} cm <span className="fdb-alt">{metresToInches(s.reachCm / 100)}</span>
                     </td>
                     <td className="mono fdb-when">{r.builtIn ? '—' : r.updatedAt.slice(0, 10)}</td>
-                    <td>{s.topDiscipline}</td>
+                    <td>{topDisciplineLabel(s.topDiscipline)}</td>
                     <td className="fdb-row-actions">
                       <Button size="sm" icon={<IconEdit />} onClick={() => onEdit(r)}>
                         {r.builtIn ? 'Open' : 'Edit'}

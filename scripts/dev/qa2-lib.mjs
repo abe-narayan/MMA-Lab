@@ -8,6 +8,7 @@
 import { chromium } from 'playwright';
 import { freemem, totalmem } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { captureGoto } from './capture-url.mjs';
 const MIME = { js: 'text/javascript', mjs: 'text/javascript', css: 'text/css', html: 'text/html', json: 'application/json', wasm: 'application/wasm', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', svg: 'image/svg+xml', hdr: 'application/octet-stream', bin: 'application/octet-stream', ktx2: 'image/ktx2', glb: 'model/gltf-binary' };
 
 // QA2_SNAP=1 serves a production build (scratchpad/snap, from `vite build --outDir`) through request interception
@@ -39,6 +40,7 @@ export async function launch({ width = 1440, height = 900, webgpu = true } = {})
     });
   }
   const page = await context.newPage();
+  captureGoto(page); // ?capture=1: QA switches in production builds (capture-url.mjs)
   const log = { console: [], errors: [], warnings: [] };
   page.on('console', (m) => {
     const t = `[${m.type()}] ${m.text()}`.slice(0, 600);
@@ -68,7 +70,7 @@ export async function launch({ width = 1440, height = 900, webgpu = true } = {})
   const watchdog = setInterval(() => {
     const r = ramPct();
     peakRam = Math.max(peakRam, r);
-    if (r > 90) {
+    if (r > Number(process.env.QA2_RAM_CAP ?? 90)) {
       console.error(`[qa2] machine RAM ${r.toFixed(1)}% > cap: aborting run`);
       browser.close().finally(() => process.exit(4));
     }

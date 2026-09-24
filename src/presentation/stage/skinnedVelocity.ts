@@ -31,6 +31,7 @@ import { NodeMaterial, type Object3D, type Skeleton, type SkinnedMesh } from 'th
 import {
   add, attribute, positionGeometry, positionPrevious, reference, referenceBuffer,
 } from 'three/tsl';
+import { exposeDevGlobal } from '../devFlags';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -78,7 +79,7 @@ export function installSkinnedVelocityFix(): void {
       );
       (positionPrevious as N).assign(bindMatrixInverse.mul(skinned).xyz);
       patchedBuilds++;
-      if (typeof window !== 'undefined') (window as unknown as { __skinVelocityFix?: number }).__skinVelocityFix = patchedBuilds;
+      exposeDevGlobal('__skinVelocityFix', patchedBuilds);
     }
     return result;
   };

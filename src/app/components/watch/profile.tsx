@@ -9,6 +9,7 @@
  * docs/design/WATCH_REPLAY_PASS.md.
  */
 import { Profiler, type ReactNode } from 'react';
+import { devParam } from '../../devFlags';
 
 interface Region {
   commits: number;
@@ -20,7 +21,8 @@ interface WatchProfile {
   reset(): void;
 }
 
-const enabled = typeof location !== 'undefined' && new URLSearchParams(location.search).get('profile') === '1';
+// Gated like every QA switch (development, or `?capture=1`): src/app/devFlags.ts.
+const enabled = devParam('profile') === '1';
 
 function profile(): WatchProfile {
   const w = window as unknown as { __watchProfile?: WatchProfile };

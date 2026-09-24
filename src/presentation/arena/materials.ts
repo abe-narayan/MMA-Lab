@@ -26,15 +26,17 @@ export const toView = (dir: N): N => cameraViewMatrix.mul(vec4(dir, 0)).xyz.norm
 /**
  * For additive "air" layers (haze, beams, halos). The stage's scene pass
  * writes a packed view normal (for GTAO) and motion vectors into extra render
- * targets with no blending, so a transparent layer replaces whatever surface is
- * behind it there: a beam crossing the canvas stamped its cone normals into the
- * AO input and showed as a hard-edged band of different occlusion. These layers
- * write the floor's normal (straight up) instead, which is what is behind them
- * on every shot where they cover the canvas.
+ * targets. A beam crossing the canvas once stamped its cone normals into the
+ * AO input (a hard-edged band of different occlusion); these layers must leave
+ * both targets exactly as the surface behind them wrote them.
  */
 export function airMRT(): N {
   // `output` too: without a pass MRT (Low, the dev page) this becomes the whole output.
-  return mrt({ output, normal: toView(vec3(0, 1, 0)).mul(0.5).add(0.5) });
+  // Normal and velocity are blended with the material's blending (stage
+  // pipeline, MaterialBlending), so these additive/transparent layers write
+  // zero with zero alpha: whatever is behind them keeps its own normal and
+  // motion vector, instead of receiving an added floor normal and velocity.
+  return mrt({ output, normal: vec4(0), velocity: vec4(0) });
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +246,16 @@ export function floorMaterial(o: FloorOptions): THREE.MeshStandardNodeMaterial {
 }
 
 let _slope: THREE.DataTexture | null = null;
+
+/**
+ * True for textures shared by every venue (the slope field). A venue's
+ * `dispose` leaves them alone: the next venue may already be drawing with
+ * them when the old one is disposed (the presenter disposes a bout's set
+ * after any warm-up that may still compile it).
+ */
+export function isSharedArenaTexture(t: unknown): boolean {
+  return t !== null && t === _slope;
+}
 
 /**
  * 128^2 tileable gradient field (RG = d/dx, d/dz of a sum of integer-frequency

@@ -26,6 +26,8 @@ import type { HistoryEntry } from '../store/types';
 import type { MatchStoreApi } from '../run/matchStore';
 import { runBout } from '../run/runBout';
 import { clockOf, methodLabel, winnerLabel } from './BoutResult';
+import { RULESET_LABELS } from '../model/matchModel';
+import type { RulesetId } from '../../sim';
 import { Button, EmptyState, useConfirm, useToast, IconHistory } from '../ui';
 
 export interface HistoryProps {
@@ -259,7 +261,7 @@ export function History({
                       {' · '}{methodLabel(entry.result.method)}
                       <span className="mono"> · R{entry.result.round} {clockOf(entry.result.timeSeconds)}</span>
                     </td>
-                    <td className="mono">{rulesetId}</td>
+                    <td title={rulesetId}>{RULESET_LABELS[rulesetId as RulesetId] ?? rulesetId}</td>
                     <td className="mono fdb-when">{entry.playedAt.slice(0, 16).replace('T', ' ')}</td>
                     <td className="ms-verdict-cell">
                       {verdict === undefined ? <span className="ms-dim">not checked</span> : null}

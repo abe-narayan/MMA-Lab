@@ -377,6 +377,25 @@ describe('presenter', () => {
     expect(log).not.toContain('anim.reset');
   });
 
+  it('a quality switch compiles the new preset off the frame loop (QA2 #2)', async () => {
+    const log: string[] = [];
+    const stage = fakeStage(log);
+    let resolveCompile: () => void = () => undefined;
+    stage.precompile = () => { log.push('stage.precompile'); return new Promise<void>((r) => { resolveCompile = r; }); };
+    const p = createPresenter({ ...fakeModules(log), createStage: async () => stage, now: () => 0 });
+    await p.mount(host);
+    await p.setBout(bout);
+    log.length = 0;
+    p.setQuality('ultra');
+    expect(log).toContain('stage.setQuality');
+    expect(log).toContain('stage.precompile');
+    // The post chains are warmed only once the scene's programs are built.
+    expect(log).not.toContain('stage.render');
+    resolveCompile();
+    await p.qualityWarmUp;
+    expect(log.indexOf('stage.render')).toBeGreaterThan(log.indexOf('stage.precompile'));
+  });
+
   it('snaps every filter on a discontinuity and cuts the temporal history', async () => {
     const log: string[] = [];
     const p = createPresenter({ ...fakeModules(log), createStage: async () => fakeStage(log), now: () => 0 });

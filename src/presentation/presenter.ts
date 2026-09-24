@@ -37,9 +37,10 @@ import type {
 } from './contract';
 import type { Arena } from '../sim';
 import type { Object3D, Scene, Texture } from 'three';
+import { DEV_SWITCHES, devParam, devParams } from './devFlags';
 import { createPose, createWorldPose, forwardKinematics, B, type Pose, type WorldPose } from './rig/skeleton';
 import { createArenaSet } from './arena';
-import { createCharacterFactory } from './character';
+import { createCharacterFactory, setSkinVariant } from './character';
 import { createAnimator } from './anim';
 import {
   attachFreeCamera, createCameraDirector, isBroadcastDirector, makeCameraArena, type ReplayState,
@@ -73,6 +74,8 @@ export interface StageLike {
   warmUp(): void;
   /** The post warm-up as separate steps, so the page can paint between them (optional). */
   warmUpSteps?(): (() => void)[];
+  /** The whole warm-up (scene programs, first frame, post chains) as one queued job (optional). */
+  warmUpAll?(onProgress?: (loaded: number, total: number) => void, between?: () => Promise<void>): Promise<{ sceneMs: number; postMs: number }>;
   /** Compile the scene's materials without drawing (optional: fakes and old stages lack it). */
   precompile?(onProgress?: (loaded: number, total: number) => void): Promise<void>;
   info(): { drawCalls: number; triangles: number; internalWidth: number; internalHeight: number };
@@ -80,6 +83,8 @@ export interface StageLike {
   gpuIdle?(): Promise<void>;
   /** The preset this machine should start on (optional: fakes lack it). See stage/profiles.ts. */
   recommendQuality?(): Promise<QualityRecommendation>;
+  /** The near-fence lens for a camera state (optional; stage/pipeline.ts `fenceLensFor`). */
+  fenceLens?(s: CameraState): { focus: number; aperture: number };
   /** GPU ms of the last timed frame and the dynamic-resolution mode (optional). */
   readonly lastGpuMs?: number;
   readonly dynamicResolutionMode?: string;
@@ -110,7 +115,8 @@ const defaultDeps: PresenterDeps = {
     const { Stage } = await import('./stage/index');
     // `?gpuTiming=1` turns on GPU timestamp queries so QA scripts can read
     // per-frame GPU time with other GPU work on the machine factored out.
-    const q = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+    // QA switches are live only in development or with `?capture=1` (devFlags.ts).
+    const q = devParams();
     const gpuTiming = q.get('gpuTiming') === '1';
     // `?fixedRes=1` holds the preset's (or `?scale=`) internal scale: per-shot cost comparisons.
     return Stage.create(container, {
@@ -148,8 +154,7 @@ export function postOverrides(spec: string | null): Partial<PassToggles> | undef
  * compared against the baseline or ruled out when something breaks.
  */
 function forcedPlaceholders(): Partial<PresenterDeps> {
-  if (typeof location === 'undefined') return {};
-  const v = new URLSearchParams(location.search).get('placeholders');
+  const v = devParam('placeholders');
   if (!v) return {};
   const all = v === 'all' || v === '1';
   const has = (m: string): boolean => all || v.split(',').includes(m);
@@ -221,6 +226,8 @@ export class Presenter implements Presenter3D {
   private quality: QualitySettings;
   private bout: BoutPresentation | null = null;
   private arena: ArenaSet | null = null;
+  /** QA (perf-ab.mjs fencelens): false leaves the fence's lens where it is instead of following the shot. */
+  fenceLensLive = true;
   private factory: CharacterFactory | null = null;
   private actors: CharacterActor[] = [];
   private overlays: DebugSkeletonActor[] = [];
@@ -268,6 +275,8 @@ export class Presenter implements Presenter3D {
   async mount(container: HTMLElement): Promise<{ backend: 'webgpu' | 'webgl2' }> {
     this.container = container;
     this.stage = await this.deps.createStage(container, this.quality);
+    // WebGL2 gets the lighter skin graph (cold compile cost; performance pass 2).
+    setSkinVariant(this.stage.backend === 'webgl2' ? 'lite' : 'full');
     this.watchDeviceLoss(this.stage);
     return { backend: this.stage.backend };
   }
@@ -394,7 +403,8 @@ export class Presenter implements Presenter3D {
     await yieldToPage();
     if (token !== this.boutToken) return;
     // Never orphan a referee already in the scene (review M4).
-    this.referee?.dispose();
+    const oldRef = this.referee;
+    if (oldRef) this.retire([oldRef.object3d], [() => oldRef.dispose()]);
     this.referee = createRefereeActor(bout, hardCameraAngle(bout), {
       factory: this.modules.character === 'module' ? this.factory : null, quality: this.quality,
     });
@@ -403,7 +413,13 @@ export class Presenter implements Presenter3D {
     const stage = this.stage;
     if (stage) {
       stage.scene.add(this.arena.object3d);
-      stage.scene.environment = (this.arena.environment as Texture | null) ?? null;
+      // The venue's own PMREM node when it has one (disposed with the venue);
+      // a bare texture makes three build an undisposed PMREM generator per
+      // bout (Leak fix, PHASE8_NOTES).
+      const envNode = (this.arena as Partial<Pick<VenueSet, 'environmentNode'>>).environmentNode ?? null;
+      const scene = stage.scene as Scene & { environmentNode: unknown };
+      scene.environmentNode = envNode;
+      stage.scene.environment = envNode ? null : (this.arena.environment as Texture | null) ?? null;
       for (const a of this.actors) stage.scene.add(a.object3d);
       stage.scene.add(this.referee.object3d);
       if (this.corner) stage.scene.add(this.corner.object3d);
@@ -416,7 +432,8 @@ export class Presenter implements Presenter3D {
    * post-fight staging (`finish/`), for the current bodies and recording.
    */
   private buildCorner(): void {
-    this.corner?.dispose();
+    const oldCorner = this.corner;
+    if (oldCorner) this.retire([oldCorner.object3d], [() => oldCorner.dispose()]);
     this.corner = null;
     this.finish = null;
     if (!this.bout) return;
@@ -502,7 +519,8 @@ export class Presenter implements Presenter3D {
   private buildActors(): void {
     const bout = this.bout;
     if (!bout || !this.factory) return;
-    for (const a of this.actors) a.dispose();
+    const old = this.actors;
+    this.retire(old.map((a) => a.object3d), old.map((a) => () => a.dispose()));
     this.actors = bout.fighters.map((_, i) => {
       try {
         return this.factory!.create(bout, i, this.quality);
@@ -529,16 +547,41 @@ export class Presenter implements Presenter3D {
     if (this.stage) for (const o of this.overlays) this.stage.scene.add(o.object3d);
   }
 
-  private clearBout(): void {
-    for (const a of this.actors) a.dispose();
-    for (const o of this.overlays) o.dispose();
+  /**
+   * Scene warm-ups in flight (`warmUpAsync`). three's `compileAsync` collects
+   * the scene up front and builds each object's render state over the
+   * following frames; an object disposed in between gets render objects
+   * afterwards that nothing frees (they pin its whole bout and re-upload its
+   * geometry). So a bout's objects leave the scene at once but are disposed
+   * only when the warm-ups running at that moment have settled (`retire`).
+   * Leak fix, docs/design/PHASE8_NOTES.md.
+   */
+  private readonly warmUps = new Set<Promise<unknown>>();
+
+  /** Take `objects` out of the scene now; run `disposers` once no warm-up that may still compile them is running. */
+  private retire(objects: readonly (Object3D | null | undefined)[], disposers: readonly (() => void)[], now = false): void {
+    for (const o of objects) o?.removeFromParent();
+    const run = (): void => {
+      for (const d of disposers) {
+        try { d(); } catch (err) { console.warn('[presenter] dispose failed', err); }
+      }
+    };
+    if (now || this.warmUps.size === 0) { run(); return; }
+    void Promise.allSettled([...this.warmUps]).then(run);
+  }
+
+  private clearBout(now = false): void {
+    const { actors, overlays, arena, referee, corner } = this;
+    this.retire(
+      [...actors.map((a) => a.object3d), ...overlays.map((o) => o.object3d), arena?.object3d, referee?.object3d, corner?.object3d],
+      [...actors.map((a) => () => a.dispose()), ...overlays.map((o) => () => o.dispose()),
+        () => arena?.dispose(), () => referee?.dispose(), () => corner?.dispose()],
+      now,
+    );
     this.actors = [];
     this.overlays = [];
-    this.arena?.dispose();
     this.arena = null;
-    this.referee?.dispose();
     this.referee = null;
-    this.corner?.dispose();
     this.corner = null;
     this.finish = null;
     this.animator = null;
@@ -618,6 +661,14 @@ export class Presenter implements Presenter3D {
     if (this.stage) {
       this.stage.setCameraState(shot);
       this.stage.setReplay(input.replay);
+      // The chain-link's in-material lens follows this shot's focus and
+      // aperture (it writes no depth, so the stage's DoF cannot blur it).
+      const fl = this.fenceLensLive ? (this.arena as Partial<Pick<VenueSet, 'fenceLens'>> | null)?.fenceLens : undefined;
+      const lens = fl ? this.stage.fenceLens?.(shot) : undefined;
+      if (fl && lens) {
+        fl.focus.value = lens.focus;
+        fl.aperture.value = lens.aperture;
+      }
     }
 
     const cap = this.quality.maxCharacterLOD;
@@ -659,7 +710,8 @@ export class Presenter implements Presenter3D {
       this.buildActors();
       if (this.stage) for (const a of this.actors) this.stage.scene.add(a.object3d);
       this.animator?.setBout(this.bout, this.actors.map((a) => a.rest));
-      this.referee?.dispose();
+      const oldRef = this.referee;
+      if (oldRef) this.retire([oldRef.object3d], [() => oldRef.dispose()]);
       this.referee = createRefereeActor(this.bout, hardCameraAngle(this.bout), {
         factory: this.modules.character === 'module' ? this.factory : null, quality: this.quality,
       });
@@ -668,7 +720,21 @@ export class Presenter implements Presenter3D {
       if (this.stage && this.corner) this.stage.scene.add(this.corner.object3d);
     }
     if (this.stage) this.stage.applyShadowPolicy(this.stage.scene);
+    // Compile the new preset's programs off the main thread, as at load: until
+    // it is done the canvas holds its last frame (Stage.render is held while
+    // the warm-up runs) instead of freezing the page on the first frame's
+    // synchronous shader builds (QA2 #2: 0 frames for 7 s on WebGPU, a 15.9 s
+    // long task on WebGL2). While `setBout` is in flight its own warm-up
+    // follows and covers the new preset.
+    if (this.stage && this.bout && !this.building && (this.stage.warmUpAll || this.stage.precompile)) {
+      this.qualityWarmUp = this.warmUpAsync().then(() => undefined, (err) => {
+        console.warn('[presenter] quality warm-up failed:', err);
+      });
+    }
   }
+
+  /** The warm-up started by the last quality change (tests, QA). */
+  qualityWarmUp: Promise<void> | null = null;
 
   setFlags(flags: { debug: boolean; labels: boolean }): void {
     const changed = flags.debug !== this.flags.debug;
@@ -702,8 +768,20 @@ export class Presenter implements Presenter3D {
    * `update` (so the first shot's camera is in place).
    */
   async warmUpAsync(onProgress?: (loaded: number, total: number) => void): Promise<{ sceneMs: number; postMs: number }> {
+    const run = this.warmUpInner(onProgress);
+    this.warmUps.add(run);
+    try {
+      return await run;
+    } finally {
+      this.warmUps.delete(run);
+    }
+  }
+
+  private async warmUpInner(onProgress?: (loaded: number, total: number) => void): Promise<{ sceneMs: number; postMs: number }> {
     const stage = this.stage;
     if (!stage) return { sceneMs: 0, postMs: 0 };
+    // The real stage runs the whole warm-up as one job on its GPU queue.
+    if (stage.warmUpAll) return stage.warmUpAll(onProgress, yieldToPage);
     const t0 = this.deps.now();
     if (stage.precompile) {
       try {
@@ -754,7 +832,9 @@ export class Presenter implements Presenter3D {
   }
 
   private publishStats(): void {
-    if (typeof window === 'undefined') return;
+    // A QA readout: built every frame only when the switches are on (development
+    // or `?capture=1`), so production pays nothing for it (audit H3/H4).
+    if (typeof window === 'undefined' || !DEV_SWITCHES) return;
     (window as unknown as { __stats: unknown }).__stats = {
       ...this.stats(),
       level: this.quality.level,
@@ -803,7 +883,8 @@ export class Presenter implements Presenter3D {
 
   dispose(): void {
     this.boutToken++;
-    this.clearBout();
+    // The renderer goes with the presenter: nothing is left to compile the old objects.
+    this.clearBout(true);
     // A factory with a dispose() (none today) frees its shared textures here.
     (this.moduleFactory as { dispose?: () => void } | null)?.dispose?.();
     this.moduleFactory = null;

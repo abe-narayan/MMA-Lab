@@ -62,7 +62,7 @@ for (const [a, b] of [['qa2.extreme', 'arch.champion_complete'], ['__proto__', '
   const has = opts.some(([v]) => v === a) && opts.some(([v]) => v === b);
   if (!has) { console.log('bout', a, b, 'not selectable'); continue; }
   await page.selectOption('#ms-slot-0', a); await page.selectOption('#ms-slot-1', b);
-  await page.getByRole('button', { name: 'Run bout' }).click();
+  await page.getByRole('button', { name: 'Run bout' }).first().click();
   const t0 = Date.now();
   try { await page.waitForFunction(() => /Result|Winner|decision|KO|TKO|Draw/i.test(document.querySelector('[aria-current=page]')?.textContent ?? '') || location.hash, null, { timeout: 5000 }); } catch { /* */ }
   for (let i = 0; i < 60; i++) { await sleep(1000); const cur = await page.evaluate(() => document.querySelector('.nav-item[aria-current=page]')?.id); if (cur === 'tab-result') break; }

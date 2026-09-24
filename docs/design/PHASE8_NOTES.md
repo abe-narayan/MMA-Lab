@@ -1515,6 +1515,155 @@ chin and arms on the corner shot.
 - The fence writes no depth, so the live DoF cannot model it as a near object (arena).
 - On the corner shot the cornermen can stand between the lens and the seated fighter (corner/camera).
 
+### Performance pass 2
+
+Goals: a WebGL2 cold first load reliably under ~20 s; cheaper close shots at a fixed 0.7 scale; the corner
+camera not shooting through the cornermen; the near-fence lens blur driven by the shot. Then, mid-pass, two
+QA2 bugs (docs/design/QA2_FINDINGS.md #1, #2). Code: `character/skinMaterial.ts`, `character/actor.ts`,
+`stage/programSharing.ts`, `stage/pipeline.ts`, `stage/index.ts`, `presenter.ts`, `camera/director.ts`,
+`camera/occlusion.ts`, `arena/lighting.ts` (QA2 #2 only). Tests: `tests/presentation.perf2.test.ts` (new, 13),
+a corner test in `presentation.cam-quality.test.ts`, a quality-switch test in `presentation.stage.test.ts`.
+Tools: `load-timeline.mjs --dump <dir>` (writes every GLSL source a load compiles, with an index of
+duplicates and sizes), `perf-ab.mjs --only skindup|fencelens`, `perf-compare-shots.mjs --ab corner|fencelens|skindup`.
+Screenshots: `docs/screenshots/perf2-*.png`.
+
+**1. WebGL2 cold load.** A `--dump` of the cold load showed three 113 KB skin programs, ~8 s of FXC each on
+the busy machine (the gaps between the driver calls are the compiles: three's `compileAsync` waits for each
+program before it starts the next):
+- *The skin's surface graph was in the program twice.* The lookdev debug view (`skinDebug`) chose the colour
+  with a TSL `select` whose branches carried statements; TSL emits that as `if/else` and builds every node
+  first reached inside a branch there, so the whole colour graph (head features, cuts, tattoos, the noises)
+  was generated inside the `else` and again at top level for the normals and roughness. The debug view is now
+  arithmetic (a `mix` with `step`s). This was also real GPU work on WebGPU (see 2).
+- *The duplicate was the helper order* (as suspected in the first pass): the first build of a TSL function in
+  the page registers its callees in a different order from every later build, so `mx_floor`, `mx_fade`,
+  `mx_select` ... came out in another order and the code differed. `programSharing.ts` now emits function
+  definitions in a canonical order (`orderCodes`: dependencies first, ties by name), a function only of the
+  set of functions. This applies to every material and to WGSL too.
+- *A lighter WebGL2 skin* (`setSkinVariant('lite')`, set by the presenter on WebGL2; `?skinLite=1|0` forces
+  either): the sub-millimetre follicles, strands and brow hairs at their sub-pixel mean (which is what the
+  full graph shows at broadcast distance anyway), no beard clump noise, no lip lines, the clear coat on the
+  skin normal (no separate bead normal map), one specular lobe, and the tattoo blackwork from one jittered
+  cell instead of a 27-cell Worley search. WebGPU keeps the full graph (the lite one measured the same
+  there, 0.05 ms: these terms cost compile time, not frame time).
+- *The warm-up compiles in four lanes* (`compileLanes`, `COMPILE_LANES`): the scene is split by material
+  (and morph variant) into four groups, one `compileAsync` each, started together, so ANGLE's parallel
+  compile has up to four programs in flight instead of one.
+
+The skin program went 112.6 KB (×3, ~8 s each) → 88.6 KB (×2, ~4.2 s) → 80.3 KB (×2, ~2.1 s). The second
+program is legitimate: LOD1/2 bodies have no morph targets (a different vertex stage).
+
+| WebGL2, fresh profile, `--cold` (driver cache defeated), busy machine | Time to live | Longest main-thread task |
+| --- | --- | --- |
+| Start of this pass | 38.9 s | 1.63 s |
+| + graph emitted once, canonical helper order | 24.5 s | 1.75 s |
+| + lite WebGL2 skin | 19.5 s | 1.69 s |
+| + four compile lanes (all of the above) | 15.7 s | 1.90 s |
+| Final build, two more cold runs | 9.7 s, 16.0 s | 1.97 s, 1.93 s |
+| Final build, warm driver cache | 19.2 s (the machine was saturated by another agent's 5000-bout batch) | 1.98 s |
+| WebGPU, fresh profile | 17.8 s | 0.84 s |
+
+Timelines: `perf2-webgl2-cold-before.png`, `perf2-webgl2-cold-after.png`. The longest task (~1.9 s) is the
+post chain's first draw on WebGL2 (not part of `compileAsync`).
+
+**2. Close shots (WebGPU).** Same-frame A/B (`perf-ab.mjs --only skindup`: the bodies' skin swapped for the
+same graph built with the old debug `select`, blocks alternated, 5 rounds, fixed 0.7 scale, 2560×1440, busy GPU):
+
+| Shot | Total: old → new | Scene pass: old → new |
+| --- | --- | --- |
+| CAGESIDE | 24.87 → 23.74 ms | 10.07 → 8.92 ms |
+| MAIN TIGHT | 21.47 → 20.32 ms | 8.37 → 7.19 ms |
+| CAGESIDE LOW (ground) | 24.73 → 23.54 ms | 9.90 → 8.73 ms |
+| CORNER | 22.15 → 20.89 ms | 9.11 → 7.83 ms |
+| FINISH | 23.90 → 21.37 ms | 10.46 → 8.02 ms |
+| MAIN | 20.15 → 19.44 ms | 7.04 → 6.34 ms |
+
+That is −11 % to −23 % of the scene pass (the whole skin was ~28 % of it). The picture is the same (the graph
+computes the same values). The GPU was about 2.4× slower than quiet during these runs: in a quiet moment the
+same CAGESIDE frame measured 9.5 ms total (scene pass 3.7, GTAO 3.1, TAAU 1.0).
+
+Where the rest of the CAGESIDE scene pass goes (in-page, hide one part at a time, ABAB blocks; busy GPU,
+scene pass 8.8 ms): skin 2.5, **the near fence 1.7** (full-screen translucent veil with PBR lighting and
+blending into the MRT targets; unlit it costs 0.8, so the lighting is about half), kit 0.56, haze 0.46,
+crowd figures 0.45, crowd cards 0.45, hair 0.36-0.4, shadow-map update 0.24, eyes 0.02. Tried and not kept:
+splitting the instanced crowd into 12 azimuth sectors so frustum culling drops the ones behind the lens
+(0.05 ms, noise: the figures are not vertex-bound); dropping the skin's clear coat or its scattering
+(nothing measurable). **GTAO costs as much as the scene pass on the close shots** (7.5 vs 8.8 ms busy, 3.1
+vs 3.7 quiet) and does not depend on its radius (halving it: 0.04 ms): it is 36 depth taps per covered pixel.
+
+**3. The corner camera and the cornermen.** The between-rounds handheld (`director.ts`, `case 'corner'`,
+inside the cage 1.9 m in front of the stool) dodged only when the referee or a cornerman hid more than 30 %
+of the fighter's head, chest and hips. A kneeling coach 0.84 m in front of the stool hides none of those
+three points, yet from 1.9 m his back fills a quarter of the frame (`phase8-perf-corner.png`). Now
+(`CORNER_AVOID`, `cornerSamples`, `inflateCapsules`): the people in the cage count with a 10 cm margin for
+clothes and lean (arms only from shoulder to elbow: a hand on the fighter's knee is part of the picture);
+the samples cover all of him, not only three points (his shoulders and hips either side, his lap toward the
+lens, recomputed for each candidate spot); the operator reacts to 5 % hidden instead of 30 %, and may walk
+±0.3 rad, lift the camera 25-40 cm to shoulder height or cross to the fighter's other side. A coach's head at
+the foot of the picture beside the fighter is left alone (over the shoulder is how a corner looks; counting
+the whole picture around him too left no clear spot at all). The staging in `corner/` is unchanged. Same
+frame, avoidance off / on: `perf2-corner.png`.
+Measured over every break of four recorded bouts with the real corner staging (`cam-audit-lib`
+`animatedBodies`), share of the fighter hidden by the crew on the corner shot:
+
+| Bout | Before: median / p95 | After: median / p95 | Frames > 30 % hidden: before → after |
+| --- | --- | --- | --- |
+| MMA octagon 30 | 0.27 / 0.36 | 0 / 0.18 | 31 % → 3 % |
+| K-1 ring 16 | 0.18 / 0.36 | 0 / 0 | 10 % → 0 |
+| MMA octagon 25 (KO) | 0.27 / 0.36 | 0 / 0 | 47 % → 0 |
+| Boxing ring 20 | 0.27 / 0.36 | 0 / 0.18 | 25 % → 4 % |
+
+What remains is transient (a cornerman walking in with the stool). Test: `camera quality: the corner between
+rounds`. `director.cornerAvoid = false` restores the old placement (QA).
+
+**4. Near-fence lens from the shot.** The presenter now sets `VenueSet.fenceLens` every frame from
+`Stage.fenceLens(shot)` (`fenceLensFor` in `pipeline.ts`): focus = the shot's focus distance; aperture such
+that a fence 0.4 m from the lens gets the same blur (in metres, at that distance) as the stage's live DoF
+gives any other object there (its CoC model, `liveDofParams`), never below the arena's 9 mm. So a cageside
+handheld's veil matches the rest of its depth of field (12 mm there), and the hard cameras, focused on the
+fighters 8-10 m away, now soften a fence panel in front of them the way a long lens does (the old fixed 3.5 m
+focus left anything beyond 3.5 m sharp): `perf2-fence-lens-main.png` (the near-left panel), cageside
+`perf2-fence-lens-cageside.png` (almost identical: the veil there was already right). Cost: two uniform
+writes per frame; the in-page A/B moved ±1.0 ms either way on a busy GPU (CAGESIDE +1.0, MAIN −1.1: noise).
+
+**QA2 #1 (critical): the WebGPU 3D view hanging after a rebuild.** Cause: three builds a material's program
+against `renderer.getRenderTarget()` / `getMRT()` *when the build starts*, and the scene warm-up's builds
+start across many ticks. Anything that changed the renderer's target in between built programs without the
+scene pass's normal/velocity outputs (the "no corresponding fragment stage output ... targets[1]" errors),
+and those pipelines never came back. Three things did that: the quality probe (`probeGpu`, run by the Watch
+screen right after mount, holding its own target across awaits), the page's own frames (`presenter.render`
+during a bout switch or a rebuild), and a second warm-up's builds overlapping the first one's post-chain
+draws. Fixed in `stage/index.ts`: async GPU jobs (probe, warm-up) run one at a time on a queue
+(`gpuSerial`); the page's frames are held while a warm-up runs (the canvas keeps its last picture); the whole
+warm-up (scene programs, first frame, the replay and DoF chains) is one queued job (`Stage.warmUpAll`, used by
+`presenter.warmUpAsync`); every frame and warm-up draw starts from the canvas with no MRT; and a warm-up
+lane that never settles is abandoned after 90 s instead of holding the picture. Production build
+(`vite build`, served from a snapshot as QA2 did): 3D → 2D → 3D at High 2/2 and Medium 2/2 back in 9-10 s,
+0 errors (before: never, 22-23 errors per cycle).
+
+**QA2 #2 (major): quality switching.** `arena/lighting.ts` disposed and nulled `shadow.map` on a size
+change; three's ShadowNode owns that target and resizes it from `mapSize` itself, so now only the size is
+set (the `depthTexture` TypeError is gone). A quality change now runs the same warm-up as a bout load
+(`presenter.setQuality` → `warmUpAsync`), so the new preset compiles off the main thread while the last
+frame stays up. `qa2-quality.mjs switch`, 12 switches: WebGPU 0 errors (before 93), longest task 0.93 s;
+WebGL2 0 errors (before: 3 page errors).
+
+**Still open.**
+- WebGL2 quality switching still has one long task, 15.3 s in the 12-switch run (before 15.9 s), most likely
+  the synchronous first draws of the new post chain / shadow programs on the switch to Ultra (WebGL2 is
+  capped at Medium by default). On WebGPU the picture holds for several seconds on the first switch to
+  Ultra while it compiles (by design now: held, not frozen).
+- Close shots at a fixed 0.7 scale are still over 16 ms on a busy GPU (quiet: ~9.5 ms at CAGESIDE). The next
+  levers, in order: GTAO (as large as the scene pass on handhelds; 12 samples or a depth cut-off behind the
+  focus plane on DoF shots, both visible changes to evaluate), the near fence (a veil material for panels so
+  defocused that the lattice is gone: constant coverage and lit colour, ~1.5 ms of 8.8 busy on CAGESIDE; arena).
+- Two skin programs remain on WebGL2 (bodies with and without morph targets). Giving LOD1/2 the morph
+  targets would make it one, but three packs a morph texture per geometry (~12 MB per body).
+- `qa2-leak.mjs` could not be rerun: the History screen's Re-watch button is no longer visible to it
+  (UI change); in-place bout switches were covered by the 3D toggle (a full rebuild) and the unit tests.
+- Dev-server note: the shared Vite server once served a stale `corner/index.ts` (`displayed is not defined`,
+  no corner staging in the page); touching the file fixed it. Verify rendering bugs on a production build.
+
 ### Animation quality pass
 
 Incremental fixes to the animation system, measured before and after by an automated QA harness. Code:
@@ -1966,3 +2115,98 @@ was the lever).
   `jab_step`, an elbow and a calf kick; the 0.17 % elbow over-flexion is still the rear-naked-choke defender.
 - Evaluate p95 under load is noisy: 0.36 ms back to back, 0.48 ms in a run hours earlier under heavier load. The pair
   solver (grapple frames) is now the larger share of the all-modes tail.
+
+### Leak fix
+
+QA2 finding #3: every bout switch in Watch leaked. WebGL2 heap after a forced GC went 42 → 182 MB over 14
+switches (about +10 MB per switch), and the GPU counts kept rising. The scene graph stayed the same size, so
+something outside the scene was holding every old bout. Code: `character/release.ts` (new), `character/actor.ts`,
+`character/kit.ts`, `referee/clothing.ts`, `arena/lighting.ts`, `arena/index.ts`, `arena/materials.ts`, and
+`presenter.ts` (disposal only). Tests: `tests/presentation.leak.test.ts` (2). Tool: `scripts/dev/leak-switch.mjs`.
+
+**Method.**
+- *Node.* A headless reproduction: the real presenter, character factory, referee, corner crew, finish staging,
+  animator, director and venue (the venue on a do-nothing 2D canvas), and a model of the three r186 rules that
+  leaked. After 10 `setBout` calls the model's counts must be flat, and every earlier bout's objects must be
+  collectable (WeakRef census after a forced GC). Before the fix, 306 → 720 render records.
+- *Browser.* Production builds served from the scratchpad (not the shared dev server), headless Chromium, one browser
+  at a time, RAM watchdog at 88 %.
+- *Retainers.* CDP heap snapshots, then shortest retainer paths from the GC roots. The path search treats WeakMap
+  entries correctly: a value counts as reachable only once both its table and its key are. Without that rule the
+  snapshot shows false paths through three's WeakMaps.
+
+**Retainers found.** Five, in order of size:
+1. **Render objects of shared materials.** three r186 keeps one `RenderObject` per (object, material, context,
+   lights) in a strong set, `RenderObjects._renderObjects`. It frees one only when the **material** or the
+   **object** fires `dispose`; `geometry.dispose()` frees the buffers and leaves the render object. The skin, eye,
+   hair, kit and garment materials are shared across fighters and bouts and are never disposed. So every old body
+   stayed alive through `renderObject.object.parent`: bones, skeletons, bindings and pipelines included. **Fix:**
+   `releaseFromRenderer` fires `dispose` on each drawable of a body (`FighterActor.dispose`, and the garments'
+   `dispose`). That frees exactly that body's render objects. The shared materials and their programs stay.
+2. **Warm-up that outlives its bout.** three's `compileAsync` collects the scene first, then builds each object's
+   render state over later frames. A switch during "Preparing broadcast…" disposed the bodies, and the old warm-up
+   then built fresh render objects for them that nothing ever freed. This also re-registered their geometry, which
+   is a GPU leak. Found by instrumenting `createRenderObject`: the stack traces all came from
+   `StagePipeline.compileScene`. **Fix:** `Presenter.retire` takes a bout's objects out of the scene at once. It
+   disposes them only after the warm-ups running at that moment have settled (`warmUpAsync` is tracked). Quality
+   rebuilds and referee and corner rebuilds use the same path; `Presenter.dispose` still frees everything at once.
+3. **PMREM generators.** A bare `scene.environment` texture makes three's `EnvironmentNode` build its own
+   `PMREMNode` for that texture, and nothing disposes it. The `outside` environment's `pmremTexture` node was never
+   disposed either. Each PMREM node owns a `PMREMGenerator`: 10 blur meshes, their geometries and materials. That
+   is 2 per bout, reached through the render-object set. **Fix:** the venue owns both PMREM nodes and disposes them
+   (`VenueSet.environmentNode`), and the presenter sets `scene.environmentNode`. The shader and the lighting are
+   the same as before.
+4. **Lights.** `NodeBuilder`'s `_bindingGroupsCache` is kept per render context and never pruned. It holds the
+   shared "render" uniform groups, whose update callbacks close over each light. Through `light.parent` that kept
+   every old venue: canvases, meshes and materials. Separately, each shadow camera's render list
+   (`renderer.lighting`) keeps the objects of its last shadow pass. **Fix:** the rigs take their lights from
+   per-role free lists and return them on `dispose`. Both caches then hold one entry per light instead of one per
+   bout. Two venues alive at once get different lights. The shadow map stays with its light.
+5. **A closure in a shared material.** The mouthguard material was built by an arrow function inside `buildKit`.
+   Its uniform callback kept that call's whole scope alive for the life of the material: the first fighter's
+   meshes and geometry. **Fix:** a module-level factory. The other shared-material factories were already at
+   module level.
+
+Also fixed along the way:
+- Garment materials are keyed by colour. Before, a corner in the other team colour reused the first bout's shirt
+  material, and so its colour.
+- A venue no longer disposes the slope texture that all venues share. With deferred disposal, the next venue may
+  already be drawing with it.
+
+**Ruled out** (bounded, or freed with the bout):
+- The garment `materials` map: a dozen keys at most, from the fixed palette.
+- The character factory's material and texture caches: bounded by their keys.
+- The corner crew: freed through its actors.
+- Finish staging: no GPU objects.
+- The animator and the grapple solver's module state: poses only, pruned over time.
+- The arena marks textures: disposed on rebake and with the venue.
+- The director: holds only the current recording.
+
+**Result** (`leak-switch.mjs`: 4 bouts, octagon / ring / mat / street in rotation, 20 switches, Medium, 960×540;
+heap after a forced GC). Counts are compared at the same venue (the octagon, every 4th switch), because each venue
+has different content.
+
+| | Before | After |
+|---|---|---|
+| WebGL2, heap | QA2: 42 → 182 MB over 14 switches (+10 MB per switch) | 39.6 → 44.5 MB, switches 4 → 16; 49.4 MB at switch 20 |
+| WebGL2, geometries / textures / programs | QA2: 111 → 659 / 62 → 122 | 59 / 57 / 82–83 at every octagon visit |
+| WebGL2, render objects; live Object3D | QA2: Object3D 483 → 3,197 over 5 switches | 128; 337 at every octagon visit |
+| WebGPU, heap | 28.6 → 68.4 MB over the first 3 switches | octagon 36.8 → 40.7 MB (switches 4 → 12); ring 39.6 → 43.7 MB (switches 7 → 19) |
+| WebGPU, geometries / programs | QA2: 59 → 919 / 85 → 345 over 12; here 59 → 174 / 85 → 216 in 3 | 59 / 83 at every octagon visit, 114 / 123 at every ring visit (all 20 switches) |
+| WebGPU, render objects; live Object3D | 121 → 765; 312 → 1,816 in 3 switches | 121; 346 at every octagon visit |
+
+Every renderer and object count now repeats exactly from one visit of a venue to the next, on both backends.
+
+**Still open.**
+- *A small heap drift.* About 0.4 MB per switch remains (WebGL2 39.6 → 44.5 MB over 12 switches, +12 %; WebGPU
+  about +10 % over 8), with identical object counts. It is not three.js objects. Undiagnosed candidates: three's
+  string-keyed caches (node builder code, bind-group hashes for per-bout uniform ids) and app-side state.
+- *Incomplete before-fix runs.* On a loaded machine, the RAM guard stopped the before-fix runs early; the "before"
+  column uses QA2's figures plus the first switches here. `leak-switch.mjs` waits for `__ttff.revealMs`, which the
+  Watch screen republishes from the previous bout. Some samples are therefore taken while a switch is still
+  compiling and show both bouts' objects (e.g. WebGPU switch 16); compare each venue's steady visits.
+
+**Stage-side, not changed here.** `StagePipeline.compileScene` has no way to cancel a warm-up when the bout
+changes. The old compile keeps running, using CPU, GPU and render target, into the new bout's loading. The
+presenter now makes this safe for memory, but cancelling it (or skipping objects no longer in the scene) belongs to
+the stage.

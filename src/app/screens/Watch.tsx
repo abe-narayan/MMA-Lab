@@ -25,21 +25,24 @@
  * and every panel only read the recorded frames and events (asserted in
  * tests/replay.polish.test.ts against the run's digest).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_SETTINGS, ARCHETYPES, configFromReplay, resolveArena, resolveRuleset,
-  type SimConfig,
+  type SimConfig, type SimEvent,
 } from '../../sim';
 import { BoutPlayer, SPEED_STEPS, TICK_SECONDS, stepSpeed } from '../replay/player';
 import type { WatchBout } from '../replay/bout';
 import { cornerOf, roundBaselines } from '../replay/viewModel';
-import { Arena3D } from '../components/Arena3D';
+import type { Playhead } from '../components/Arena3D';
 import type { QualityLevel } from '../../presentation/contract';
 import { buildBoutPresentation } from '../../presentation/stage/bout';
 import { ReplaySequencer, planReplays, type ReplayPlan } from '../../presentation/camera';
 import { makeBroadcastBout } from '../components/broadcast';
 import { EventIndex, advanceBroadcast, lastSecondsReplayPlan, replayKey } from '../replay/broadcast';
-import { gpuLikelyAvailable, isQualityLevel, QUALITY_LEVELS, QUALITY_PRESETS } from '../../presentation/stage/index';
+// stage/quality, not stage/index: the index pulls in three/webgpu, which stays
+// in the lazily loaded 3D chunk (Arena3D) until the 3D view mounts.
+import { isQualityLevel, QUALITY_LEVELS, QUALITY_PRESETS } from '../../presentation/stage/quality';
+import { gpuLikelyAvailable } from '../components/watch/gpu';
 import { initialQuality, readQualityChoice, writeQualityChoice } from '../../presentation/stage/profiles';
 import { PlayheadSignal } from '../replay/playhead';
 import { timelineMarkers, adjacentMarker, type TimelineMarker } from '../replay/markers';
@@ -63,7 +66,25 @@ import { roundClockLabel } from '../components/watch/Scrubber';
 import { CAMERA_SLOTS, cameraById, cameraBySlot, cameraFromMode } from '../components/watch/cameras';
 import { IconGear } from '../components/watch/icons';
 import { Button, ErrorState, useToast } from '../ui';
+import { DEV_SWITCHES, clearDevGlobal, devParams, exposeDevGlobal } from '../devFlags';
 import '../watch.css';
+
+/**
+ * The 3D broadcast (three.js / WebGPU and all of src/presentation's renderer)
+ * is its own chunk, fetched the first time the 3D view mounts: the 2D board,
+ * the rest of the Watch screen and every other screen never download it.
+ */
+const Arena3D = lazy(() => import('../components/Arena3D').then((m) => ({ default: m.Arena3D })));
+
+/** Shown in the picture while the 3D chunk downloads (before the presenter's own loading card). */
+function Stage3DFallback(): JSX.Element {
+  return (
+    <div className="watch-stage watch-stage--skeleton" role="status" aria-live="polite">
+      <span className="ui-spinner" aria-hidden="true" />
+      <span>Loading the 3D broadcast…</span>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Preferences and QA switches
@@ -117,8 +138,9 @@ function urlOverrides(): {
   view?: '3d' | '2d'; quality?: QualityLevel; scale?: number; cam?: string; seek?: number; play?: boolean;
   demo?: { seed: string; a: number; b: number }; analytics?: boolean;
 } {
-  if (typeof location === 'undefined') return {};
-  const q = new URLSearchParams(location.search);
+  // Development or `?capture=1` only (src/app/devFlags.ts, audit H3): a shared
+  // link cannot change a viewer's picture.
+  const q = devParams();
   const out: ReturnType<typeof urlOverrides> = {};
   const v = q.get('view');
   if (v === '3d' || v === '2d') out.view = v;
@@ -165,6 +187,7 @@ export interface WatchProps {
 }
 
 const NO_PLANS: readonly ReplayPlan[] = [];
+const NO_EVENTS: readonly SimEvent[] = [];
 
 type VerificationState = { kind: Verification | 'checking'; message: string } | null;
 
@@ -258,6 +281,10 @@ export function Watch(props: WatchProps): JSX.Element {
     };
   }, [progressLabel]);
 
+  // The config the screen last started loading. Switching tabs away and back
+  // (`active`) must not re-simulate the same bout, nor throw away a replay
+  // the viewer opened from the library in the meantime.
+  const loadedConfigRef = useRef<SimConfig | null | undefined>(undefined);
   useEffect(() => {
     if (props.bout) {
       setBout(props.bout);
@@ -267,6 +294,8 @@ export function Watch(props: WatchProps): JSX.Element {
     // The shell keeps this screen mounted behind a hidden tab, so nothing is
     // simulated until somebody actually opens it.
     if (!active && !bout) return undefined;
+    if (bout && loadedConfigRef.current === config) return undefined;
+    loadedConfigRef.current = config;
     const target = config ?? (qa.demo ? demoConfig(qa.demo.seed, qa.demo.a, qa.demo.b) : demoConfig());
     setVerification(null);
     return rebuild('Rebuilding the bout from its seed…', target);
@@ -364,23 +393,30 @@ export function Watch(props: WatchProps): JSX.Element {
     return () => cancelAnimationFrame(raf);
   }, [player, active, signal]);
 
-  const getPlayhead = useCallback(() => {
+  // Read by the 3D view once per display frame. One object, rewritten in
+  // place, so the hot path allocates nothing here (audit H4); the reader
+  // copies what it needs and never keeps it.
+  const headRef = useRef<Playhead>({
+    frame: null, next: null, alpha: 0, replay: false, playbackRate: 1, events: NO_EVENTS, replayState: null, seekVersion: 0,
+  });
+  const getPlayhead = useCallback((): Playhead => {
     const p = playerRef.current;
+    const h = headRef.current;
     const frame = p?.current ?? null;
     const next = p?.next ?? null;
     const state = seqRef.current?.state ?? null;
-    return {
-      frame,
-      next,
-      alpha: p?.alpha ?? 0,
-      replay: !!state,
-      playbackRate: p?.speed ?? 1,
-      // Two seconds back through the next tick: strikes resolving before the
-      // next frame are already known, so misses and blocks aim correctly.
-      events: frame && eventIndexRef.current ? eventIndexRef.current.forFrame(frame, next) : [],
-      replayState: state,
-      seekVersion: seekRef.current,
-    };
+    h.frame = frame;
+    h.next = next;
+    h.alpha = p?.alpha ?? 0;
+    h.replay = !!state;
+    h.playbackRate = p?.speed ?? 1;
+    // Two seconds back through the next tick: strikes resolving before the
+    // next frame are already known, so misses and blocks aim correctly.
+    // `forFrame` returns its cached window until the frame changes.
+    h.events = frame && eventIndexRef.current ? eventIndexRef.current.forFrame(frame, next) : NO_EVENTS;
+    h.replayState = state;
+    h.seekVersion = seekRef.current;
+    return h;
   }, []);
 
   /**
@@ -629,9 +665,9 @@ export function Watch(props: WatchProps): JSX.Element {
       replayLast: () => replayLast(8),
       digest: () => bout?.run.digest ?? null,
     };
-    const w = window as unknown as { __watch?: typeof hook };
-    w.__watch = hook;
-    return () => { if (w.__watch === hook) delete w.__watch; };
+    if (!DEV_SWITCHES) return undefined;
+    exposeDevGlobal('__watch', hook);
+    return () => clearDevGlobal('__watch', hook);
   }, [seekToTick, apply, setSpeed, chooseCamera, replayLast, bout]);
 
   // ---- keyboard ---------------------------------------------------------------
@@ -773,6 +809,7 @@ export function Watch(props: WatchProps): JSX.Element {
   }
 
   const stage = view === '3d' && boutPresentation ? (
+    <Suspense fallback={<Stage3DFallback />}>
     <Arena3D
       bout={boutPresentation}
       frame={player.current}
@@ -822,6 +859,7 @@ export function Watch(props: WatchProps): JSX.Element {
         )
         : null}
     </Arena3D>
+    </Suspense>
   ) : (
     <div className="watch-stage watch-stage--2d">
       <Board2D

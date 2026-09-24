@@ -16,8 +16,17 @@
  * plus a requestAnimationFrame probe), waits for `[data-phase="live"]`, then
  * draws the timeline into a PNG (long tasks red, frame gaps > 100 ms amber,
  * phase marks from `window.__ttff`) and prints the numbers as JSON.
+ *
+ * `--dump <dir>` (WebGL2) also records every shader source the page hands to the driver (before the
+ * cold salt) and writes each distinct one to `<dir>/<n>-<vs|fs>-<hash>.glsl` plus `<dir>/index.json`
+ * (order, type, size, hash, how many times the same text was compiled): the tool for finding
+ * duplicate programs and the biggest sources.
  */
 import { chromium } from 'playwright';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { captureGoto } from './capture-url.mjs';
 
 const args = process.argv.slice(2);
 const [url0, out] = args;
@@ -39,6 +48,7 @@ const browser = await chromium.launch({
   args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu'],
 });
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
+captureGoto(page); // ?capture=1: QA switches in production builds (capture-url.mjs)
 if (args.includes('--cold')) {
   await page.addInitScript((salt) => {
     const proto = WebGL2RenderingContext.prototype;
@@ -60,6 +70,20 @@ if (args.includes('--cold')) {
 ${src.slice(end)}` : src);
     };
   }, Date.now() % 1000000);
+}
+const dumpDir = opt('dump', null);
+if (dumpDir) {
+  await page.addInitScript(() => {
+    const proto = WebGL2RenderingContext.prototype;
+    const create = proto.createShader;
+    const orig = proto.shaderSource;
+    window.__shaderDump = [];
+    proto.createShader = function (type) { const sh = create.call(this, type); if (sh) sh.__dumpType = type; return sh; };
+    proto.shaderSource = function (shader, src) {
+      window.__shaderDump.push([shader.__dumpType === this.VERTEX_SHADER ? 'vs' : 'fs', src, Math.round(performance.now())]);
+      return orig.call(this, shader, src);
+    };
+  });
 }
 await page.addInitScript(() => {
   const w = window;
@@ -91,6 +115,26 @@ const r = await page.evaluate(() => ({
   backend: window.__stats?.backend ?? null,
   live: Math.round(performance.now()),
 }));
+if (dumpDir) {
+  const list = await page.evaluate(() => window.__shaderDump ?? []);
+  mkdirSync(dumpDir, { recursive: true });
+  const seen = new Map();
+  const index = [];
+  list.forEach(([type, src, t], i) => {
+    const hash = createHash('sha1').update(src).digest('hex').slice(0, 10);
+    let e = seen.get(hash);
+    if (!e) {
+      e = { first: i, type, bytes: src.length, hash, count: 0, atMs: t };
+      seen.set(hash, e);
+      writeFileSync(join(dumpDir, `${String(i).padStart(3, '0')}-${type}-${hash}.glsl`), src);
+    }
+    e.count++;
+    index.push({ i, type, bytes: src.length, hash, atMs: t });
+  });
+  writeFileSync(join(dumpDir, 'index.json'), JSON.stringify({ sources: index, distinct: [...seen.values()] }, null, 1));
+  const fs = [...seen.values()].filter((e) => e.type === 'fs');
+  console.error(`[dump] ${list.length} sources, ${seen.size} distinct, ${fs.length} distinct fragment; biggest: ${fs.sort((a, b) => b.bytes - a.bytes).slice(0, 6).map((e) => `${e.bytes}B×${e.count}`).join(', ')}`);
+}
 const liveAt = r.lt.liveAt ?? r.live;
 const longest = r.lt.tasks.reduce((m, t) => Math.max(m, t[1]), 0);
 const blocked = r.lt.tasks.reduce((s, t) => s + t[1], 0);

@@ -12,8 +12,9 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  auditCamera, CAM_BOUTS, mergeCam, recordCamBout, standInBodies, type CamRecording, type CamResult,
+  animatedBodies, auditCamera, CAM_BOUTS, mergeCam, recordCamBout, standInBodies, type CamRecording, type CamResult,
 } from '../scripts/dev/cam-audit-lib';
+import { bodyCapsules, CORNER_AVOID, cornerSamples, inflateCapsules, occlusion, type Capsule } from '../src/presentation/camera/occlusion';
 import { createCameraDirector, type ShotKind } from '../src/presentation/camera';
 import type { CameraRequest, CameraState, FrameInput } from '../src/presentation/contract';
 
@@ -163,3 +164,52 @@ describe('camera quality: every manual camera', () => {
     expect(b.cut).toBe(true);
   });
 });
+
+describe('camera quality: the corner between rounds', () => {
+  // Performance pass 2: the cornermen kneel and lean in between the corner
+  // handheld and the seated fighter. Measured with the real corner staging
+  // (animated bodies, crew posed by the figure poser) over every break of an
+  // octagon and a K-1 ring bout: the cornermen's capsules grown by the margin
+  // for clothes and lean (forearms not counted), the share of the seated
+  // fighter they hide (head, chest, hips, shoulders, hips' width, lap).
+  it('keeps the cornermen out of the sight line to the seated fighter', async () => {
+    for (const name of ['mma-oct30', 'k1-ring16']) {
+      const r = rec(name);
+      const bodies = await animatedBodies(r);
+      const wins: [number, number][] = [];
+      for (const re of r.events.filter((e) => e.kind === 'roundEnd')) {
+        const rs = r.events.find((e) => e.kind === 'roundStart' && e.tick > re.tick);
+        if (rs) wins.push([re.tick / 10 - 2, rs.tick / 10 + 1]);
+      }
+      expect(wins.length, `${name}: a break`).toBeGreaterThan(0);
+      const occ: number[] = [];
+      auditCamera(r, {
+        bodies, windows: wins, fps: 10,
+        onFrame: (_t, s, d, pts) => {
+          const dbg = d.debug();
+          if (dbg.shot !== 'corner') return;
+          const caps: Capsule[] = [];
+          for (const w of bodies.extras()) caps.push(...bodyCapsules(w));
+          const subj = pts.filter((p) => (dbg.subjects ?? []).includes(p.id));
+          if (!caps.length || !subj.length) return;
+          const cam = s.position as [number, number, number];
+          const samples = subj.flatMap((p) => {
+            const dx = cam[0] - p.hips[0], dz = cam[2] - p.hips[2], l = Math.hypot(dx, dz) || 1;
+            return cornerSamples(p, [dx / l, dz / l], []);
+          });
+          occ.push(occlusion(cam, samples, inflateCapsules(caps, CORNER_AVOID.margin, [], CORNER_AVOID.minR)));
+        },
+      });
+      expect(occ.length, `${name}: corner frames with the crew in`).toBeGreaterThan(100);
+      occ.sort((a, b) => a - b);
+      const q = (p: number): number => occ[Math.min(occ.length - 1, Math.floor(p * occ.length))]!;
+      // Before (the lens held its seeded spot): median 0.27 / 0.18, p95 0.36, 31 % / 10 % of
+      // frames over 0.3 (a cornerman's back across the fighter's lap and arm). After: 0 / 0, and
+      // ~8 % / 0 over 0.3 (a cornerman walking in with the stool).
+      expect(q(0.5), `${name}: median hidden`).toBeLessThan(0.12);
+      expect(q(0.9), `${name}: p90 hidden`).toBeLessThan(0.25);
+      expect(occ.filter((o) => o > 0.3).length / occ.length, `${name}: frames > 30 % hidden`).toBeLessThan(0.1);
+    }
+  }, 240_000);
+});
+

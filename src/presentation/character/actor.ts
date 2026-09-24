@@ -12,12 +12,13 @@ import { buildBody, type BuiltBody } from './body';
 import { canonical, type Canonical } from './canonical';
 import { buildBodyGeometry } from './bodyMesh';
 import { buildRig, FINGER_BONES, fingersAtRest, handShapeRotations, type HandShape, type Rig } from './rigging';
-import { createSkinMaterial, makeSkinState, setPalette, type SkinState, type SkinTextures } from './skinMaterial';
+import { createSkinMaterial, makeSkinState, setPalette, skinVariant, type SkinState, type SkinTextures } from './skinMaterial';
 import { buildEyeGeometry, buildLashGeometry, createEyeMaterial, createLashMaterial, irisColour, irisInner, type EyeState } from './eyes';
 import { hashSeed } from './textures';
 import { resolveHair, skinPalette, hexToLinear } from './appearance';
 import { buildKit, type Kit, type KitTextures } from './kit';
 import { buildHair, ROW_FREQ, type HairParts } from './hair';
+import { releaseFromRenderer } from './release';
 
 export interface SharedResources {
   asset: BodyAsset;
@@ -105,7 +106,7 @@ export class FighterActor implements CharacterActor {
     this.cutSites = cutSites(res.can);
 
     // One skin pipeline for every fighter; this fighter's values ride on userData.skin.
-    const skin = res.material(`skin|${quality.skinScattering}|${quality.sweatAndDamage}`, () => createSkinMaterial(res.skinTex, {
+    const skin = res.material(`skin|${quality.skinScattering}|${quality.sweatAndDamage}|${skinVariant()}`, () => createSkinMaterial(res.skinTex, {
       scattering: quality.skinScattering, sweatAndDamage: quality.sweatAndDamage, lm: res.can.lm,
     }));
 
@@ -273,7 +274,11 @@ export class FighterActor implements CharacterActor {
 
   dispose(): void {
     this.object3d.removeFromParent();
-    // Materials are shared by every fighter and owned by the factory.
+    // Materials are shared by every fighter and owned by the factory, so the
+    // renderer's per-object state must be released object by object (it is
+    // not freed by disposing the geometry; see release.ts). The kit's meshes
+    // are listed too: dressing a cornerman takes his shorts out of the tree.
+    releaseFromRenderer([this.object3d], [...this.bodyMeshes, this.eyes, this.lashes, ...this.hair.meshes, ...this.kit.meshes]);
     for (const g of this.geometries) g.dispose();
     this.hair.dispose();
     this.kit.dispose();

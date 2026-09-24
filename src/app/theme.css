@@ -1311,6 +1311,92 @@ textarea.field { padding: var(--sp-2) 10px; line-height: var(--lh-normal); }
   box-shadow: var(--elev-1);
 }
 
+/* ---- steps (src/app/ui/steps.tsx): numbered setup sections ---- */
+.ui-step {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--elev-1);
+}
+.ui-step + .ui-step { margin-top: var(--sp-4); }
+.ui-step-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--line-soft);
+  flex-wrap: wrap;
+}
+.ui-step-num {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: var(--fw-semibold) var(--fs-xs)/1 var(--mono);
+}
+.ui-step-heading { flex: 1 1 200px; min-width: 0; }
+.ui-step-title { margin: 0; font-size: var(--fs-md); font-weight: var(--fw-semibold); line-height: var(--lh-snug); }
+.ui-step-sub { margin: 2px 0 0; font-size: var(--fs-xs); color: var(--faint); line-height: var(--lh-snug); }
+.ui-step-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.ui-step-body { padding: var(--sp-4) var(--sp-5) var(--sp-5); display: grid; gap: var(--sp-4); }
+
+/* ---- disclosure: progressive disclosure for advanced options ---- */
+.ui-disclosure {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.ui-disclosure > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 36px;
+  padding: 0 var(--sp-3);
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--muted);
+  border-radius: var(--r-md);
+}
+.ui-disclosure > summary::-webkit-details-marker { display: none; }
+.ui-disclosure > summary:hover { color: var(--text); }
+.ui-disclosure-chevron {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--dur-fast) var(--ease-out);
+  margin-right: 2px;
+}
+.ui-disclosure[open] > summary .ui-disclosure-chevron { transform: rotate(45deg); }
+.ui-disclosure-note { margin-left: auto; font-size: var(--fs-xs); color: var(--faint); font-weight: var(--fw-regular); }
+.ui-disclosure-body { padding: var(--sp-2) var(--sp-3) var(--sp-4); display: grid; gap: var(--sp-4); }
+
+/* ---- a label with an info tooltip beside it ---- */
+.ui-label-row { display: flex; align-items: center; gap: 6px; min-height: 18px; }
+.ui-label-row + .field,
+.ui-label-row + select,
+.ui-label-row + .ui-seg { margin-top: 6px; }
+
+/* ---- the model notice inside the top bar (replaces the separate strip) ---- */
+.topbar-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.topbar-notice b { color: var(--accent); font-weight: var(--fw-semibold); white-space: nowrap; }
+.topbar-notice span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-title + .topbar-notice { padding-left: var(--sp-3); border-left: 1px solid var(--line-soft); }
+
 /* ============================================================ RESPONSIVE */
 
 @media (max-width: 1180px) {

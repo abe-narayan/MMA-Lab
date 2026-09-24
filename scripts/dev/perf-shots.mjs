@@ -17,6 +17,7 @@
  * One JSON line per shot, then a table.
  */
 import { chromium } from 'playwright';
+import { captureGoto } from './capture-url.mjs';
 
 const args = process.argv.slice(2);
 const [base, prefix] = args;
@@ -57,6 +58,7 @@ const browser = await chromium.launch({
   args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu'],
 });
 const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
+captureGoto(page); // ?capture=1: QA switches in production builds (capture-url.mjs)
 const errors = [];
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 page.on('pageerror', (e) => errors.push(e.message));

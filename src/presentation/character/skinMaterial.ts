@@ -13,6 +13,14 @@
  *  - Sweat: a clear-coat film (physical model's clear coat) with bead normals.
  *  - With `QualitySettings.skinScattering` off the wrap is a fixed, cheap wrapped diffuse.
  *
+ * Variants: 'full' (WebGPU) and 'lite' (WebGL2, `setSkinVariant`; performance pass 2). WebGL2
+ * programs go through ANGLE → HLSL → FXC, which inlines every helper call; a cold compile of the
+ * full skin took ~4 s per program on the target machine. The lite graph drops what cannot be seen
+ * at broadcast distance: the sub-millimetre painted follicles and strands (they already settle to
+ * their mean once smaller than a pixel — lite uses the mean), the beard's 4 mm clump noise, the lip
+ * lines, the sweat beads' separate clear-coat normal (the film follows the skin normal), the second,
+ * broad specular lobe, and the tattoo blackwork's 27-cell Worley search (one jittered cell instead).
+ *
  * Surface (fragment graph): tone palette with palms/soles, lips, areolae and nails from MPFB's UV
  * masks; procedural hairline / fade / buzz, eyebrows and stubble/beard in canonical head space;
  * cavity darkening from muscle definition; flush; per-zone damage (redness → purple bruise);
@@ -30,6 +38,7 @@ import {
 import { SWEAT_ONSET } from './anatomy';
 import type { CanonicalLandmarks } from './canonical';
 import type { SkinPalette, RGB } from './appearance';
+import { devParam, exposeDevGlobal } from '../devFlags';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type N = any; // TSL node graphs are dynamically typed; @types/three's generics add noise here.
@@ -42,7 +51,7 @@ const CLEARCOAT_F0 = vec3(0.04);
 const CLEARCOAT_F90 = vec3(1);
 
 class SkinLightingModel extends THREE.PhysicalLightingModel {
-  constructor(private readonly scattering: boolean) {
+  constructor(private readonly scattering: boolean, private readonly lite = false) {
     super(true, false, false, false, false, false);
   }
 
@@ -91,8 +100,9 @@ class SkinLightingModel extends THREE.PhysicalLightingModel {
     const r1: N = roughProp;
     const r2: N = roughProp.mul(1.8).min(1);
     const s1: N = BRDF_GGX({ lightDirection: L, f0: specularColor, f90: float(1), roughness: r1 } as N);
-    const s2: N = BRDF_GGX({ lightDirection: L, f0: specularColor, f90: float(1), roughness: r2 } as N);
-    reflectedLight.directSpecular.addAssign(irr.mul(s1.mul(0.85).add(s2.mul(0.15))).mul(mat.specOcclusionNode));
+    const spec: N = this.lite ? s1
+      : s1.mul(0.85).add((BRDF_GGX({ lightDirection: L, f0: specularColor, f90: float(1), roughness: r2 } as N) as N).mul(0.15));
+    reflectedLight.directSpecular.addAssign(irr.mul(spec).mul(mat.specOcclusionNode));
 
     // Sweat film (clear coat).
     const ccN: N = clearcoatNormalView;
@@ -111,10 +121,25 @@ export class SkinNodeMaterial extends THREE.MeshPhysicalNodeMaterial {
   thinNode: N = float(0);
   specOcclusionNode: N = float(1);
   scattering = true;
+  lite = false;
 
   setupLightingModel(): N {
-    return new SkinLightingModel(this.scattering);
+    return new SkinLightingModel(this.scattering, this.lite);
   }
+}
+
+export type SkinVariant = 'full' | 'lite';
+let variant: SkinVariant = 'full';
+const variantParam = devParam('skinLite');
+/**
+ * Which skin graph new materials get: the presenter sets 'lite' on WebGL2 before any fighter is
+ * built. `?skinLite=1` / `?skinLite=0` in the page URL force either one (A/B).
+ */
+export function setSkinVariant(v: SkinVariant): void {
+  variant = variantParam === '1' ? 'lite' : variantParam === '0' ? 'full' : v;
+}
+export function skinVariant(): SkinVariant {
+  return variant;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +251,10 @@ export interface SkinOptions {
   sweatAndDamage: boolean;
   /** Canonical landmarks (constants baked into the graph). */
   lm: CanonicalLandmarks;
+  /** The WebGL2 graph (see the header); default: the current `skinVariant()`. */
+  lite?: boolean;
+  /** A/B only (scripts/dev/perf-ab.mjs): the pre-pass-2 debug `select`, which emitted the surface graph twice. */
+  legacySelect?: boolean;
 }
 
 const V3c = (v: readonly number[]): N => vec3(v[0], v[1], v[2]);
@@ -235,10 +264,10 @@ const V3c = (v: readonly number[]): N => vec3(v[0], v[1], v[2]);
  * pixel or the fighter. `?skinGate=0` in the page URL evaluates everything everywhere, as before
  * the performance pass, for A/B cost measurements (the picture is identical either way).
  */
-const SKIN_GATES = !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('skinGate') === '0');
+const SKIN_GATES = !(devParam('skinGate') === '0');
 /** QA: set to 1 to take every branch (in-page A/B of the gates' saving; `window.__skinGatesOff`). */
 export const skinGatesOff: N = uniform(0);
-if (typeof window !== 'undefined') (window as unknown as { __skinGatesOff?: N }).__skinGatesOff = skinGatesOff;
+exposeDevGlobal('__skinGatesOff', skinGatesOff);
 const gate = (cond: N): N => (SKIN_GATES ? cond.or(skinGatesOff.greaterThan(0.5)) : float(1).greaterThan(0));
 
 /** Lookdev debug channel for every skin material (0 = off). */
@@ -248,6 +277,8 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   const m = new SkinNodeMaterial();
   const u = makeSkinUniforms();
   m.scattering = opt.scattering;
+  const lite = opt.lite ?? variant === 'lite';
+  m.lite = lite;
   const lm = opt.lm;
   const eyeR = 0.0118;
 
@@ -332,14 +363,15 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
       const fadeD: N = mix(float(1), mix(float(1), fadeProfile.mul(fadeProfile), sideBack), u.hairFade);
       // Follicles (~0.8 mm apart) and short directional strands; both settle to their mean once they
       // are smaller than a pixel, so the painted hair never sparkles at broadcast distance.
-      const folAA: N = smoothstep(0.0007, 0.00025, pxmV);
+      // Lite: every term below at its sub-pixel mean (folAA = 0).
+      const folAA: N = lite ? float(0) : smoothstep(0.0007, 0.00025, pxmV);
       // Round follicle dots: one jittered dot per 0.8 mm cell (cheap; cell noise alone renders as
       // squares up close, and a full Worley search costs 27 cells per pixel).
       const fcell: N = floor(ref.mul(1250));
       const fjit: N = vec3(mx_cell_noise_float(fcell), mx_cell_noise_float(fcell.add(17.3)), mx_cell_noise_float(fcell.add(41.9))).mul(0.5).add(0.25);
-      const fol: N = smoothstep(0.34, 0.12, length(fract(ref.mul(1250)).sub(fjit)));
-      const strandN: N = mx_noise_float(ref.mul(vec3(2200, 700, 2200))).mul(0.5).add(0.5);
-      const speckle: N = mix(float(0.62), fol.mul(0.55).add(strandN.mul(0.45)), folAA);
+      const fol: N = lite ? float(0.3) : smoothstep(0.34, 0.12, length(fract(ref.mul(1250)).sub(fjit)));
+      const strandN: N = lite ? float(0.5) : mx_noise_float(ref.mul(vec3(2200, 700, 2200))).mul(0.5).add(0.5);
+      const speckle: N = lite ? float(0.62) : mix(float(0.62), fol.mul(0.55).add(strandN.mul(0.45)), folAA);
       // Cornrow / braid partings: lines of bare scalp between rows running front to back along the
       // head's meridians (u.rows = hair.ts ROW_FREQ, rows per π radians about the front-back axis).
       const rowPhase: N = abs(sin(atan(q.x, q.y).mul(u.rows)));
@@ -364,9 +396,9 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
         const along: N = qx.mul(cos(ang)).add(qy.mul(sin(ang)));
         const k = 1 / 0.00042;
         const lane: N = floor(across.mul(k));
-        const seg: N = mx_cell_noise_float(vec3(lane, floor(along.mul(k / 7).add(lane.mul(0.37))), side));
-        const hairLine: N = smoothstep(0.45, 0.12, abs(fract(across.mul(k)).sub(0.5))).mul(step(0.28, seg));
-        const aa: N = smoothstep(0.0006, 0.00025, pxmV);
+        const seg: N = lite ? float(0) : mx_cell_noise_float(vec3(lane, floor(along.mul(k / 7).add(lane.mul(0.37))), side));
+        const hairLine: N = lite ? float(0) : smoothstep(0.45, 0.12, abs(fract(across.mul(k)).sub(0.5))).mul(step(0.28, seg));
+        const aa: N = lite ? float(0) : smoothstep(0.0006, 0.00025, pxmV);
         const density: N = smoothstep(-1.15, -0.6, bu).mul(0.3).add(0.7).mul(smoothstep(1.9, 0.9, bu).mul(0.45).add(0.55)).mul(u.browDensity);
         const edge: N = strandN.sub(0.5).mul(0.28);
         const soft: N = smoothstep(thick.mul(1.3), thick.mul(0.3), abs(bv.sub(centre)).add(edge.mul(thick)));
@@ -390,7 +422,7 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
       // over a blue-grey shadow (the hair sits under the skin surface).
       // Beard: ~4 mm clumps of short downward strands; the strands resolve only in close-ups (AA),
       // so at cageside the beard reads as a textured dark mass with a soft, irregular edge.
-      const clump: N = mx_noise_float(ref.mul(vec3(260, 170, 260))).mul(0.5).add(0.5);
+      const clump: N = lite ? float(0.5) : mx_noise_float(ref.mul(vec3(260, 170, 260))).mul(0.5).add(0.5);
       const bStrand: N = strandN;
       const beardTex: N = mix(float(0.8), smoothstep(0.25, 0.75, bStrand).mul(0.5).add(0.5), folAA).mul(clump.mul(0.3).add(0.8));
       const beardCov: N = smoothstep(0.08, 0.6, beardAmt.add(edgeNoise.mul(0.3))).mul(beardTex).clamp().mul(noLipV).mul(0.95);
@@ -411,7 +443,7 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
       };
       pPeri.assign(max(under(1), under(-1)).mul(headW).mul(front));
       // Fine vertical lines on the lips.
-      pLipLines.assign(abs(sin(ref.x.mul(2300).add(edgeNoise.mul(5.7)))));
+      if (!lite) pLipLines.assign(abs(sin(ref.x.mul(2300).add(edgeNoise.mul(5.7)))));
     });
     return float(1);
   })();
@@ -507,7 +539,7 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   }
   m.normalNode = normalMap(vec3(slope.mul(0.5).add(0.5), 1)) as N;
   // The film follows the pores and fine lines (a sweat highlight is broken, never a mirror).
-  m.clearcoatNormalNode = normalMap(vec3(slope.mul(0.75).add(beadXY).mul(0.5).add(0.5), 1)) as N;
+  m.clearcoatNormalNode = (lite ? m.normalNode : normalMap(vec3(slope.mul(0.75).add(beadXY).mul(0.5).add(0.5), 1))) as N;
 
   // --- dynamic: flush, damage, cuts, sweat ---------------------------------------------
   // Dry skin is not glossy: ~0.56 on the limbs, ~0.42 over the oily T-zone (skinB.b), ~0.6 on
@@ -609,7 +641,7 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
     const v: N = float(0).toVar();
     const t0: N = u.tattoo[0], t1: N = u.tattoo[1], t2: N = u.tattoo[2];
     const anyInk: N = dot(t0, vec4(1)).add(dot(t1, vec4(1))).add(dot(t2, vec4(1)));
-    If(gate(anyInk.greaterThan(0)), () => { v.assign(tattooInk(ref, u, lm)); });
+    If(gate(anyInk.greaterThan(0)), () => { v.assign(tattooInk(ref, u, lm, lite)); });
     return v;
   })();
   // Ink sits under the epidermis: multiply, slightly translucent.
@@ -627,10 +659,21 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
 
   // Lookdev debug view (dev/character.html ?dbg=<n>): 1 lash, 2 redness, 3 veins, 4 oil, 5 pores,
   // 6 cavity, 7 sweat propensity, 8 wetness, 9 static AO. Zero cost when 0 (a uniform branch).
+  // Arithmetic, not `select`: a select whose branches carry statements becomes an if/else, and
+  // every node first built inside a branch is built again outside it — the whole surface graph
+  // (head features, cuts, tattoos, the noises) was emitted twice, doubling the program and the
+  // per-pixel work (performance pass 2).
   const dbgV: N = [z67.z, sB.r, sB.g, sB.b, sA.a, sA.b, fx.x, wet, fx.w];
-  let dbgCol: N = vec3(0);
-  dbgV.forEach((v: N, i: number) => { dbgCol = select(skinDebug.equal(i + 1), vec3(v, v.mul(0.5), float(0.05)), dbgCol); });
-  col = select(skinDebug.greaterThan(0), dbgCol, col);
+  if (opt.legacySelect) {
+    let dbgCol: N = vec3(0);
+    dbgV.forEach((v: N, i: number) => { dbgCol = select(skinDebug.equal(i + 1), vec3(v, v.mul(0.5), float(0.05)), dbgCol); });
+    col = select(skinDebug.greaterThan(0), dbgCol, col);
+  } else {
+    const colV: N = col.toVar();
+    let dbgVal: N = float(0);
+    dbgV.forEach((v: N, i: number) => { dbgVal = dbgVal.add(float(v).mul(step(i + 0.5, skinDebug)).mul(step(skinDebug, i + 1.5))); });
+    col = mix(colV, vec3(dbgVal, dbgVal.mul(0.5), 0.05), step(0.5, skinDebug));
+  }
   m.colorNode = vec4(col, 1) as N;
   m.roughnessNode = rough.clamp(0.08, 0.9) as N;
   m.metalnessNode = float(0) as N;
@@ -649,6 +692,8 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   m.thinNode = max(misc.y, earM.mul(0.9));
   m.scatterColorNode = u.scatter;
   m.scatterAmountNode = float(1).sub(u.tone.mul(0.35));
+  // QA: rebuild this material with other options in-page (perf-ab.mjs skin variants).
+  m.userData.skinArgs = { tex, opt };
   return m;
 }
 
@@ -658,7 +703,7 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
  * `TattooSlot` order: leftArmFull, rightArmFull, leftForearm, rightForearm, chest, stomach, back,
  * neck, leftLeg, rightLeg, leftCalf, rightCalf.
  */
-function tattooInk(ref: N, u: SkinUniforms, lm: CanonicalLandmarks): N {
+function tattooInk(ref: N, u: SkinUniforms, lm: CanonicalLandmarks, lite = false): N {
   const t0: N = u.tattoo[0], t1: N = u.tattoo[1], t2: N = u.tattoo[2];
   const x: N = ref.x, y: N = ref.y, z: N = ref.z;
   const ax: N = abs(x);
@@ -670,7 +715,13 @@ function tattooInk(ref: N, u: SkinUniforms, lm: CanonicalLandmarks): N {
   };
   const blackwork = (p: N, scale: number): N => {
     const n: N = mx_noise_float(p.mul(scale));
-    const w: N = mx_worley_noise_float(p.mul(scale * 0.8));
+    // Lite: the distance to one jittered point in this cell (the point stays 0.25 from the cell's
+    // edges, so the 0.25-radius blobs are never cut) instead of the 27-cell Worley search.
+    const pc: N = p.mul(scale * 0.8);
+    const cell: N = floor(pc);
+    const w: N = lite
+      ? length(fract(pc).sub(vec3(mx_cell_noise_float(cell), mx_cell_noise_float(cell.add(17.3)), mx_cell_noise_float(cell.add(41.9))).mul(0.5).add(0.25)))
+      : mx_worley_noise_float(pc);
     const ring: N = smoothstep(0.05, 0.0, abs(n.mul(0.9).sub(0.1)).sub(0.06));
     const blob: N = smoothstep(0.25, 0.15, w).mul(smoothstep(0.1, 0.3, n));
     return max(ring, blob);

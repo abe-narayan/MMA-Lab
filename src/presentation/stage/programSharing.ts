@@ -17,9 +17,18 @@
  * Two buffers of the same property can never meet in one program (one skeleton per draw). Two
  * buffers three makes per object without a property path get names from what they hold (the
  * morph-target influences, the skinning node's own previous-frame bones).
+ *
+ * Second cause of duplicates (performance pass 2): the helper functions a graph calls (the
+ * MaterialX noise helpers, GGX, the PMREM lookups) are emitted in the order their code was first
+ * *registered*, and the first build of a function in the page's lifetime registers its callees in
+ * a different order from every later build (three builds the function body once per builder class
+ * and caches it). So the first skin program and every later one differed only in the order of
+ * `mx_floor`, `mx_fade`, `mx_select`, ... — a second 113 KB compile on a cold WebGL2 load. The
+ * definitions are now emitted in a canonical order (`orderCodes`: dependencies first, ties by
+ * name), which depends only on the set of functions, never on build history.
  * Idempotent; installed by `Stage.create` before any material is built.
  */
-import { GLSLNodeBuilder, ReferenceNode, WGSLNodeBuilder } from 'three/webgpu';
+import { GLSLNodeBuilder, NodeBuilder, ReferenceNode, WGSLNodeBuilder } from 'three/webgpu';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -42,6 +51,14 @@ export function installProgramSharing(): void {
     if (this.count !== null && this.node && typeof this.property === 'string') {
       this.node.__shareName = shareName(this.property);
     }
+  };
+  const nb = NodeBuilder.prototype as N;
+  nb.getCodes = function getCodesCanonical(this: N, shaderStage: string): string {
+    const codes: { code: string }[] | undefined = this.codes?.[shaderStage];
+    if (!codes) return '';
+    let code = '';
+    for (const c of orderCodes(codes.map((x) => x.code))) code += `${c}\n`;
+    return code;
   };
   for (const Builder of [GLSLNodeBuilder, WGSLNodeBuilder] as N[]) {
     const proto = Builder.prototype;
@@ -78,6 +95,45 @@ function objectBufferName(object: N, node: N): string | undefined {
     return 'skinning_previousBoneMatrices';
   }
   return undefined;
+}
+
+/** The function a code block defines: GLSL `type name (`, WGSL `fn name(`. */
+function definedName(code: string): string | null {
+  const m = /^\s*(?:fn\s+([A-Za-z_]\w*)\s*\(|[A-Za-z_]\w*\s+([A-Za-z_]\w*)\s*\()/.exec(code);
+  return m ? (m[1] ?? m[2] ?? null) : null;
+}
+
+/**
+ * Code blocks in a canonical order that depends only on the set of blocks: blocks that define no
+ * function keep their relative order at the front; functions follow, each after every function it
+ * calls (depth-first, siblings by name). Same set in, same text out.
+ */
+export function orderCodes(codes: readonly string[]): string[] {
+  const other: string[] = [];
+  const byName = new Map<string, string>();
+  for (const c of codes) {
+    const n = definedName(c);
+    if (n === null || byName.has(n)) other.push(c);
+    else byName.set(n, c);
+  }
+  const names = [...byName.keys()].sort();
+  const deps = new Map<string, string[]>();
+  for (const n of names) {
+    const body = byName.get(n)!;
+    deps.set(n, names.filter((d) => d !== n && new RegExp(`\\b${d}\\s*\\(`).test(body)));
+  }
+  const out: string[] = [...other];
+  const done = new Set<string>();
+  const visit = (n: string, path: Set<string>): void => {
+    if (done.has(n) || path.has(n)) return;
+    path.add(n);
+    for (const d of deps.get(n)!) visit(d, path);
+    path.delete(n);
+    done.add(n);
+    out.push(byName.get(n)!);
+  };
+  for (const n of names) visit(n, new Set());
+  return out;
 }
 
 /** QA: how many buffer uniforms took a shared name. */

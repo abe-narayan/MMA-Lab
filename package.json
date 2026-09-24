@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:single": "npm run build && node scripts/inline.mjs",
+    "build:single": "tsc --noEmit && vite build --mode single && node scripts/inline.mjs",
     "preview": "vite preview --port 4173",
     "test": "vitest run",
     "test:watch": "vitest",

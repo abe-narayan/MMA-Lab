@@ -145,14 +145,7 @@ export function buildKit(
     const solid = solidify(m, 0.0034);
     const si: number[] = [], sw: number[] = [];
     for (let v = 0; v < solid.pos.length / 3; v++) { si.push(B.head, 0, 0, 0); sw.push(1, 0, 0, 0); }
-    const mat = res.material('mouthguard', () => {
-      const mg = new THREE.MeshPhysicalNodeMaterial();
-      mg.colorNode = vec4(objectUniform('kit', (k) => k.mouthguard, new THREE.Vector3(0.5, 0.05, 0.05)), 1) as N;
-      mg.roughnessNode = float(0.22) as N;
-      mg.clearcoatNode = float(1) as N;
-      mg.clearcoatRoughnessNode = float(0.08) as N;
-      return mg;
-    });
+    const mat = res.material('mouthguard', mouthguardMaterial);
     add(toSkinnedGeometry(solid, si, sw), mat, rig.skelA, 'mouthguard');
   }
 
@@ -450,6 +443,21 @@ function boxingGlove(asset: BodyAsset, body: BuiltBody, tpos: Float32Array, side
   packGlove(out);
   const { si, sw } = frameSkin(out, side, (x) => smooth(-0.01, -0.09, x));
   return { mesh: out, si, sw };
+}
+
+/**
+ * Shared by every fighter. Built at module level on purpose (Leak fix,
+ * PHASE8_NOTES): a uniform callback created inside `buildKit` would keep that
+ * call's whole scope — the first fighter's meshes and geometry — alive for as
+ * long as the shared material lives.
+ */
+function mouthguardMaterial(): THREE.MeshPhysicalNodeMaterial {
+  const mg = new THREE.MeshPhysicalNodeMaterial();
+  mg.colorNode = vec4(objectUniform('kit', (k) => k.mouthguard, new THREE.Vector3(0.5, 0.05, 0.05)), 1) as N;
+  mg.roughnessNode = float(0.22) as N;
+  mg.clearcoatNode = float(1) as N;
+  mg.clearcoatRoughnessNode = float(0.08) as N;
+  return mg;
 }
 
 function gloveMaterial(tex: KitTextures, mma: boolean): THREE.MeshPhysicalNodeMaterial {

@@ -40,6 +40,7 @@
  */
 import * as THREE from 'three/webgpu';
 import { attribute, float, mix, positionLocal, vec3 } from 'three/tsl';
+import { releaseFromRenderer } from '../character/release';
 
 type Garment = 'shirt' | 'trousers' | 'shoes' | 'gloves';
 type V3 = [number, number, number];
@@ -417,15 +418,27 @@ function patchMaterial(): THREE.MeshStandardNodeMaterial {
   return m;
 }
 
+/**
+ * Garment materials, shared by every figure wearing the same garment (and
+ * across bouts). Keyed by content: `sig` carries the colours a material bakes
+ * in, so a corner in the other team colour gets its own material instead of
+ * the first bout's. Bounded: outfits come from the fixed team palette.
+ */
 const materials = new Map<string, THREE.Material>();
-function material(key: string, make: () => THREE.Material): THREE.Material {
-  let m = materials.get(key);
+function material(key: string, make: () => THREE.Material, sig = ''): THREE.Material {
+  const k = sig ? `${key}|${sig}` : key;
+  let m = materials.get(k);
   if (!m) {
     m = make();
     m.name = key;
-    materials.set(key, m);
+    materials.set(k, m);
   }
   return m;
+}
+
+/** The colours a garment material bakes in (the shirt; trousers' stripe and the collar derive from it). */
+function colourSig(o: Outfit): string {
+  return o.shirt.map((v) => v.toFixed(4)).join(',');
 }
 
 // ---------------------------------------------------------------------------
@@ -833,8 +846,8 @@ export function dressFigure(root: THREE.Object3D, outfit: Outfit): RefereeClothe
     bg.setIndex(piece.tris.length / 3 * 3 >= 65536 * 3 ? new THREE.Uint32BufferAttribute(piece.tris, 1) : piece.tris);
     const mat = g === 'shoes' ? material(`cloth-shoes-${outfit.id}`, () => shoeMaterial(outfit))
       : g === 'gloves' ? material(`cloth-gloves-${outfit.id}`, () => gloveMaterial(outfit.gloves!))
-        : g === 'shirt' ? material(`cloth-shirt-${outfit.id}`, () => clothMaterial(outfit.shirt, 0.82, null))
-          : material(`cloth-trousers-${outfit.id}`, () => clothMaterial(outfit.trousers, outfit.cut === 'slacks' ? 0.66 : 0.8, outfit.stripe));
+        : g === 'shirt' ? material(`cloth-shirt-${outfit.id}`, () => clothMaterial(outfit.shirt, 0.82, null), colourSig(outfit))
+          : material(`cloth-trousers-${outfit.id}`, () => clothMaterial(outfit.trousers, outfit.cut === 'slacks' ? 0.66 : 0.8, outfit.stripe), colourSig(outfit));
     addMesh(bg, mat, `outfit-${g}`);
   }
 
@@ -986,7 +999,7 @@ export function dressFigure(root: THREE.Object3D, outfit: Outfit): RefereeClothe
         ? [outfit.shirt[0] * 0.8, outfit.shirt[1] * 0.8, outfit.shirt[2] * 0.8] : outfit.shirt, 0.85, null);
       mm.side = THREE.DoubleSide;
       return mm;
-    }), 'outfit-collar');
+    }, colourSig(outfit)), 'outfit-collar');
   finishTrim(beltPos, beltSI, beltSW, beltMetal, beltTris, material('cloth-belt', beltMaterial), 'outfit-belt');
 
   // The chest patch: a small plate on the left chest, rigid with the chest bone.
@@ -1045,6 +1058,9 @@ export function dressFigure(root: THREE.Object3D, outfit: Outfit): RefereeClothe
     hiddenTriangles,
     triangles,
     dispose(): void {
+      // The garment materials are shared (`material()` above), so each mesh's
+      // render objects are released explicitly (character/release.ts).
+      releaseFromRenderer([], meshes);
       for (const g of geos) g.dispose();
       for (const m of meshes) m.removeFromParent();
     },

@@ -33,56 +33,13 @@ import {
   type BoutRun, type CommentaryLine, type IntentSample, type SimConfig,
 } from '../../sim';
 import { assembleWatchBout, loadWatchBout, type WatchBout } from '../replay/bout';
-import { FrameStore, isPackedFrames, packFrames, unpackFrames, type PackedFrames } from '../../sim/record/frames';
+import { FrameStore, packFrames, unpackFrames, type PackedFrames } from '../../sim/record/frames';
 
-export interface RunMessage {
-  type: 'run';
-  id: string;
-  config: SimConfig;
-  record: boolean;
-  progressEveryTicks: number;
-}
-
-export interface CancelMessage {
-  type: 'cancel';
-  id: string;
-}
-
-export type ToWorker = RunMessage | CancelMessage;
-
-export type FromWorker =
-  | { type: 'progress'; id: string; tick: number; round: number }
-  | { type: 'done'; id: string; run: BoutRun }
-  | { type: 'error'; id: string; message: string };
-
-/**
- * The `done` message as it crosses a real thread boundary. A recorded run's
- * `frames` is a Proxy view over typed-array columns, which `postMessage`
- * cannot clone, so the worker shim sends the columns themselves
- * (`packedFrames`, with their buffers transferred rather than copied) and
- * `runBout` rebuilds the view on arrival. In-process hosts never see this.
- */
-export type WireDone = { type: 'done'; id: string; run: Omit<BoutRun, 'frames'>; packedFrames?: PackedFrames };
-export type FromWorkerWire = Exclude<FromWorker, { type: 'done' }> | WireDone;
-
-/** Worker side: a message ready for `postMessage`, and what to transfer. */
-export function toWire(message: FromWorker): { message: FromWorkerWire; transfer: ArrayBuffer[] } {
-  if (message.type !== 'done' || !message.run.frames) return { message, transfer: [] };
-  const { frames, ...run } = message.run;
-  const { packed, transfer } = packFrames(frames);
-  return { message: { type: 'done', id: message.id, run, packedFrames: packed }, transfer };
-}
-
-/** Main-thread side: the inverse of `toWire`. */
-export function fromWire(message: FromWorkerWire): FromWorker {
-  if (message.type !== 'done') return message;
-  const { packedFrames, ...rest } = message as WireDone;
-  if (!isPackedFrames(packedFrames)) return { type: 'done', id: rest.id, run: rest.run as BoutRun };
-  return { type: 'done', id: rest.id, run: { ...rest.run, frames: unpackFrames(packedFrames) } };
-}
-
-/** Ticks between progress messages. 200 ticks is 2 s of fight at the default dt. */
-export const DEFAULT_PROGRESS_TICKS = 200;
+// The message types and the wire encoding live in ./simWire (engine-free, so
+// the app shell can import them without pulling the simulation engine into
+// the first-load bundle); re-exported here for existing importers.
+export * from './simWire';
+import { DEFAULT_PROGRESS_TICKS, type FromWorker, type RunMessage, type ToWorker } from './simWire';
 
 export interface RunnerHost {
   post(message: FromWorker): void;

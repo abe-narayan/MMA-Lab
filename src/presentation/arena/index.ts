@@ -29,7 +29,8 @@ import {
 } from './geometry';
 import { hashString } from './rng';
 import {
-  ContactOccluders, FenceLens, FloorMarks, OCCLUDER_COUNT, chainLinkMaterial, floorMaterial, ledMaterial, propMaterial, vinylMaterial,
+  ContactOccluders, FenceLens, FloorMarks, OCCLUDER_COUNT, chainLinkMaterial, floorMaterial, isSharedArenaTexture, ledMaterial, propMaterial,
+  vinylMaterial,
 } from './materials';
 import { bakeFightMarks, emptyMarks, fightMarkSplats, marksExtent } from './marks';
 import { broadcastRig, hallRig, streetRig, type Rig } from './lighting';
@@ -90,6 +91,13 @@ export interface VenueSet extends ArenaSet {
   setRecording(frames: readonly TickSnapshot[], events?: readonly SimEvent[], opts?: { blood?: boolean }): void;
   /** Near-lens defocus of the chain-link (focus distance and aperture uniforms); constants unless a camera drives them. */
   readonly fenceLens: FenceLens;
+  /**
+   * `environment` pre-wrapped as a PMREM node the set owns and frees in
+   * `dispose` (for `scene.environmentNode`). Handing three the bare texture
+   * instead makes it build a PMREM node (and generator) of its own per
+   * texture that nothing ever disposes: a per-bout leak (PHASE8_NOTES, "Leak fix").
+   */
+  readonly environmentNode: ReturnType<typeof pmremTexture> | null;
 }
 
 interface Built {
@@ -127,6 +135,7 @@ class Venue implements VenueSet {
   readonly object3d: THREE.Group;
   readonly bounds: { fightRadiusM: number; outerRadiusM: number; ceilingM: number };
   readonly environment: THREE.Texture | null;
+  readonly environmentNode: ReturnType<typeof pmremTexture> | null;
   readonly kind: SetKind;
   referee: RefereePlacement | null = null;
   crowd: CrowdState = { excitement: 0.15, stand: 0, flashRate: 1, phones: 0.03 };
@@ -149,6 +158,12 @@ class Venue implements VenueSet {
   private readonly built: Built;
   private crowdGroup = new THREE.Group();
   private readonly extraTextures: THREE.Texture[] = [];
+  /**
+   * PMREM nodes this set made (Leak fix, PHASE8_NOTES): each owns a
+   * PMREMGenerator whose blur meshes stay in the renderer's render-object
+   * list until the generator is disposed, pinning ~10 geometries per bout.
+   */
+  private readonly pmremNodes: { dispose(): void }[] = [];
   private crowdKey = '';
   private crowdTris = 0;
   private crowdFigures = 0;
@@ -178,6 +193,8 @@ class Venue implements VenueSet {
     this.object3d = this.built.root;
     this.object3d.name = `arena:${arena.id}`;
     this.environment = this.built.env;
+    // The scene's IBL as a node this set owns (see `environmentNode`).
+    this.environmentNode = this.ownPmrem(this.built.env);
     this.object3d.add(this.crowdGroup);
     this.setQuality(q);
   }
@@ -320,7 +337,7 @@ class Venue implements VenueSet {
     // Props outside the pool see the rig from afar: no fill banks, a dimmer canvas.
     const outside = buildEnvironment({ ...envSpec, fillBanks: false, floorRadiance: [0.45, 0.43, 0.4] }, this.seedNum);
     this.extraTextures.push(outside);
-    const outsideEnv = pmremTexture(outside);
+    const outsideEnv = this.ownPmrem(outside);
     for (const o of [arenaFloor, dressMesh, truss.frame]) (o.material as THREE.MeshStandardNodeMaterial).envNode = outsideEnv;
     // The fence's black vinyl coat: lit by the fill banks' broad reflections every
     // wire turned a pale grey; without them it stays black with the key's glint.
@@ -387,6 +404,13 @@ class Venue implements VenueSet {
     this.haze.colour.value.setRGB(1.0, 0.86, 0.68);
     this.haze.density.value = 0.0011;
     return { root, rig, env, rows, bowl, shafts: st.shafts, triangles: st.triangles, drawCalls: st.drawCalls };
+  }
+
+  /** A PMREM node for `tex`, disposed with the set (its generator with it). */
+  private ownPmrem(tex: THREE.Texture): ReturnType<typeof pmremTexture> {
+    const n = pmremTexture(tex);
+    this.pmremNodes.push(n);
+    return n;
   }
 
   private rebuildCrowd(q: QualitySettings): void {
@@ -604,7 +628,7 @@ class Venue implements VenueSet {
         const mats = Array.isArray(m.material) ? m.material : [m.material];
         for (const mat of mats) {
           for (const v of Object.values(mat as unknown as Record<string, unknown>)) {
-            if (v instanceof THREE.Texture) v.dispose();
+            if (v instanceof THREE.Texture) { if (!isSharedArenaTexture(v)) v.dispose(); }
             // Textures sampled through TSL nodes (floor canvas, LED boards,
             // loaded photo maps) are not material properties (review M2a).
             else collectNodeTextures(v, nodeTextures, seenNodes);
@@ -615,9 +639,10 @@ class Venue implements VenueSet {
     });
     this.built.env.dispose();
     for (const t of this.extraTextures) t.dispose();
-    // Shared module-level textures (the slope noise) are disposed too: three
-    // re-uploads a disposed texture on its next use, so the next venue is fine.
-    for (const t of nodeTextures) t.dispose();
+    for (const n of this.pmremNodes) n.dispose();
+    // Shared module-level textures (the slope noise) stay: with the presenter's
+    // deferred disposal the next venue may already be drawing with them.
+    for (const t of nodeTextures) if (!isSharedArenaTexture(t)) t.dispose();
     // Freed resources alone leave the venue in the scene graph, where the next
     // bout's venue would render alongside it (doubled lights and shadows).
     this.object3d.removeFromParent();

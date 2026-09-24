@@ -7,12 +7,19 @@
  * block p25s cancels the drift that makes page-to-page comparisons useless on a busy machine.
  *
  *   node scripts/dev/heavy.mjs node scripts/dev/perf-ab.mjs <base-url> [--shots main,cageside] [--rounds 5]
- *        [--size 2560x1440] [--only dof|skin|ao|sharpen]
+ *        [--size 2560x1440] [--only dof|skin|ao|sharpen|skindup|fencelens]
+ *
+ * Performance pass 2 modes (the "legacy" side is the pre-pass-2 path, same frame):
+ *   skindup    every body's skin swapped for the same graph built with the old debug `select`,
+ *              which emitted the whole surface graph twice (`legacySelect`);
+ *   fencelens  the chain-link's lens held at the old fixed focus 3.5 m / aperture 9 mm
+ *              (`presenter.fenceLensLive = false`) instead of the shot's.
  *
  * Needs `?gpuTiming=1&stagePost=abLegacy:1&fixedRes=1` (added). Prints one JSON line per shot:
  * legacy ms, new ms, saving, and per-pass medians of each side.
  */
 import { chromium } from 'playwright';
+import { captureGoto } from './capture-url.mjs';
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : dflt; };
@@ -32,6 +39,7 @@ const names = opt('shots', 'main,mainTight,cageside,ground,corner,finish').split
 
 const browser = await chromium.launch({ headless: true, channel: 'chromium', args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu'] });
 const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
+captureGoto(page); // ?capture=1: QA switches in production builds (capture-url.mjs)
 await page.goto(url, { waitUntil: 'load', timeout: 240000 });
 const live = () => page.waitForFunction(() => document.querySelector('[data-phase="live"]') && window.__watch && window.__presenter, null, { timeout: 240000 });
 await live();
@@ -52,7 +60,26 @@ for (const name of names) {
         const st = window.__presenter.stage;
         const pl = st.pipeline;
         const radius = pl.aoNode?.radius.value;
+        let skinSwap = null;
+        if (only === 'skindup') {
+          const mod = await import('/src/presentation/character/skinMaterial.ts');
+          const bodies = [];
+          st.scene.traverse((o) => { if (o.isSkinnedMesh && /^body-lod/.test(o.name)) bodies.push(o); });
+          const cur = bodies.map((o) => o.material);
+          const alt = new Map();
+          for (const m of new Set(cur)) { const a = m.userData.skinArgs; alt.set(m, mod.createSkinMaterial(a.tex, { ...a.opt, legacySelect: true })); }
+          skinSwap = (legacy) => bodies.forEach((o, i) => { o.material = legacy ? alt.get(cur[i]) : cur[i]; });
+        }
+        const pr = window.__presenter;
         const set = (legacy) => {
+          if (skinSwap) { skinSwap(legacy); return; }
+          if (only === 'fencelens') {
+            pr.fenceLensLive = !legacy;
+            const fl = pr.arena?.fenceLens;
+            if (legacy && fl) { fl.focus.value = 3.5; fl.aperture.value = 0.009; }
+            if (!legacy && fl) { const l = pr.stage.fenceLens(pr.lastShot); fl.focus.value = l.focus; fl.aperture.value = l.aperture; }
+            return;
+          }
           if (only === 'all' || only === 'dof' || only === 'sharpen') pl.useLegacy = legacy;
           if (only === 'all' || only === 'skin') window.__skinGatesOff.value = legacy ? 1 : 0;
           if ((only === 'all' || only === 'ao') && pl.aoNode) { st.aoClamp = !legacy; pl.aoNode.radius.value = legacy ? 0.4 : radius; }

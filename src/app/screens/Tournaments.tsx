@@ -40,7 +40,10 @@ import {
   describeCarry, EMPTY_LEDGER, type CarriedState, type DamageLedger,
 } from '../model/carryOver';
 import { clockOf, methodLabel } from './BoutResult';
-import { EmptyState, useConfirm, useToast, IconTrophy } from '../ui';
+import {
+  Alert, Button, Disclosure, EmptyState, InfoTip, LabelRow, Segmented, StatusBadge, Step, useConfirm, useToast,
+  IconPlay, IconPlus, IconTrash, IconTrophy, IconUsers,
+} from '../ui';
 
 export interface TournamentsProps {
   store: FighterStoreApi;
@@ -56,10 +59,17 @@ const FORMAT_LABELS: Readonly<Record<BracketFormat, string>> = Object.freeze({
   roundRobin: 'Round robin',
 });
 
+const SEEDING_LABELS: Readonly<Record<Tournament['seeding'], string>> = Object.freeze({
+  rating: 'By rating', manual: 'Pick order', random: 'Random',
+});
+const CARRY_SHORT: Readonly<Record<Tournament['carryOver'], string>> = Object.freeze({
+  none: 'None', sameNight: 'Same night', career: 'Career',
+});
+
 const CARRY_LABELS: Readonly<Record<Tournament['carryOver'], string>> = Object.freeze({
-  none: 'None — every fighter starts fresh',
-  sameNight: 'Same night — 30 % head, 50 % body and leg, cuts in full, stamina 85 %',
-  career: 'Career — the same, plus KO history and ageing',
+  none: 'Every fighter starts each match fresh.',
+  sameNight: 'Damage carries into the next match: 30 % of head damage, 50 % of body and leg, cuts in full, stamina at 85 %.',
+  career: 'As same night, plus the knockout history and ageing between rounds.',
 });
 
 // --------------------------------------------------------------------------
@@ -145,6 +155,9 @@ export function Tournaments({
   const [selected, setSelected] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [running, setRunning] = useState<string | null>(null);
+  // The builder is open by default only while there are no tournaments.
+  const [creating, setCreating] = useState(false);
+  const [entrantSearch, setEntrantSearch] = useState('');
   const [confirm, confirmUi] = useConfirm();
   const toast = useToast();
   const [draft, setDraft] = useState({
@@ -234,6 +247,7 @@ export function Tournaments({
     };
     matchStore.putTournament(t);
     setSelected(id);
+    setCreating(false);
     setMessage(null);
     onChanged();
   }, [draft, matchStore, onChanged, recordById]);
@@ -359,174 +373,265 @@ export function Tournaments({
 
   // ---- render ------------------------------------------------------------
 
+  const q = entrantSearch.trim().toLowerCase();
+  const entrantList = useMemo(() => {
+    const list = q === '' ? records : records.filter((r) => `${r.summary.name} ${r.summary.short} ${r.tags.join(' ')}`.toLowerCase().includes(q));
+    return [...list].sort((a, b) => a.summary.name.localeCompare(b.summary.name));
+  }, [records, q]);
+  const topRated = useCallback(() => {
+    const ranked = [...records].sort((a, b) => (b.summary.overallTier - a.summary.overallTier) || a.summary.name.localeCompare(b.summary.name));
+    setDraft((d) => ({ ...d, entrants: ranked.slice(0, d.size).map((r) => r.definition.id) }));
+  }, [records]);
+
+  const nameError = draft.name.trim() === '' ? 'Give the tournament a name.' : null;
+  const entrantError = draft.entrants.length < 2
+    ? 'Pick at least two entrants.'
+    : draft.entrants.length > draft.size
+      ? `This draw holds ${draft.size}. Remove ${draft.entrants.length - draft.size}, or pick a bigger draw.`
+      : null;
+  const byes = draft.format === 'roundRobin' ? 0 : Math.max(0, draft.size - draft.entrants.length);
+  const canCreate = !nameError && !entrantError;
+  const pairing = pairingWarning(draft.ruleset, draft.arena);
+  const showBuilder = creating || tournaments.length === 0;
+  const advancedChanged = (draft.seeding !== 'rating' ? 1 : 0) + (draft.carryOver !== 'none' ? 1 : 0);
+
   return (
-    <div className="ms">
+    <div className="ms setup tr-page">
       <header className="ms-head page-head">
         <div>
           <h1 className="page-title">Tournaments</h1>
           <p className="page-sub">
-            Brackets are generated from the entrant list and the seeding method; a random draw is
-            seeded from the tournament id, so the same tournament always produces the same bracket.
-            Byes fill the gap when there are fewer entrants than places.
+            Put fighters in a bracket and run it match by match; winners advance until one is left.
+            The same tournament always produces the same draw and the same fights.
           </p>
         </div>
+        {!showBuilder ? (
+          <div className="page-actions">
+            <Button variant="primary" icon={<IconPlus />} onClick={() => setCreating(true)}>New tournament</Button>
+          </div>
+        ) : null}
       </header>
 
-      {message ? <p className="ui-alert" role="status">{message}</p> : null}
+      {message ? <Alert tone="info">{message}</Alert> : null}
 
-      <section className="fc-section">
-        <h3 className="fc-h fc-h--sub">New tournament</h3>
-        <div className="fc-grid">
-          <div className="fc-field">
-            <label htmlFor="tr-name">Name</label>
-            <input
-              id="tr-name" className="field" type="text" value={draft.name}
-              onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-            />
-          </div>
-          <div className="fc-field">
-            <label htmlFor="tr-format">Format</label>
-            <select
-              id="tr-format" className="field" value={draft.format}
-              onChange={(e) => {
-                const format = e.target.value as BracketFormat;
-                setDraft((d) => ({
-                  ...d,
-                  format,
-                  size: SUPPORTED_SIZES[format].includes(d.size)
-                    ? d.size
-                    : SUPPORTED_SIZES[format][0],
-                }));
-              }}
+      <div className="tr-layout">
+        {showBuilder ? (
+          <>
+            <Step
+              n={1}
+              title="Format"
+              sub={`${FORMAT_LABELS[draft.format]}, ${draft.size} places`}
+              status={nameError ? 'Needs a name' : undefined}
+              statusTone="warn"
+              actions={tournaments.length > 0 ? <Button size="sm" variant="ghost" onClick={() => setCreating(false)}>Cancel</Button> : undefined}
             >
-              {(Object.keys(FORMAT_LABELS) as BracketFormat[]).map((f) => (
-                <option key={f} value={f}>{FORMAT_LABELS[f]}</option>
-              ))}
-            </select>
-            <p className="fc-help">
-              Double elimination has no bracket reset: the grand final is one match, and whoever
-              comes out of the losers bracket wins the tournament by winning it.
-            </p>
-          </div>
-          <div className="fc-field fc-field--narrow">
-            <label htmlFor="tr-size">Draw size</label>
-            <select
-              id="tr-size" className="field" value={String(draft.size)}
-              onChange={(e) => setDraft((d) => ({ ...d, size: Number(e.target.value) }))}
-            >
-              {SUPPORTED_SIZES[draft.format].map((s) => (
-                <option key={s} value={String(s)}>{s}</option>
-              ))}
-            </select>
-          </div>
-          <div className="fc-field">
-            <label htmlFor="tr-seeding">Seeding</label>
-            <select
-              id="tr-seeding" className="field" value={draft.seeding}
-              onChange={(e) => setDraft((d) => ({ ...d, seeding: e.target.value as Tournament['seeding'] }))}
-            >
-              <option value="rating">By rating</option>
-              <option value="manual">Manual (the order you pick them)</option>
-              <option value="random">Random (seeded from the tournament id)</option>
-            </select>
-          </div>
-          <div className="fc-field">
-            <label htmlFor="tr-carry">Carry-over</label>
-            <select
-              id="tr-carry" className="field" value={draft.carryOver}
-              onChange={(e) => setDraft((d) => ({ ...d, carryOver: e.target.value as Tournament['carryOver'] }))}
-            >
-              {(Object.keys(CARRY_LABELS) as Tournament['carryOver'][]).map((c) => (
-                <option key={c} value={c}>{CARRY_LABELS[c]}</option>
-              ))}
-            </select>
-            <p className="fc-help">
-              The engine has no "start this fighter damaged" input, so a carried pool is applied as
-              a penalty on chin, body toughness, foot speed, recovery and cardio. The fractions are
-              exact; the mapping onto attributes is an approximation. Under <b>career</b> a fighter
-              also takes the knockout onto their record (odds ratio {KO_HISTORY_ODDS_RATIO} per
-              prior KO) and ages {CAREER_GAP_DAYS} days between rounds.
-            </p>
-          </div>
-          <div className="fc-field">
-            <label htmlFor="tr-ruleset">Ruleset</label>
-            <select
-              id="tr-ruleset" className="field" value={draft.ruleset}
-              onChange={(e) => setDraft((d) => ({ ...d, ruleset: e.target.value as RulesetId }))}
-            >
-              {RULESET_IDS.map((id) => <option key={id} value={id}>{RULESET_LABELS[id]}</option>)}
-            </select>
-          </div>
-          <div className="fc-field">
-            <label htmlFor="tr-arena">Arena</label>
-            <select
-              id="tr-arena" className="field" value={draft.arena}
-              onChange={(e) => setDraft((d) => ({ ...d, arena: e.target.value as ArenaId }))}
-            >
-              {ARENA_IDS.map((id) => <option key={id} value={id}>{ARENAS[id].name}</option>)}
-            </select>
-            {pairingWarning(draft.ruleset, draft.arena)
-              ? <p className="ms-warn ms-warn--warning">{pairingWarning(draft.ruleset, draft.arena)}</p>
-              : null}
-          </div>
-        </div>
+              <div className="setup-row">
+                <div className="setup-field setup-field--grow" data-invalid={nameError ? true : undefined}>
+                  <LabelRow htmlFor="tr-name" label="Name" />
+                  <input
+                    id="tr-name" className="field" type="text" value={draft.name} maxLength={80}
+                    aria-invalid={nameError ? true : undefined}
+                    aria-describedby={nameError ? 'tr-name-err' : undefined}
+                    onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                  />
+                  {nameError ? <p className="ui-field-error" id="tr-name-err">{nameError}</p> : null}
+                </div>
+                <div className="setup-field">
+                  <LabelRow
+                    label="Format"
+                    tip="Single elimination: one loss and you are out. Double elimination: a second chance through the losers bracket (no bracket reset: the grand final is one match). Round robin: everyone fights everyone."
+                  />
+                  <Segmented<BracketFormat>
+                    label="Format"
+                    value={draft.format}
+                    onChange={(format) => setDraft((d) => ({
+                      ...d,
+                      format,
+                      size: SUPPORTED_SIZES[format].includes(d.size) ? d.size : SUPPORTED_SIZES[format][0],
+                    }))}
+                    options={(Object.keys(FORMAT_LABELS) as BracketFormat[]).map((f) => ({ value: f, label: FORMAT_LABELS[f] }))}
+                  />
+                </div>
+                <div className="setup-field">
+                  <LabelRow label={draft.format === 'roundRobin' ? 'Fighters' : 'Draw size'} tip="With fewer entrants than places, the top seeds get byes into the next round." />
+                  <Segmented<string>
+                    label="Draw size"
+                    value={String(draft.size)}
+                    onChange={(v) => setDraft((d) => ({ ...d, size: Number(v) }))}
+                    options={SUPPORTED_SIZES[draft.format].map((s) => ({ value: String(s), label: String(s) }))}
+                  />
+                </div>
+              </div>
+            </Step>
 
-        <fieldset className="fc-fieldset">
-          <legend>Entrants — {draft.entrants.length} of {draft.size}</legend>
-          <div className="tr-entrants">
-            {records.map((r) => (
-              <label key={r.definition.id} className="tr-entrant">
+            <Step
+              n={2}
+              title="Entrants"
+              sub={`${draft.entrants.length} of ${draft.size} picked${byes > 0 && draft.entrants.length >= 2 ? ` · ${byes} bye${byes === 1 ? '' : 's'}` : ''}`}
+              status={entrantError ? (draft.entrants.length > draft.size ? 'Too many' : 'Too few') : 'Ready'}
+              statusTone={entrantError ? 'warn' : 'ok'}
+            >
+              <div className="tr-entrant-tools">
                 <input
-                  type="checkbox"
-                  checked={draft.entrants.includes(r.definition.id)}
-                  onChange={() => toggleEntrant(r.definition.id)}
+                  className="field"
+                  type="search"
+                  placeholder="Filter by name or tag"
+                  aria-label="Filter entrants"
+                  value={entrantSearch}
+                  onChange={(e) => setEntrantSearch(e.target.value)}
                 />
-                <span>{r.summary.name}</span>
-                <span className="mono ms-dim">T{r.summary.overallTier} · {r.summary.weightClass}</span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+                <Button size="sm" onClick={topRated}>Pick the top {draft.size} by rating</Button>
+                <Button size="sm" variant="ghost" disabled={draft.entrants.length === 0} onClick={() => setDraft((d) => ({ ...d, entrants: [] }))}>Clear</Button>
+              </div>
+              {records.length === 0 ? (
+                <EmptyState compact icon={<IconUsers />} title="No fighters to enter">Add or import fighters on the Fighters page first.</EmptyState>
+              ) : (
+                <div className="tr-entrants" role="group" aria-label="Entrants" aria-describedby={entrantError ? 'tr-entrants-err' : undefined}>
+                  {entrantList.map((r) => {
+                    const on = draft.entrants.includes(r.definition.id);
+                    const order = draft.entrants.indexOf(r.definition.id);
+                    return (
+                      <label key={r.definition.id} className={`tr-entrant${on ? ' is-on' : ''}`}>
+                        <input type="checkbox" checked={on} onChange={() => toggleEntrant(r.definition.id)} />
+                        <span className="tr-entrant-text">
+                          <span className="tr-entrant-name">{r.summary.name}</span>
+                          <span className="tr-entrant-meta">
+                            {draft.seeding === 'manual' && on ? `Seed ${order + 1} · ` : ''}T{r.summary.overallTier} · {r.summary.weightClass}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                  {entrantList.length === 0 ? <p className="ui-field-hint">No fighter matches “{entrantSearch}”.</p> : null}
+                </div>
+              )}
+              {entrantError ? <p className="ui-field-error" id="tr-entrants-err">{entrantError}</p> : null}
+            </Step>
 
-        <div className="fdb-actions">
-          <button type="button" className="btn btn--play" onClick={create}>Create bracket</button>
-        </div>
-      </section>
+            <Step
+              n={3}
+              title="Rules"
+              sub={`${RULESET_LABELS[draft.ruleset]} · ${ARENAS[draft.arena].name}`}
+              status={pairing ? 'Non-standard venue' : undefined}
+              statusTone="warn"
+            >
+              <div className="setup-grid">
+                <div className="setup-field">
+                  <LabelRow htmlFor="tr-ruleset" label="Ruleset" tip="Every match in the tournament uses this ruleset, with its default rounds." />
+                  <select
+                    id="tr-ruleset" className="field" value={draft.ruleset}
+                    onChange={(e) => setDraft((d) => ({ ...d, ruleset: e.target.value as RulesetId }))}
+                  >
+                    {RULESET_IDS.map((id) => <option key={id} value={id}>{RULESET_LABELS[id]}</option>)}
+                  </select>
+                </div>
+                <div className="setup-field" data-invalid={pairing ? 'warn' : undefined}>
+                  <LabelRow htmlFor="tr-arena" label="Arena" />
+                  <select
+                    id="tr-arena" className="field" value={draft.arena}
+                    onChange={(e) => setDraft((d) => ({ ...d, arena: e.target.value as ArenaId }))}
+                  >
+                    {ARENA_IDS.map((id) => <option key={id} value={id}>{ARENAS[id].name}</option>)}
+                  </select>
+                  {pairing ? (
+                    <p className="setup-warn">
+                      Not where this ruleset is normally held. It will still run.
+                      <InfoTip text={pairing} label="Why is this venue non-standard?" />
+                    </p>
+                  ) : null}
+                </div>
+              </div>
 
-      <section className="fc-section">
-        <h3 className="fc-h fc-h--sub">Saved tournaments</h3>
-        {tournaments.length === 0 ? (
-          <EmptyState compact icon={<IconTrophy />} title="No tournaments yet">Pick a format and at least two entrants above, then create the bracket.</EmptyState>
-        ) : (
-          <div className="fdb-actions tr-list">
-            {tournaments.map((t) => (
-              <span key={t.id} className="tr-chip">
-                <button
-                  type="button"
-                  className="btn btn--chip"
-                  aria-pressed={selected === t.id}
-                  onClick={() => setSelected(t.id)}
-                >
-                  {t.name} · {FORMAT_LABELS[t.format]} {t.size}
-                </button>
-                <button type="button" className="btn btn--danger btn--chip" onClick={() => { void remove(t); }}>
-                  Delete
-                </button>
-              </span>
-            ))}
-          </div>
-        )}
-      </section>
+              <Disclosure summary="Seeding and carry-over" summaryNote={advancedChanged > 0 ? `${advancedChanged} changed` : 'Defaults'}>
+                <div className="setup-row">
+                  <div className="setup-field">
+                    <LabelRow label="Seeding" tip="Who meets whom in the first round. Random is seeded from the tournament, so the draw is still reproducible." />
+                    <Segmented<Tournament['seeding']>
+                      label="Seeding"
+                      value={draft.seeding}
+                      onChange={(v) => setDraft((d) => ({ ...d, seeding: v }))}
+                      options={(['rating', 'manual', 'random'] as const).map((v) => ({ value: v, label: SEEDING_LABELS[v] }))}
+                    />
+                  </div>
+                  <div className="setup-field">
+                    <LabelRow
+                      label="Carry-over"
+                      tip={`Whether damage from earlier matches follows a fighter into the next. It is applied as a penalty on chin, body toughness, foot speed, recovery and cardio (an approximation). Career also adds the knockout to the fighter's record (odds ratio ${KO_HISTORY_ODDS_RATIO} per prior KO) and ages them ${CAREER_GAP_DAYS} days between rounds.`}
+                    />
+                    <Segmented<Tournament['carryOver']>
+                      label="Carry-over"
+                      value={draft.carryOver}
+                      onChange={(v) => setDraft((d) => ({ ...d, carryOver: v }))}
+                      options={(['none', 'sameNight', 'career'] as const).map((v) => ({ value: v, label: CARRY_SHORT[v] }))}
+                    />
+                    <p className="ui-field-hint">{CARRY_LABELS[draft.carryOver]}</p>
+                  </div>
+                </div>
+              </Disclosure>
+            </Step>
 
-      {current ? (
-        <TournamentView
-          t={current}
-          nameOf={nameOf}
-          running={running}
-          onRun={(round, match) => runMatch(current, round, match)}
-          carry={carryStates(current, historyById)}
-        />
-      ) : null}
+            <Step
+              n={4}
+              title="Create"
+              sub={canCreate ? `${draft.name.trim()} · ${draft.entrants.length} entrants` : 'Fix the items above to create the bracket.'}
+              status={canCreate ? 'Ready' : 'Not ready'}
+              statusTone={canCreate ? 'ok' : 'alert'}
+            >
+              {!canCreate ? (
+                <ul className="setup-problems" aria-label="Before you can create the bracket">
+                  {[nameError, entrantError].filter(Boolean).map((p) => <li key={p as string}>{p}</li>)}
+                </ul>
+              ) : null}
+              <div className="setup-run">
+                <Button variant="primary" size="lg" icon={<IconTrophy />} disabled={!canCreate} onClick={create}>
+                  Create bracket
+                </Button>
+              </div>
+            </Step>
+          </>
+        ) : null}
+
+        {tournaments.length > 0 ? (
+          <section className="ui-step" aria-labelledby="tr-saved-title">
+            <header className="ui-step-head">
+              <div className="ui-step-heading">
+                <h2 className="ui-step-title" id="tr-saved-title">Your tournaments</h2>
+                <p className="ui-step-sub">Open one to see its bracket and run the next match.</p>
+              </div>
+            </header>
+            <div className="ui-step-body">
+              <div className="tr-saved">
+                {tournaments.map((t) => {
+                  const plan = bracketPlan(t.format, t.size);
+                  const done = (t.bracket as BracketMatch[][]).flat().filter((m) => m.winner !== null).length;
+                  return (
+                    <div key={t.id} className="tr-card" data-selected={selected === t.id || undefined}>
+                      <button type="button" className="tr-card-open" aria-pressed={selected === t.id} onClick={() => { setSelected(t.id); setCreating(false); }}>
+                        <b>{t.name}</b>
+                        <span>{FORMAT_LABELS[t.format]} · {t.entrantIds.length} fighters · {done} of {matchCount(plan)} decided</span>
+                      </button>
+                      <Button size="sm" variant="ghost" iconOnly aria-label={`Delete ${t.name}`} title="Delete" icon={<IconTrash />} onClick={() => { void remove(t); }} />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        {current && !showBuilder ? (
+          <TournamentView
+            t={current}
+            nameOf={nameOf}
+            running={running}
+            onRun={(round, match) => runMatch(current, round, match)}
+            carry={carryStates(current, historyById)}
+          />
+        ) : null}
+        {!current && !showBuilder && tournaments.length > 0 ? (
+          <EmptyState compact icon={<IconTrophy />} title="Pick a tournament">Open one of your tournaments above to see its bracket.</EmptyState>
+        ) : null}
+      </div>
       {confirmUi}
     </div>
   );
@@ -553,22 +658,25 @@ function TournamentView({
   const played = bracket.flat().filter((m) => m.winner !== null).length;
 
   return (
-    <section className="fc-section">
-      <header className="ms-head">
-        <div>
-          <h3 className="fc-h fc-h--sub">{t.name}</h3>
-          <p className="ms-sub mono">
-            {FORMAT_LABELS[t.format]} · {t.size} places · {t.entrantIds.length} entrants ·{' '}
-            {played} of {matchCount(plan)} matches decided · seeding {t.seeding} ·{' '}
-            carry-over {t.carryOver}
+    <section className="ui-step" aria-labelledby="tr-view-title">
+      <header className="ui-step-head">
+        <div className="ui-step-heading">
+          <h2 className="ui-step-title" id="tr-view-title">{t.name}</h2>
+          <p className="ui-step-sub">
+            {FORMAT_LABELS[t.format]} · {t.entrantIds.length} fighters · seeding {SEEDING_LABELS[t.seeding].toLowerCase()} ·
+            {' '}carry-over {CARRY_SHORT[t.carryOver].toLowerCase()}
           </p>
         </div>
+        <StatusBadge tone={champion ? 'ok' : 'info'} dot>
+          {champion ? 'Finished' : `${played} of ${matchCount(plan)} matches decided`}
+        </StatusBadge>
       </header>
+      <div className="ui-step-body">
 
       {champion ? (
-        <p className="ms-warn ms-warn--note">
+        <Alert tone="ok">
           <b>{nameOf(champion)}</b> wins {t.name}.
-        </p>
+        </Alert>
       ) : null}
 
       {carry.incomplete.length > 0 ? (
@@ -582,7 +690,7 @@ function TournamentView({
 
       {ready.length > 0 ? (
         <div className="tr-next">
-          <h4 className="fc-h fc-h--sub">Next up</h4>
+          <h3 className="section-title">Next up</h3>
           {ready.map((m) => {
             const key = `${m.round}:${m.match}`;
             return (
@@ -593,19 +701,22 @@ function TournamentView({
                   <span className="ms-dim"> vs </span>
                   {nameOf(m.b)}
                 </span>
-                <span className="mono ms-dim">
-                  {describeCarry(carry.state.get(m.a) ?? FRESH, t.carryOver)}
-                  {' '}
-                  {describeCarry(carry.state.get(m.b) ?? FRESH, t.carryOver)}
-                </span>
-                <button
-                  type="button"
-                  className="btn btn--play"
+                {t.carryOver === 'none' ? <span /> : (
+                  <span className="ms-dim tr-next-carry">
+                    {describeCarry(carry.state.get(m.a) ?? FRESH, t.carryOver)}
+                    {' '}
+                    {describeCarry(carry.state.get(m.b) ?? FRESH, t.carryOver)}
+                  </span>
+                )}
+                <Button
+                  variant="primary"
+                  icon={<IconPlay />}
                   disabled={running !== null}
+                  busy={running === key}
                   onClick={() => onRun(m.round, m.match)}
                 >
-                  {running === key ? 'Running…' : 'Run'}
-                </button>
+                  {running === key ? 'Running…' : 'Run match'}
+                </Button>
               </div>
             );
           })}
@@ -662,12 +773,12 @@ function TournamentView({
         </div>
       ) : null}
 
-      <p className="fc-help mono">
-        Each match runs on the seed <code>{boutSeed(t.id, 'tournament', 0)}</code> and its siblings,
-        so a tournament re-run from the same draw produces the same night of fights.
-        {' '}Bouts appear in History with their round label; a finish at {clockOf(0)} means the
-        opening bell.
+      <p className="ui-field-hint">
+        Every match is saved in History with its round label. Seeds are derived from the tournament
+        (the first is <code>{boutSeed(t.id, 'tournament', 0)}</code>), so the same draw always
+        produces the same night of fights; a finish at {clockOf(0)} means the opening bell.
       </p>
+      </div>
     </section>
   );
 }

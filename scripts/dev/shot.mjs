@@ -18,6 +18,7 @@
  * Prints backend, GPU, and any `window.__stats` the page exposes.
  */
 import { chromium } from 'playwright';
+import { captureGoto } from './capture-url.mjs';
 
 const args = process.argv.slice(2);
 const url0 = args[0];
@@ -45,6 +46,7 @@ const browser = await chromium.launch({
   args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu'],
 });
 const page = await browser.newPage({ viewport: { width: w, height: h }, deviceScaleFactor: 1 });
+captureGoto(page); // ?capture=1: QA switches in production builds (capture-url.mjs)
 const logs = [];
 page.on('console', (m) => logs.push(`[${m.type()}] ${m.text()}`));
 page.on('pageerror', (e) => logs.push(`[pageerror] ${e.message}`));

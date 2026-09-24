@@ -24,7 +24,8 @@
  * Backend fallback: WebGPU, then WebGL2 (three does this inside the renderer),
  * then `onUnavailable`, which the Watch screen answers by showing the 2D view.
  *
- * `window.__presenter` exposes the live presenter for QA scripts.
+ * `window.__presenter` exposes the live presenter for QA scripts (development
+ * or `?capture=1` only, like `__ttff`: src/app/devFlags.ts).
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { SimEvent, TickSnapshot } from '../../sim';
@@ -34,6 +35,7 @@ import type {
 import type { ReplayState, ShotKind } from '../../presentation/camera';
 import { createPresenter, type Presenter } from '../../presentation/presenter';
 import { SeekDetector } from '../replay/broadcast';
+import { exposeDevGlobal } from '../devFlags';
 
 export interface Playhead {
   frame: TickSnapshot | null;
@@ -116,10 +118,14 @@ function now(): number {
 }
 
 function publishTtff(t: Ttff): void {
-  (window as unknown as { __ttff?: Ttff }).__ttff = { ...t };
+  exposeDevGlobal('__ttff', { ...t });
 }
 
-function inputFor(p: Arena3DProps & Playhead, tickSeconds: number, discontinuity: boolean): FrameInput | null {
+/**
+ * The presenter's input for this frame. `p` is the host's live playhead (a
+ * reused object, read field by field; nothing here keeps it) or the props.
+ */
+function inputFor(p: Playhead, fallbackEvents: readonly SimEvent[], tickSeconds: number, discontinuity: boolean): FrameInput | null {
   if (!p.frame) return null;
   const nextT = p.next?.t ?? p.frame.t + tickSeconds;
   return {
@@ -127,7 +133,7 @@ function inputFor(p: Arena3DProps & Playhead, tickSeconds: number, discontinuity
     next: p.next,
     alpha: p.alpha,
     simTime: p.frame.t + (nextT - p.frame.t) * p.alpha,
-    events: p.events,
+    events: p.events ?? fallbackEvents,
     playbackRate: p.playbackRate,
     replay: p.replayState !== undefined ? !!p.replayState || p.replay : p.replay,
     discontinuity,
@@ -150,9 +156,11 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
   const [generation, setGeneration] = useState(0);
   const lossesRef = useRef(0);
 
-  const playhead = (): Arena3DProps & Playhead => {
+  // The playhead now: the host's reader when given, else the props. No
+  // per-frame spread of the props object (audit H4).
+  const playhead = (): Playhead => {
     const p0 = propsRef.current;
-    return p0.getPlayhead ? { ...p0, ...p0.getPlayhead() } : p0;
+    return p0.getPlayhead ? p0.getPlayhead() : p0;
   };
 
   /** Give up on 3D: the host shows the 2D board with this reason. */
@@ -197,7 +205,7 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
       ttffRef.current.deviceMs = Math.round(now() - ttffRef.current.mountMs);
       setBackend(b);
       setStatus('ready');
-      (window as unknown as { __presenter?: Presenter }).__presenter = presenter;
+      exposeDevGlobal('__presenter', presenter);
       propsRef.current.onBackend?.(b);
       if (propsRef.current.onRecommendedQuality) {
         presenter.recommendedQuality().then((rec) => {
@@ -244,7 +252,7 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
       setPhase('compiling');
       // Pose the opening frame so the camera, bodies and referee are where the
       // first picture will have them, then compile everything.
-      const input = inputFor(playhead(), propsRef.current.tickSeconds, true);
+      const input = inputFor(playhead(), propsRef.current.events, propsRef.current.tickSeconds, true);
       if (input) presenter.update(input, 0);
       const t1 = now();
       const w = await presenter.warmUpAsync((loaded, total) => {
@@ -316,9 +324,9 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
       if (!presenter || !p.frame) return;
       const realDt = Math.min(0.1, Math.max(0, (t - last) / 1000));
       last = t;
-      const discontinuity = seek.next(p.frame.tick, p.seekVersion);
+      const discontinuity = seek.next(p.frame.tick, p.seekVersion ?? propsRef.current.seekVersion);
       if (p.replayState !== undefined) presenter.setReplay(p.replayState);
-      const input = inputFor(p, p.tickSeconds, discontinuity);
+      const input = inputFor(p, propsRef.current.events, propsRef.current.tickSeconds, discontinuity);
       if (!input) return;
       presenter.update(input, realDt);
       presenter.render();

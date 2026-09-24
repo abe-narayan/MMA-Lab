@@ -45,6 +45,78 @@ export const AVOID = {
   omega: 1.4,
 } as const;
 
+/**
+ * The between-rounds corner handheld works 1.9 m from a seated fighter with the
+ * cornermen kneeling and leaning in between (performance pass 2): at that range
+ * a cornerman's back grazing the sight line to the fighter's chest or hips fills
+ * a quarter of the frame, which the broadcast-distance thresholds above let
+ * through (the hips alone are 22 % of the subject). So that shot counts the
+ * people in the cage with a margin for their clothes and lean, reacts to any
+ * hidden sample, and may cross to the other side of the fighter.
+ */
+export const CORNER_AVOID = {
+  /** Added to the referee's and cornermen's torso capsule radius (m; thinner parts in proportion). */
+  margin: 0.1,
+  /** Capsules thinner than this are arms: counted from the shoulder to just past the elbow. */
+  minR: 0.07,
+  limit: 0.05,
+  clearTo: 0.02,
+  homeBelow: 0.02,
+  /**
+   * Offsets from the home spot, smallest move first: (azimuth rad, lens lift m).
+   * A lift of 25-40 cm (a standing operator's shoulder height) puts a kneeling
+   * coach below the bottom of the frame; the same list is also tried about the
+   * fighter's other side.
+   */
+  offsets: [
+    [0.1, 0], [-0.1, 0], [0, 0.25], [0.1, 0.25], [-0.1, 0.25], [0.2, 0], [-0.2, 0], [0, 0.4],
+    [0.2, 0.25], [-0.2, 0.25], [0.2, 0.4], [-0.2, 0.4], [0.3, 0], [-0.3, 0], [0.3, 0.4], [-0.3, 0.4],
+  ] as const,
+} as const;
+
+/**
+ * What the corner handheld must see of the seated fighter: `subjectSamples`
+ * plus the rest of him — his shoulders and hips either side of the chest and
+ * pelvis and his lap toward the lens — so a cornerman's back across his lap or
+ * his arm counts, not only one across his face. A coach's head at the foot of
+ * the picture beside him is how a corner shot looks and is not counted.
+ * `toLens` is the horizontal direction from the fighter toward the lens.
+ * Writes into `out` (reused).
+ */
+export function cornerSamples(p: FighterPoints, toLens: readonly [number, number], out: SamplePoint[]): SamplePoint[] {
+  const [lx, lz] = toLens;
+  const rx = lz, rz = -lx;
+  const at = (q: V3, side: number, fwd: number, dy: number): V3 => [q[0] + rx * side + lx * fwd, q[1] + dy, q[2] + rz * side + lz * fwd];
+  out.length = 0;
+  out.push(
+    { p: p.head, w: 2 }, { p: p.chest, w: 1.5 }, { p: p.hips, w: 1 },
+    { p: at(p.chest, 0.22, 0, 0), w: 0.75 }, { p: at(p.chest, -0.22, 0, 0), w: 0.75 },
+    { p: at(p.hips, 0.22, 0.1, 0), w: 0.75 }, { p: at(p.hips, -0.22, 0.1, 0), w: 0.75 },
+    { p: at(p.hips, 0, 0.35, -0.05), w: 0.75 },
+  );
+  return out;
+}
+
+/**
+ * `caps` grown for clothes and lean: the torso (r 0.17) by `margin`, thinner
+ * parts in proportion. Arms (thinner than `armR`) count from the shoulder to
+ * just past the elbow only: a cornerman's hand on the fighter's knee or face is
+ * part of the picture, his shoulder and upper arm across the frame are not.
+ * Written into `out` (reused; no allocation once warm).
+ */
+export function inflateCapsules(caps: readonly Capsule[], margin: number, out: Capsule[], armR = 0): Capsule[] {
+  for (let i = 0; i < caps.length; i++) {
+    const c = caps[i]!;
+    const o = out[i] ?? (out[i] = { a: c.a, b: [0, 0, 0], r: 0 });
+    const k = c.r < armR ? 0.55 : 1;
+    o.a = c.a;
+    o.b = [c.a[0] + (c.b[0] - c.a[0]) * k, c.a[1] + (c.b[1] - c.a[1]) * k, c.a[2] + (c.b[2] - c.a[2]) * k];
+    o.r = c.r + margin * Math.min(1, c.r / 0.17);
+  }
+  out.length = caps.length;
+  return out;
+}
+
 const v = (arr: Float32Array, i: number): V3 => [arr[i * 3]!, arr[i * 3 + 1]!, arr[i * 3 + 2]!];
 
 /** Capsules for a posed body (torso, head, thighs+shins as one per leg, upper arms). */

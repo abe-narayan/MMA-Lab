@@ -23,7 +23,7 @@ import type {
 } from '../../sim';
 import { RULESET_LABELS } from '../model/matchModel';
 import type { RulesetId } from '../../sim';
-import { EmptyState, IconResult } from '../ui';
+import { Alert, Button, EmptyState, IconPlay, IconResult } from '../ui';
 import { clockText, methodText } from '../model/format';
 
 export interface BoutResultProps {
@@ -242,11 +242,16 @@ function Scorecards({
 // Screen
 // --------------------------------------------------------------------------
 
+const MODE_TEXT: Readonly<Record<string, string>> = {
+  '1v1': 'one on one', teams: 'teams', ffa: 'free-for-all', crowd: 'one vs many',
+};
+
 export function BoutResultScreen({ run, onWatch, onExport, onRematch }: BoutResultProps): JSX.Element {
   const [tab, setTab] = useState<'total' | number>('total');
 
+  // Full names: a first-time reader does not know the three-letter codes.
   const names = useMemo(
-    () => (run ? run.config.fighters.map((f) => f.short || f.name) : []),
+    () => (run ? run.config.fighters.map((f) => f.name || f.short) : []),
     [run],
   );
 
@@ -284,36 +289,37 @@ export function BoutResultScreen({ run, onWatch, onExport, onRematch }: BoutResu
             {' · '}
             R{r.round} {clockOf(r.timeSeconds)}
           </p>
-          <p className="ms-sub mono">
-            {RULESET_LABELS[rulesetId] ?? rulesetId} · {run.config.mode} ·{' '}
-            {clockOf(r.totalSeconds)} of fight · {run.ticks.toLocaleString()} ticks ·{' '}
-            {run.rngDraws.toLocaleString()} draws
+          <p className="ms-sub">
+            {RULESET_LABELS[rulesetId] ?? rulesetId} · {MODE_TEXT[run.config.mode] ?? run.config.mode} ·{' '}
+            {clockOf(r.totalSeconds)} of fighting
           </p>
-          <p className="ms-sub mono">
+          <p
+            className="ms-sub mono"
+            title={`${run.ticks.toLocaleString()} simulation ticks, ${run.rngDraws.toLocaleString()} random draws. The same seed and settings reproduce this exact bout.`}
+          >
             seed <code>{run.config.seed}</code> · digest <code>{run.digest.slice(0, 16)}</code>
           </p>
         </div>
         <div className="page-actions">
           {onWatch ? (
-            <button type="button" className="btn btn--play" onClick={() => onWatch(run)}>Watch</button>
+            <Button variant="primary" size="lg" icon={<IconPlay />} onClick={() => onWatch(run)}>Watch the fight</Button>
           ) : null}
           {onRematch ? (
-            <button type="button" className="btn" onClick={() => onRematch(run)} title="Same fighters, same settings, a new seed">
+            <Button onClick={() => onRematch(run)} title="Same fighters and settings with a new seed, back in Match setup">
               Rematch
-            </button>
+            </Button>
           ) : null}
           {onExport ? (
-            <button type="button" className="btn" onClick={() => onExport(run)}>Export replay</button>
+            <Button onClick={() => onExport(run)} title="Download this bout as a JSON replay file">Export replay</Button>
           ) : null}
         </div>
       </header>
 
       {realism !== 'realism' ? (
-        <p className="ms-warn ms-warn--warning" role="status">
-          Damage realism was set to <b>{realism}</b>. The chapter 09 §7 calibration targets do not
-          apply to this bout — treat the numbers below as a description of this setting, not of
-          fighting.
-        </p>
+        <Alert tone="warn">
+          Damage was set to <b>{realism}</b>, so the model&apos;s calibration targets do not apply to
+          this bout: treat the numbers below as a description of that setting, not of fighting.
+        </Alert>
       ) : null}
 
       <section className="fc-section">

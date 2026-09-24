@@ -217,3 +217,193 @@ so they were left in place for the cleanup pass. The base stylesheet moved to `s
 | QA2-8: overlapping scrubber markers | Markers closer than about 12 px are stacked into up to three rows | same |
 | QA2-9: "Playback speed" did nothing | Watch opens a bout at that speed, snapped to the transport's steps; the options are limited to what Watch supports (0.1× to 4×) | same |
 | QA2-10: raw method ids, mixed clock rounding | One formatter (`src/app/model/format.ts`): "Unanimous decision", not "DECISION.UNANIMOUS"; result and finish times are elapsed and floored everywhere (3:54, not 3:55); the live round clock counts down | same |
+
+
+---
+
+# UI pass 2 (2026-09-24)
+
+Scope: bundle splitting, a redesign of Match setup and Tournaments, the debug-switch gate (audit H3), app-side
+per-frame costs (audit H4), and a first-time-user walk through every screen of a production build. Nothing under
+`src/sim/**` changed. Presentation files got only one-line gates (see §3). Screenshots: `docs/screenshots/ui2-*.png`,
+all at or under 250 KB. The Watch capture is a 3D frame scaled to 42 % so it fits the limit.
+
+## 1. Code splitting and first-load cost
+
+`vite.config.ts` no longer forces `inlineDynamicImports`. `npm run build:single` builds with `--mode single`, which
+keeps the old single chunk, because `scripts/inline.mjs` has to inline one script into one page.
+
+| Chunk | Loaded when | Raw | Gzip |
+| --- | --- | --- | --- |
+| `index` (shell, Match setup, Fighters, Result, store, the sim, React) | first screen | 1,381 KB | 385 KB |
+| `Watch` (transport, panels, camera planner, animation module) | Watch opens | 315 KB | 111 KB |
+| `Arena3D` + `index` (presentation stage) + `three.webgpu` + `three.tsl` | the 3D view mounts | 403 + 146 + 1,091 + 25 KB | 148 + 65 + 300 + 8 KB |
+| `simProtocol` (main-thread bout runner) | Watch, or a bout runs without a worker | 37 KB | 13 KB |
+| `BatchSim`, `Tournaments`, `History`, `FighterCreator` (+ `profileModel`), `About` | first visit to that page, or pointer/focus on its nav item (prefetch) | 24, 26, 8, 80 (+29), 10 KB | 9, 9, 3, 24 (+9), 4 KB |
+
+Before, all of this was one 3,561 KB chunk (1,075 KB gzip). How it was done:
+- `React.lazy` + `Suspense` in `App.tsx`. The fallback is the design system's `LoadingState` ("Loading Watch…").
+  One loader per chunk is shared by `lazy()` and the nav-hover prefetch.
+- Inside Watch, `Arena3D` is lazy too, with a "Loading the 3D broadcast…" skeleton in the picture. Watch now
+  imports `stage/quality` (not `stage/index`, which pulls in three/webgpu). It also gets its GPU check from
+  `components/watch/gpu.ts`, a copy of `gpuLikelyAvailable`, so the 2D board never downloads three.js.
+- The bout worker's wire format moved to `workers/simWire.ts`. `simProtocol.ts` re-exports it for existing
+  importers. `runBout` now imports the runner only for the main-thread fallback.
+- `tests/ui.pass2.test.tsx` walks the static import graph from `src/main.tsx`. It fails if the graph reaches
+  three.js, the presenter, `stage/index`, `Arena3D`, Watch, Batch, Tournaments, History, the editor or About.
+
+**Load measurements** come from `scripts/dev/load-first-screen.mjs`. It builds nothing: it serves a production
+build (`vite build --outDir <scratch>`) from its own static server with gzip, in a fresh headless-Chromium context,
+median of 5 runs. "Ready" means the Run button is on screen. TTI is the end of the last long task before a 2 s quiet
+window. "Slow" is a 9 Mbit/s, 150 ms RTT network with a 4× CPU slowdown.
+
+| | JS before first screen | FCP | Ready / TTI | Long-task time |
+| --- | --- | --- | --- | --- |
+| Before, desktop | 3,480 KB raw / 1,048 KB gzip | 440 ms | 458 ms | 108 ms |
+| After, desktop | 1,352 KB raw / 375 KB gzip (−61 % / −64 %) | 280 ms | **302 ms (−34 %)** | 0 ms |
+| Before, slow | same | 1,936 ms | 2,009 ms | 294 ms |
+| After, slow | same | 1,396 ms | **1,513 ms (−25 %)** | 240 ms |
+
+The Watch 3D view's time to live picture did not change (about 19–20 s headless, 3 alternating runs each). The
+lazy chunks add about 0.6 s before mount on a local server.
+
+**What still sits in the first chunk.** The whole simulation engine is still in it: the AI (229 KB), striking,
+rules and damage, though the first screen only needs fighter derivation, rulesets and arenas. The app imports the
+sim through its barrel `src/sim/index.ts`, and some sim modules have top-level side effects (the AI plan providers
+register themselves via `core/bind.ts`), so Rollup keeps them. Deep imports in the app, or side-effect-free
+registration in the sim (the sim owner's call), would cut about another 700 KB raw. Separately,
+`presentation/finish/timeline.ts` imports `anim/animator` for one helper (`displaySeparation`). That puts the
+224 KB animation module in the Watch chunk rather than the 3D chunk.
+
+## 2. Match setup and Tournaments
+
+New design-system pieces in `src/app/ui/steps.tsx`, styled in `theme.css`:
+- `Step`: a numbered section with a status badge.
+- `Disclosure`: a native `<details>` for advanced options. Its note shows how many values differ from the
+  defaults, so nothing hidden is a surprise.
+- `LabelRow`: a label with an `InfoTip` beside it rather than nested inside the label.
+
+**Match setup** reads *1 Fighters → 2 Rules → 3 Options → 4 Run*:
+- **Defaults.** A new user lands on a runnable bout: Counter Striker vs Olympic Judoka are pre-picked. Both are
+  middleweight T3, so no size or level warning shows up on the first screen, and it is a striker against a grappler.
+  Every other setting has its default.
+- **Controls.** Format, team sizes and fighter counts are segmented controls, so a count cannot be invalid.
+  Damage and playback speed are segmented too, and Commentary and Blood are switches. "Swap corners" moves the
+  home crowd along with the fighter.
+- **Progressive disclosure.** Round timing, weigh-in and size mismatch are in *Round timing and weigh-in*.
+  Referee, scorecards, judging criteria and home crowd are in *Referee, judges and crowd*. Both are closed by
+  default and show "n changed".
+- **Inline validation.**
+  - An empty slot says "Pick a fighter."
+  - The same fighter twice says "Already fighting as Red corner…".
+  - A fighter deleted from the database gets its own message.
+  - An empty seed says "Enter a seed, or press New seed."
+  - Round numbers keep what was typed and flag an out-of-range value rather than clamping it silently.
+  - The Run step lists the blocking problems, and the step headers carry a status ("2 ready", "1 to fix").
+- **Help.** The long help paragraphs under every field became tooltips beside the label, plus one-line hints
+  where the choice matters (damage realism, the non-standard venue warning with a "why" tooltip).
+- **Run step.** A summary (bout, rules, arena, damage), the size and level warnings, and the seed with New seed and
+  Copy. Run is in the page header and at the end of the steps.
+- A dismissible **"New to Bout Lab?"** card explains the app in three steps. It is remembered in localStorage.
+
+**Tournaments** reads *1 Format → 2 Entrants → 3 Rules → 4 Create*:
+- Format and draw size are segmented. The entrants step has a filter, "Pick the top N by rating" and Clear, with
+  entrant cards (name, then tier and class) and a bye count.
+- Seeding and carry-over sit behind a disclosure. Each has one line saying what it does, and the carry-over
+  mechanics are in a tooltip.
+- Validation is inline: no name; fewer than two entrants; more entrants than the draw holds.
+- Once a tournament exists, the builder folds away behind **New tournament**. Saved tournaments are cards showing
+  progress ("1 of 7 decided"), and the bracket is a step card with a status badge. "Next up" shows **Run match**
+  buttons, and the carry column is hidden when carry-over is off (it used to read "Fresh. Fresh.").
+
+**Duplicated title.** The top bar no longer repeats the page's h1. Pages with their own header (all except Watch
+and the editor) show only the model notice there. That notice ("Toy model — results describe this model, not
+real fighters · How it works") also replaces the separate notice strip, saving a row on every page.
+
+## 3. Debug and capture switches (audit H3)
+
+There is one gate, `src/presentation/devFlags.ts`, re-exported by `src/app/devFlags.ts`. Switches are live only when
+`import.meta.env.DEV` is true or the URL has `?capture=1`. It provides:
+- `devParams()`, `devParam()` and `devSearch()` in place of `new URLSearchParams(location.search)`;
+- `exposeDevGlobal()` and `clearDevGlobal()` in place of `window.__x = …`;
+- `switchesEnabled()`, the pure rule, which is tested.
+
+`?quality` is only documented as a QA switch (PHASE8_NOTES), and users already choose and save quality in View
+settings, so it is gated too.
+
+| Where | Switches and globals now behind the gate |
+| --- | --- |
+| `App.tsx` | `?watchDemo` |
+| `screens/Watch.tsx` | `?view ?quality ?scale ?cam ?seek ?play ?demo ?analytics`, `window.__watch` |
+| `components/watch/profile.tsx` | `?profile`, `window.__watchProfile` |
+| `components/Arena3D.tsx` | `window.__presenter`, `window.__ttff` |
+| `presentation/presenter.ts` | `?gpuTiming ?stagePost ?fixedRes ?placeholders`, and `window.__stats`: `publishStats()` returns before building its per-frame object, so production no longer pays that per-frame cost (H4) |
+| `presentation/stage/index.ts` | `?backend ?skinVelFix ?shareProgs ?gpuDynres ?aoClamp`, `window.__precompile` |
+| `presentation/stage/pipeline.ts` | `?mrtBlend` |
+| `presentation/stage/skinnedVelocity.ts` | `window.__skinVelocityFix` |
+| `presentation/character/skinMaterial.ts` | `?skinLite ?skinGate`, `window.__skinGatesOff` |
+
+The presentation edits are single-line swaps plus one import line each, made while the rendering and leak-fix
+agents had those files open. A test scans `src/app` and `src/presentation` for any remaining direct
+`location.search` read or `window.__*` write.
+
+**Capture scripts.** `scripts/dev/capture-url.mjs` provides `withCapture(url)` and `captureGoto(page)`. They are
+wired into `qa2-lib.mjs` (which covers every `qa2-*` script and `leak-switch.mjs`), and into `shot`, `polish-shots`,
+`perf-shots`, `perf-ab`, `perf-compare-shots`, `cam-shots`, `load-timeline` and `watch-profile`. These keep working
+against the dev server and against production builds.
+
+**Verified in a production build** (`ui2-shots.mjs`):
+- `?watchDemo=1&quality=ultra&backend=webgl2` opens Match setup, with no `window.__*` globals.
+- `?watchDemo=1&capture=1` opens Watch, with `window.__watch` present.
+
+The markup-coupled QA probes (`qa2-modes`, `qa2-cancel`, `qa2-cancel2`, `qa2-refresh`, `qa2-fighters2`) were
+updated to the new controls.
+
+## 4. Per-frame costs, app side (audit H4)
+
+- **`Watch.getPlayhead()`**, read by the 3D view every display frame, rewrites one reused object in place instead
+  of allocating one. `Arena3D` no longer spreads its whole props object into a new one every frame. `EventIndex`
+  caches its window with two numbers instead of building a string key every frame.
+- **The 2D view does not re-render the whole screen per frame.** Measured with `watch-profile.mjs` on a production
+  build with React's profiling renderer, 2D view, 8 s per speed:
+
+  | Speed | Commits/s in the Watch tree | React ms/s | ms per commit |
+  | --- | --- | --- | --- |
+  | 1× | 75 | 8.2 | 0.11 |
+  | 4× | 84 | 9.4 | 0.11 |
+
+  0.11 ms per commit is the board alone; a whole-screen commit costs about 2.2 ms. So this confirms the
+  WATCH_REPLAY_PASS fix: about 8 ms/s, against an estimated 130 ms/s before it.
+- **Watch re-simulated its bout on every tab switch.** The load effect depended on `active` and rebuilt the bout
+  both when the tab was hidden and when it came back, discarding a replay opened from the library. It now loads
+  each config once.
+
+## 5. First-time-user walk (`scripts/dev/ui2-shots.mjs`)
+
+Fixed:
+- **First screen:** the purpose of the app is stated in the page lead and the intro card, and the bout is runnable
+  immediately.
+- **Result:**
+  - Page title and verdict use full names ("Counter Striker vs Olympic Judoka"), not the three-letter codes.
+  - Ticks and RNG draws moved into a tooltip on the seed line.
+  - The mode is in words, and the realism warning no longer cites "chapter 09 §7".
+  - The actions use design-system buttons ("Watch the fight").
+- **Watch from the nav** showed the demonstration bout even after the user had just run one. It now opens the
+  latest bout.
+- **Fighter summaries** show "T4 Muay Thai", not "T4 muayThai" (Match setup, Fighters, Batch, editor presets).
+- **Size and skill warnings** no longer mention "chapter 01" or "chapter 09 §7".
+- **History** shows ruleset names, not ids.
+- **Fighters** subtitle: "15 built-in presets and 0 of your own…". The "showing n of m" count appears only when
+  filtered; screen readers still get it through a status line.
+
+## 6. Still weak / not done
+
+- **Sim barrel side effects** keep the whole engine in the first chunk (see §1).
+- **Screens only restyled in pass 1:** Batch setup still shows help text beside every control and has its own
+  fighter pickers. Converting it to the step pattern is the natural next pass.
+- **Tournament round labels:** the bracket is still a horizontal list of rounds, with no connector lines.
+- **Headless WebGPU console errors:** in some runs, both before and after this pass, three's
+  `createRenderPipelineAsync` fails with a depthStencil format error, 43 times per load. It happens on some loads
+  and not others, identically in the pre-pass build, so it is not caused by the splitting. It is for the rendering
+  agent.
+- **Watch screenshot:** a 3D frame PNG only fits in 250 KB when scaled down (42 %).

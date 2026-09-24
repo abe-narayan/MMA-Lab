@@ -35,14 +35,15 @@ import {
 import type { CameraState, QualitySettings } from '../contract';
 import { STAGE_TUNING, type StageTuning } from './quality';
 import { probeGpu, recommendQuality, type QualityRecommendation } from './profiles';
-import { StagePipeline, aoRadiusFor, scalesInsidePipeline, togglesFor, type PassToggles } from './pipeline';
+import { StagePipeline, aoRadiusFor, fenceLensFor, scalesInsidePipeline, togglesFor, type PassToggles } from './pipeline';
 import { DynamicResolution, GpuDynamicResolution } from './dynres';
 import { installSkinnedVelocityFix, preparePreviousBones, snapshotPreviousBones } from './skinnedVelocity';
 import { installProgramSharing } from './programSharing';
+import { devParam, devSearch, exposeDevGlobal } from '../devFlags';
 
 export * from './quality';
 export * from './profiles';
-export { StagePipeline, togglesFor, scalesInsidePipeline, createLutTexture, aoRadiusFor } from './pipeline';
+export { StagePipeline, togglesFor, scalesInsidePipeline, createLutTexture, aoRadiusFor, fenceLensFor, FENCE_LENS } from './pipeline';
 export type { PassToggles } from './pipeline';
 export { DynamicResolution, GpuDynamicResolution, FrameMeter } from './dynres';
 export { gradeColor, buildLutData, BROADCAST_GRADE, LUT_SIZE } from './lut';
@@ -51,7 +52,7 @@ export type StageBackend = 'webgpu' | 'webgl2';
 export type BackendRequest = 'auto' | StageBackend;
 
 /** `?backend=webgl2` / `?backend=webgpu` in the page URL, else auto. */
-export function requestedBackend(search: string = typeof location !== 'undefined' ? location.search : ''): BackendRequest {
+export function requestedBackend(search: string = devSearch()): BackendRequest {
   const v = new URLSearchParams(search).get('backend');
   return v === 'webgl2' || v === 'webgl' ? 'webgl2' : v === 'webgpu' ? 'webgpu' : 'auto';
 }
@@ -137,14 +138,14 @@ export class Stage {
   static async create(container: HTMLElement, opts: StageOptions): Promise<Stage> {
     // Correct motion vectors for skinned bodies that share materials (see
     // skinnedVelocity.ts). `?skinVelFix=0` leaves three's own path, for A/B.
-    const noFix = typeof location !== 'undefined' && new URLSearchParams(location.search).get('skinVelFix') === '0';
+    const noFix = devParam('skinVelFix') === '0';
     if (!noFix) installSkinnedVelocityFix();
     // One program per material instead of one per skinned body (programSharing.ts).
     // `?shareProgs=0` restores three's per-node buffer names for A/B.
-    if (!(typeof location !== 'undefined' && new URLSearchParams(location.search).get('shareProgs') === '0')) installProgramSharing();
+    if (!(devParam('shareProgs') === '0')) installProgramSharing();
     const want = opts.backend ?? requestedBackend();
     const gpuTimed = opts.gpuTimedResolution !== false
-      && !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('gpuDynres') === '0');
+      && !(devParam('gpuDynres') === '0');
     opts = { ...opts, gpuTimedResolution: gpuTimed };
     const renderer = new WebGPURenderer({
       antialias: false,
@@ -275,7 +276,7 @@ export class Stage {
 
   private lastShotName = '';
   /** `?aoClamp=0`: keep GTAO's fixed 0.4 m radius on every shot (A/B). */
-  aoClamp = !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('aoClamp') === '0');
+  aoClamp = !(devParam('aoClamp') === '0');
 
   /** Replay grammar: depth of field and motion blur only while a replay runs. */
   setReplay(on: boolean): void {
@@ -295,9 +296,19 @@ export class Stage {
 
   render(): void {
     // While a benchmark runs, the page's own frame loop must not interleave
-    // frames (their timestamps would mix into the measurement).
-    if (this.benching) return;
+    // frames (their timestamps would mix into the measurement). While the
+    // scene warm-up runs, a frame would change the renderer's target and MRT
+    // under the node builds it has started (they read them when they begin):
+    // the canvas keeps its last picture until the warm-up is done (QA2 #1).
+    if (this.benching || this.compiling > 0) return;
     this.renderFrame();
+  }
+
+  /** Scene warm-ups in flight (`precompile`). */
+  private compiling = 0;
+  /** True while the scene warm-up runs (the page's frames are held). */
+  get precompiling(): boolean {
+    return this.compiling > 0;
   }
 
   /** Measurement in progress: `render()` from the page loop is a no-op. */
@@ -310,8 +321,21 @@ export class Stage {
     // between: skeletons, TAA and GTAO update exactly once per picture.
     this.advanceNodeFrame();
     snapshotPreviousBones(this.scene);
+    this.resetTargets();
     this.pipeline.render(this.replayOn);
     if (this.gpuDynres && !this.benching) this.sampleGpuTime();
+  }
+
+  /**
+   * The post chains draw to whatever target and MRT the renderer has: a frame
+   * (or a warm-up draw) always starts from the canvas with no MRT, whatever an
+   * earlier job left bound (QA2: post-chain quads built against the scene
+   * pass's three colour targets).
+   */
+  private resetTargets(): void {
+    const r = this.renderer as unknown as { setRenderTarget(t: null): void; setMRT(m: null): void };
+    r.setRenderTarget(null);
+    r.setMRT(null);
   }
 
   /** Every fourth frame: resolve the GPU timestamps and feed the controller. */
@@ -349,7 +373,7 @@ export class Stage {
         info = { description: String(ext ? b.gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : b.gl.getParameter(b.gl.RENDERER)) };
       }
       const adapter = { isFallbackAdapter: info.isFallbackAdapter };
-      this.recommendation = probeGpu(this.renderer).then((probeMs) => recommendQuality({
+      this.recommendation = this.gpuSerial(() => probeGpu(this.renderer)).then((probeMs) => recommendQuality({
         backend: this.backend,
         adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description, isFallbackAdapter: adapter?.isFallbackAdapter },
         probeMs,
@@ -369,6 +393,33 @@ export class Stage {
    * this does). Call after the set and the bodies are in the scene.
    */
   async precompile(onProgress?: (loaded: number, total: number) => void): Promise<void> {
+    this.compiling++;
+    try {
+      await this.gpuSerial(() => this.precompileInner(onProgress));
+    } finally {
+      this.compiling--;
+    }
+  }
+
+  /**
+   * Async GPU work that holds renderer state (render target, MRT) across
+   * awaits runs one at a time: the quality probe (its own target, drained
+   * between draws) and the scene warm-up (the scene pass's target and MRT,
+   * read by every node build it starts). Overlapped, a warm-up build could
+   * start while the probe's target was bound and build its program without
+   * the scene pass's MRT outputs — measured once the warm-up ran in parallel
+   * lanes: WebGPU pipelines failing validation, a black picture (and the
+   * QA2 #1 hang after a presenter rebuild: the new presenter's probe and warm-up
+   * start together).
+   */
+  private gpuQueue: Promise<unknown> = Promise.resolve();
+  private gpuSerial<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.gpuQueue.then(fn, fn);
+    this.gpuQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async precompileInner(onProgress?: (loaded: number, total: number) => void): Promise<void> {
     preparePreviousBones(this.scene);
     const t0 = performance.now();
     await this.pipeline?.compileScene(this.scene, onProgress);
@@ -384,7 +435,7 @@ export class Stage {
     }
     // QA (load-timeline.mjs): where the scene warm-up spends its time.
     this.precompileTimes = { compileAsyncMs: Math.round(t1 - t0), drawMs: Math.round(t2 - t1), gpuIdleMs: Math.round(performance.now() - t2) };
-    if (typeof window !== 'undefined') (window as unknown as { __precompile?: unknown }).__precompile = this.precompileTimes;
+    exposeDevGlobal('__precompile', this.precompileTimes);
   }
 
   /**
@@ -411,7 +462,45 @@ export class Stage {
     }
   }
 
-  /** Compile the replay pipeline ahead of the first replay. */
+  /**
+   * The whole warm-up as ONE job on the GPU queue (QA2 #1, #2): the scene's
+   * programs (`precompile`), the first frame, then the other post chains' first
+   * draws (replay, live DoF), each followed by a non-blocking GPU drain and
+   * `between` (the page paints). The page's own frames are held throughout.
+   * Run as separate calls, a second warm-up (a quality switch while the first
+   * is still drawing its post chains) started its node builds while the first
+   * one's post passes had the renderer's target and MRT: programs built
+   * without the scene pass's outputs, pipelines failing validation, nothing
+   * drawn from then on.
+   */
+  async warmUpAll(
+    onProgress?: (loaded: number, total: number) => void, between: () => Promise<void> = async () => undefined,
+  ): Promise<{ sceneMs: number; postMs: number }> {
+    this.compiling++;
+    try {
+      return await this.gpuSerial(async () => {
+        const t0 = performance.now();
+        try {
+          await this.precompileInner(onProgress);
+        } catch (err) {
+          console.warn('[stage] precompile failed; shaders will compile on the first frame:', err);
+        }
+        const t1 = performance.now();
+        this.renderFrame();
+        await this.gpuIdle();
+        for (const step of this.pipeline?.warmSteps() ?? []) {
+          await between();
+          this.resetTargets();
+          step();
+          await this.gpuIdle();
+        }
+        return { sceneMs: Math.round(t1 - t0), postMs: Math.round(performance.now() - t1) };
+      });
+    } finally {
+      this.compiling--;
+    }
+  }
+
   /** The warm-up split into steps (see `StagePipeline.warmSteps`). */
   warmUpSteps(): (() => void)[] {
     return this.pipeline?.warmSteps() ?? [];
@@ -419,6 +508,19 @@ export class Stage {
 
   warmUp(): void {
     this.pipeline?.warmReplay();
+  }
+
+  private readonly lens = { focus: 3.5, aperture: 0.009 };
+  /**
+   * The near-fence lens for a camera state (`fenceLensFor`): the presenter hands
+   * it to the arena's chain-link every frame. Returns a reused object.
+   */
+  fenceLens(s: CameraState): { focus: number; aperture: number } {
+    const el = this.renderer.domElement;
+    const l = fenceLensFor(s.focusM, s.dof, s.fovDeg, el.height * this.internalScale, this.pipeline?.hasLiveDof ?? false);
+    this.lens.focus = l.focus;
+    this.lens.aperture = l.aperture;
+    return this.lens;
   }
 
   get internalScale(): number {

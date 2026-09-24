@@ -28,7 +28,10 @@ export const EVENT_HISTORY_TICKS = 20;
 export const MAX_CONTINUOUS_JUMP = 12;
 
 export class EventIndex {
-  private key = '';
+  // The last window asked for (numbers, not a string key: this runs once per
+  // display frame in the 3D view and should not allocate).
+  private keyFrom = Number.NaN;
+  private keyTo = Number.NaN;
   private cached: readonly SimEvent[] = [];
 
   constructor(readonly events: readonly SimEvent[]) {}
@@ -48,9 +51,9 @@ export class EventIndex {
 
   /** Events with `from < tick <= to` (the sim's `eventWindow` convention). */
   window(from: number, to: number): readonly SimEvent[] {
-    const key = `${from}:${to}`;
-    if (key === this.key) return this.cached;
-    this.key = key;
+    if (from === this.keyFrom && to === this.keyTo) return this.cached;
+    this.keyFrom = from;
+    this.keyTo = to;
     this.cached = this.events.slice(this.upper(from), this.upper(to));
     return this.cached;
   }

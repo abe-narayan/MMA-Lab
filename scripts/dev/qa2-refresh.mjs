@@ -11,19 +11,19 @@ await page.goto(BASE, { waitUntil: 'load' }); await sleep(1500);
 // one completed bout for a baseline
 const pick = async (seed, teams) => {
   await nav(page, 'Match setup');
-  if (teams) { await page.locator('.ms-mode', { hasText: 'Teams' }).click(); await page.selectOption('#ms-preset', '3v3'); }
+  if (teams) { await page.getByRole('radiogroup', { name: 'Format' }).getByRole('radio', { name: 'Teams' }).click(); await page.getByRole('radiogroup', { name: 'Team sizes' }).getByRole('radio', { name: '3v3' }).click(); }
   const n = await page.locator('select[id^=ms-slot-]').count();
   const A = ['arch.champion_complete', 'arch.brand_new_brawler', 'arch.pressure_boxer', 'arch.bjj_guard_player', 'arch.judoka', 'arch.counter_striker'];
   for (let i = 0; i < n; i++) await page.selectOption(`#ms-slot-${i}`, A[i]);
   await page.locator('#ms-seed').fill(seed);
 };
 await pick('qa2-refresh-base');
-await page.getByRole('button', { name: 'Run bout' }).click();
+await page.getByRole('button', { name: 'Run bout' }).first().click();
 for (let k = 0; k < 120; k++) { await sleep(500); if ((await cur()) === 'tab-result') break; }
 out.histBase = await histCount();
 // 1. reload mid run (long 3v3)
 await pick('qa2-cancel-3v3', true);
-await page.getByRole('button', { name: 'Run bout' }).click(); await sleep(400);
+await page.getByRole('button', { name: 'Run bout' }).first().click(); await sleep(400);
 out.midRunWorkersBefore = await workers();
 await page.reload({ waitUntil: 'load' }); await sleep(2500);
 out.midRun = { workers: await workers(), hist: await histCount(), errors: log.errors.length };

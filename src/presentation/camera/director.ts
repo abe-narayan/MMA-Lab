@@ -27,9 +27,32 @@ import type {
 import { B, type WorldPose } from '../rig/skeleton';
 import { type CameraArena, clampToBounds, insideWall, makeCameraArena, postAzimuths, wallDistanceAt } from './geometry';
 import {
-  AVOID, bodyCapsules, cageCapsules, type Capsule, fighterCapsules, OCCLUSION_LIMIT, occlusion, type SamplePoint,
-  subjectSamples,
+  AVOID, bodyCapsules, cageCapsules, type Capsule, CORNER_AVOID, cornerSamples, fighterCapsules, inflateCapsules, OCCLUSION_LIMIT, occlusion,
+  type SamplePoint, subjectSamples,
 } from './occlusion';
+
+/** The dodge's thresholds for the broadcast shots (`AVOID`). */
+const DODGE_DEFAULT = { limit: OCCLUSION_LIMIT, clearTo: AVOID.clearTo, homeBelow: AVOID.homeBelow } as const;
+
+/**
+ * The between-rounds corner handheld's dodge candidates (offsets from the home
+ * spot at `base + side`): along the home side first, then the same spots about
+ * the fighter's other side (`-2·side`), where the cornerman who works beside
+ * him usually is not.
+ */
+export function cornerCandidates(side: number): readonly (readonly [number, number])[] {
+  let out = cornerCandidateCache.get(side);
+  if (!out) {
+    const list: (readonly [number, number])[] = CORNER_AVOID.offsets.map(([a, h]) => [a, h] as const);
+    list.push([-2 * side, 0]);
+    for (const [a, h] of CORNER_AVOID.offsets) list.push([-2 * side + a, h]);
+    cornerCandidateCache.set(side, (out = list));
+  }
+  return out;
+}
+const cornerCandidateCache = new Map<number, readonly (readonly [number, number])[]>();
+/** Before pass 2 (QA `cornerAvoid = false`): the broadcast handheld's walk, narrowed. */
+const OLD_CORNER_CANDIDATES = AVOID.handheldAzimuths.map((x) => [x * 0.7, 0] as const);
 import { type FramingGoal, fovToTanHalf, lookBasis, requiredTanHalf, solveFraming, tanHalfToFov } from './framing';
 import {
   type FighterPoints, type FramingSet, fighterPointsInto, framingPoints, pairMid,
@@ -304,6 +327,11 @@ export class BroadcastCameraDirector implements CameraDirector {
   private shift = new Float64Array(12);
   private shiftOn = false;
   private readonly sightOut: { samples: SamplePoint[]; occluders: Capsule[] } = { samples: [], occluders: [] };
+  /** The corner handheld's sight (people inflated by `CORNER_AVOID.margin`); reused. */
+  private readonly cornerSight: { samples: SamplePoint[]; occluders: Capsule[]; samplesAt?: (lens: V3) => SamplePoint[] } = { samples: [], occluders: [] };
+  private readonly cornerCaps: Capsule[] = [];
+  /** QA (perf-compare-shots.mjs --ab corner): false = the corner handheld stays home, as before pass 2. */
+  cornerAvoid = true;
   private readonly fgoal: FramingGoal = { target: [0, 0, 0], tanHalf: 0 };
   private focusCache: { tick: number; ids: number[] | null } = { tick: -1, ids: null };
 
@@ -939,20 +967,23 @@ export class BroadcastCameraDirector implements CameraDirector {
    */
   private dodge(
     key: string, candidates: readonly (readonly [number, number])[], posAt: (o: readonly [number, number]) => V3,
-    sight: { samples: SamplePoint[]; occluders: Capsule[] }, dt: number, snap: boolean,
+    sight: { samples: SamplePoint[]; occluders: Capsule[]; samplesAt?: (lens: V3) => SamplePoint[] },
+    dt: number, snap: boolean, lim: { limit: number; clearTo: number; homeBelow: number } = DODGE_DEFAULT,
   ): V3 {
-    const occ = (o: readonly [number, number]): number => occlusion(posAt(o), sight.samples, sight.occluders);
+    // `samplesAt`: samples that depend on where the lens is (the corner handheld's picture).
+    const occAt = (p: V3): number => occlusion(p, sight.samplesAt ? sight.samplesAt(p) : sight.samples, sight.occluders);
+    const occ = (o: readonly [number, number]): number => occAt(posAt(o));
     if (sight.samples.length === 0 || sight.occluders.length === 0) {
       this.avoidTarget = [0, 0];
     } else {
       const home = occ([0, 0]);
       const choose = (): [number, number] => {
-        if (home <= OCCLUSION_LIMIT) return [0, 0];
+        if (home <= lim.limit) return [0, 0];
         let best: readonly [number, number] = [0, 0];
         let bestOcc = home;
         for (const c of candidates) {
           const o = occ(c);
-          if (o <= AVOID.clearTo) return [c[0], c[1]];
+          if (o <= lim.clearTo) return [c[0], c[1]];
           if (o < bestOcc - 0.05) { bestOcc = o; best = c; }
         }
         return [best[0], best[1]];
@@ -960,9 +991,9 @@ export class BroadcastCameraDirector implements CameraDirector {
       if (snap || key !== this.avoidKey) {
         this.avoidTarget = choose();
       } else if (this.avoidTarget[0] !== 0 || this.avoidTarget[1] !== 0) {
-        if (home < AVOID.homeBelow) this.avoidTarget = [0, 0];
-        else if (occ(this.avoidTarget) > OCCLUSION_LIMIT) this.avoidTarget = choose();
-      } else if (home > OCCLUSION_LIMIT) {
+        if (home < lim.homeBelow) this.avoidTarget = [0, 0];
+        else if (occ(this.avoidTarget) > lim.limit) this.avoidTarget = choose();
+      } else if (home > lim.limit) {
         this.avoidTarget = choose();
       }
     }
@@ -975,7 +1006,7 @@ export class BroadcastCameraDirector implements CameraDirector {
       this.avoidB.step(this.avoidTarget[1], AVOID.omega, dt);
     }
     const pos = posAt([this.avoidA.x, this.avoidB.x]);
-    this.lastOcclusion = sight.samples.length ? occlusion(pos, sight.samples, sight.occluders) : 0;
+    this.lastOcclusion = sight.samples.length ? occAt(pos) : 0;
     return pos;
   }
 
@@ -1313,20 +1344,40 @@ export class BroadcastCameraDirector implements CameraDirector {
           const face = idx >= 0 && poses[idx] ? chestFacing(poses[idx]!) : null;
           const base = face ?? Math.atan2(-f.ground[0], -f.ground[2]);
           const side = (entry.seed & 1) === 0 ? 0.42 : -0.42;
-          const at = (o: number): V3 => {
+          const at = (o: number, lift = 0): V3 => {
             let r = 1.9;
             const a = base + side + o;
-            let p: V3 = [f.ground[0] + Math.sin(a) * r, 1.38, f.ground[2] + Math.cos(a) * r];
+            const y = 1.38 + lift;
+            let p: V3 = [f.ground[0] + Math.sin(a) * r, y, f.ground[2] + Math.cos(a) * r];
             while (r > 1.2 && !insideWall(ca, p[0], p[2], -0.35)) {
               r -= 0.1;
-              p = [f.ground[0] + Math.sin(a) * r, 1.38, f.ground[2] + Math.cos(a) * r];
+              p = [f.ground[0] + Math.sin(a) * r, y, f.ground[2] + Math.cos(a) * r];
             }
             return keepInside(ca, p, 0.35);
           };
-          const pos = this.dodge(
-            `${key}:cornerIn`, AVOID.handheldAzimuths.map((x) => [x * 0.7, 0] as const), (o) => at(o[0]),
-            this.sight([f], all), dt, snap,
-          );
+          // Occlusion-aware (performance pass 2): the cornermen kneel and lean
+          // in between lens and fighter, so this handheld counts them with a
+          // margin, over the whole picture (not only his head, chest and hips:
+          // a coach's back filling a corner of the frame counts), reacts to any
+          // of it hidden, and walks, lifts the camera to shoulder height or
+          // crosses to the fighter's other side until the picture is clear
+          // (CORNER_AVOID, cornerSamples).
+          // The lens is inside the cage here: the cage hides nothing from it.
+          const sight = this.sight([f], all, false);
+          const occ = this.cornerSight.occluders;
+          occ.length = 0;
+          const nOther = sight.occluders.length - this.bodyCaps.length;
+          for (let i = 0; i < nOther; i++) occ.push(sight.occluders[i]!);
+          for (const c of inflateCapsules(this.bodyCaps, CORNER_AVOID.margin, this.cornerCaps, CORNER_AVOID.minR)) occ.push(c);
+          // The picture's points depend on where the lens is: rebuilt per candidate.
+          cornerSamples(f, [Math.sin(base + side), Math.cos(base + side)], this.cornerSight.samples);
+          this.cornerSight.samplesAt = (lens: V3): SamplePoint[] => {
+            const dx = lens[0] - f.hips[0], dz = lens[2] - f.hips[2], l = Math.hypot(dx, dz) || 1;
+            return cornerSamples(f, [dx / l, dz / l], this.cornerSight.samples);
+          };
+          const pos = this.cornerAvoid
+            ? this.dodge(`${key}:cornerIn`, cornerCandidates(side), (o) => at(o[0], o[1]), this.cornerSight, dt, snap, CORNER_AVOID)
+            : this.dodge(`${key}:cornerIn`, OLD_CORNER_CANDIDATES, (o) => at(o[0]), this.sight([f], all), dt, snap);
           const g = framed(pos, [f], 'face', 0.5, [], [0, 0.04]);
           return { ...g, posOmega: 1.4, keepSafe: 0.9, focus: f.head, allowInside: true };
         }

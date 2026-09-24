@@ -59,6 +59,7 @@ import type { QualitySettings } from '../contract';
 import type { StageTuning } from './quality';
 import { buildLutData, LUT_SIZE } from './lut';
 import { lensDof } from './lensDof';
+import { devParam } from '../devFlags';
 
 /** Every pass the dev page can switch individually; derived from the preset otherwise. */
 export interface PassToggles {
@@ -122,6 +123,55 @@ export function togglesFor(q: QualitySettings): PassToggles {
 export function aoRadiusFor(focusM: number, fovDeg: number): number {
   const frameH = 2 * Math.max(0.3, focusM) * Math.tan((fovDeg * Math.PI) / 360);
   return Math.min(0.4, Math.max(0.12, 0.15 * frameH));
+}
+
+/**
+ * The live lens DoF's circle-of-confusion model for a shot's DoF strength
+ * (`setDepthOfField`): blur is complete at |z − focus| = k·z, with a radius of
+ * `radiusHalfPx` half-resolution pixels at full CoC.
+ */
+export function liveDofParams(strength: number): { k: number; bokehHalfPx: number; radiusHalfPx: number } {
+  const s = Math.min(1, Math.max(0.05, strength));
+  const bokehHalfPx = 2 + 9 * Math.min(1, Math.max(0, strength));
+  return { k: 1.1 / s, bokehHalfPx, radiusHalfPx: 3.5 * bokehHalfPx };
+}
+
+/** Near-fence lens (performance pass 2; `arena/materials.ts` FenceLens). */
+export const FENCE_LENS = {
+  /** Distance (m) at which the fence's blur is matched to the live DoF: a handheld's fence. */
+  refM: 0.4,
+  /**
+   * Aperture radius (m) on shots without live DoF (the arena lookdev value): the
+   * corner robotics and the finish handheld still see a near fence dissolve, and
+   * a long hard-camera lens focused on the fighters softens the fence in front.
+   */
+  minAperture: 0.009,
+} as const;
+
+/**
+ * The chain-link's in-material lens (it writes no depth, so the stage's DoF
+ * cannot blur it as a near object): focus at the shot's focus distance, and an
+ * aperture that makes the thin-lens blur of a fence `FENCE_LENS.refM` from the
+ * lens the same size as the live DoF's blur of any other object there (its
+ * CoC, in metres at that distance), or `FENCE_LENS.minAperture` when that is
+ * larger or the shot has no live DoF. The fence formula: footprint +=
+ * 2·aperture·max(1 − z/focus, 0).
+ */
+export function fenceLensFor(
+  focusM: number, strength: number, fovDeg: number, internalHeightPx: number, liveDof: boolean,
+): { focus: number; aperture: number } {
+  const focus = Math.max(0.3, focusM);
+  let aperture: number = FENCE_LENS.minAperture;
+  if (liveDof && strength > 0.01 && internalHeightPx > 0) {
+    const { k, radiusHalfPx } = liveDofParams(strength);
+    const z = Math.min(FENCE_LENS.refM, focus * 0.5);
+    const x = Math.min(1, Math.abs(z - focus) / (k * z));
+    const coc = x * x * (3 - 2 * x);
+    // One half-resolution pixel at distance z, in metres.
+    const pxM = (2 * z * Math.tan((fovDeg * Math.PI) / 360)) / (internalHeightPx / 2);
+    aperture = Math.max(aperture, (radiusHalfPx * coc * pxM) / (1 - z / focus));
+  }
+  return { focus, aperture };
 }
 
 /** The internal render target is scaled inside the pipeline only when a temporal upscaler reconstructs it. */
@@ -229,6 +279,10 @@ export class StagePipeline {
   private readonly uReplayRadius = uniform(0);
   private readonly uSharpness: N;
   private liveDofOn = false;
+  /** Whether this pipeline has the live handheld DoF (quality). */
+  get hasLiveDof(): boolean {
+    return this.liveDof !== this.live;
+  }
   private frameIndex = 0;
   private internalScale: number;
   private readonly aoResolution: number;
@@ -264,7 +318,7 @@ export class StagePipeline {
     // instead of overwriting them outright (banding in GTAO, TAA ghosting
     // behind the haze). Opaque materials do not blend, so they are unchanged.
     // `?mrtBlend=0` restores the unblended outputs for A/B.
-    const mrtBlend = !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('mrtBlend') === '0');
+    const mrtBlend = !(devParam('mrtBlend') === '0');
     if (needsNormal) outputs.normal = mrtBlend ? vec4(packNormalToRGB(normalView), diffuseColor.a) : packNormalToRGB(normalView);
     if (needsVelocity) outputs.velocity = mrtBlend ? vec4((velocity as N).xy, 0, diffuseColor.a) : velocity;
     if (t.ssr) outputs.metalrough = vec2(metalness, roughness);
@@ -514,14 +568,16 @@ export class StagePipeline {
     // cage only slightly soft.
     this.liveDofOn = strength > 0.01;
     this.uLiveFocus.value = Math.max(0.3, focusM);
-    this.uLiveK.value = 1.1 / Math.max(0.05, Math.min(1, strength));
-    // Bokeh radius in half-resolution texels at full CoC: ~10 px on a 1080p picture at 0.35 (wider radii cost texture cache on the Arc).
-    this.uLiveBokeh.value = 2 + 9 * Math.min(1, strength);
-    // The lens DoF's radius at full CoC, chosen so the out-of-focus background
-    // softens as much as with three's node (its `bokeh`-px disc plus a max
-    // filter of the same size), judged side by side
+    // liveDofParams: k = 1.1 / strength; the bokeh radius in half-resolution
+    // texels at full CoC, ~10 px on a 1080p picture at 0.35 (wider radii cost
+    // texture cache on the Arc); the lens DoF's radius at full CoC, chosen so
+    // the out-of-focus background softens as much as with three's node (its
+    // `bokeh`-px disc plus a max filter of the same size), judged side by side
     // (docs/screenshots/phase8-perf-cageside-detail.png).
-    this.uLiveRadius.value = 3.5 * this.uLiveBokeh.value;
+    const lp = liveDofParams(strength);
+    this.uLiveK.value = lp.k;
+    this.uLiveBokeh.value = lp.bokehHalfPx;
+    this.uLiveRadius.value = lp.radiusHalfPx;
     // Strength 1 ≈ a long lens at f/2.8 on a fighter 4 m away: sharp over about
     // a metre, fully soft 1.2 m beyond it.
     const s = Math.min(1, Math.max(0, strength));
@@ -687,17 +743,50 @@ export class StagePipeline {
     const vel = velocity as unknown as { setProjectionMatrix(m: unknown): void };
     if (unjittered) vel.setProjectionMatrix(unjittered);
     try {
-      let done: Promise<void>;
+      const done: Promise<void>[] = [];
+      // three's compileAsync awaits each object's program before starting the
+      // next, so the driver compiles one program at a time even where it could
+      // do several (ANGLE's KHR_parallel_shader_compile worker pool). The scene
+      // is split into COMPILE_LANES groups of materials, one compileAsync each,
+      // started together: each lane still goes one program at a time, the lanes
+      // overlap (performance pass 2). A lane sees only its own renderables (the
+      // others are masked out by layers for the synchronous collection step;
+      // parents stay visible so children are still reached).
+      const lanes = compileLanes(scene, COMPILE_LANES);
+      const progress = new Array<number>(lanes.length).fill(0);
+      const totals = new Array<number>(lanes.length).fill(0);
+      const report = (i: number) => onProgress
+        ? (e: ProgressEvent) => {
+          progress[i] = e.loaded; totals[i] = e.total;
+          onProgress(progress.reduce((a, b) => a + b, 0), totals.reduce((a, b) => a + b, 0));
+        }
+        : null;
       try {
-        // Collecting the render list runs synchronously up to compileAsync's
-        // first await, so visibility can be restored straight after.
-        done = r.compileAsync(scene, this.camera, null, onProgress ? (e) => onProgress(e.loaded, e.total) : null);
+        for (let i = 0; i < lanes.length; i++) {
+          lanes.forEach((l, j) => { if (j !== i) for (const [o] of l) o.layers.mask = 0; });
+          try {
+            // Collecting the render list runs synchronously up to compileAsync's
+            // first await, so visibility can be restored straight after.
+            done.push(r.compileAsync(scene, this.camera, null, report(i)));
+          } finally {
+            for (const l of lanes) for (const [o, mask] of l) o.layers.mask = mask;
+          }
+        }
       } finally {
         for (const [o, v, f] of lifted) { o.visible = v; o.frustumCulled = f; }
       }
       // The node builds that follow read the renderer's MRT, so the target and
-      // MRT stay bound until they finish (nothing else renders during warm-up).
-      await done;
+      // MRT stay bound until they finish (nothing else renders during warm-up:
+      // Stage holds its frames and queues its other GPU jobs). A lane that
+      // never settles must not hold the picture forever: after
+      // COMPILE_TIMEOUT_MS the rest compiles on the first frames instead.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        Promise.all(done).then(() => false),
+        new Promise<boolean>((r) => { timer = setTimeout(() => r(true), COMPILE_TIMEOUT_MS); }),
+      ]);
+      clearTimeout(timer);
+      if (timedOut) console.warn(`[stage] scene warm-up still running after ${COMPILE_TIMEOUT_MS / 1000} s; continuing`);
     } finally {
       if (unjittered) vel.setProjectionMatrix(null);
       r.setRenderTarget(prevTarget);
@@ -720,6 +809,34 @@ export class StagePipeline {
     this.scenePass.dispose();
     this.lutTexture?.dispose();
   }
+}
+
+/** Concurrent compileAsync lanes for the scene warm-up (`StagePipeline.compileScene`). */
+export const COMPILE_LANES = 4;
+/** The scene warm-up gives up waiting after this long (a cold WebGL2 load takes ~10-30 s). */
+export const COMPILE_TIMEOUT_MS = 90_000;
+
+/**
+ * Split a scene's renderables into `n` lanes for concurrent compilation: one entry per distinct
+ * program candidate (material × whether the geometry has morph targets, which changes the
+ * program), dealt round-robin in scene order, so every object of one material lands in one lane
+ * (no two lanes wait on the same program) and consecutive heavy variants (a body's morphing LOD0
+ * and its LOD1) land in different lanes. Each entry keeps the object's original layer mask.
+ */
+export function compileLanes(scene: Object3D, n: number): [Object3D, number][][] {
+  const lanes: [Object3D, number][][] = Array.from({ length: Math.max(1, n) }, () => []);
+  const laneOf = new Map<string, number>();
+  let next = 0;
+  scene.traverse((o) => {
+    const m = o as Object3D & { material?: { uuid: string } | { uuid: string }[]; geometry?: { morphAttributes?: { position?: unknown } } };
+    if (!m.material || (o as { isLight?: boolean }).isLight) return;
+    const mats = Array.isArray(m.material) ? m.material : [m.material];
+    const key = `${mats.map((x) => x.uuid).join(',')}|${m.geometry?.morphAttributes?.position ? 'm' : ''}`;
+    let lane = laneOf.get(key);
+    if (lane === undefined) { lane = next++ % lanes.length; laneOf.set(key, lane); }
+    lanes[lane]!.push([o, o.layers.mask]);
+  });
+  return lanes.filter((l) => l.length > 0);
 }
 
 export type { Node };

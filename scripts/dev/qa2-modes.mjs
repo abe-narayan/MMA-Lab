@@ -8,10 +8,13 @@ const ARCH = ['arch.champion_complete', 'arch.brand_new_brawler', 'arch.pressure
 const curTab = () => page.evaluate(() => document.querySelector('.nav-item[aria-current=page]')?.id);
 async function setup(mode, extra = {}) {
   await nav(page, 'Match setup');
-  await page.locator('.ms-mode', { hasText: mode }).click(); await sleep(300);
-  if (extra.preset) await page.selectOption('#ms-preset', extra.preset);
-  if (extra.ffa) await page.locator('#ms-ffa').fill(String(extra.ffa));
-  if (extra.crowd) await page.locator('#ms-crowd').fill(String(extra.crowd));
+  const MODE = { Crowd: 'One vs many' };
+  await page.getByRole('radiogroup', { name: 'Format' }).getByRole('radio', { name: MODE[mode] ?? mode }).click(); await sleep(300);
+  if (extra.preset) await page.getByRole('radiogroup', { name: 'Team sizes' }).getByRole('radio', { name: extra.preset }).click();
+  if (extra.ffa) await page.getByRole('radiogroup', { name: 'Number of fighters' }).getByRole('radio', { name: String(extra.ffa) }).click();
+  if (extra.crowd) await page.getByRole('radiogroup', { name: 'Number of attackers' }).getByRole('radio', { name: String(extra.crowd) }).click();
+  // Advanced settings sit in closed <details> sections.
+  await page.evaluate(() => document.querySelectorAll('#panel-match details').forEach((d) => { d.open = true; }));
   if (extra.ruleset) await page.selectOption('#ms-ruleset', extra.ruleset);
   if (extra.arena) await page.selectOption('#ms-arena', extra.arena);
   if (extra.maxsec && await page.locator('#ms-maxsec').count()) await page.locator('#ms-maxsec').fill(String(extra.maxsec));
@@ -19,12 +22,12 @@ async function setup(mode, extra = {}) {
   const slots = await page.locator('select[id^=ms-slot-]').count();
   for (let i = 0; i < slots; i++) await page.selectOption(`#ms-slot-${i}`, ARCH[i % ARCH.length]);
   await page.locator('#ms-seed').fill(`qa2-${mode}-${extra.preset ?? extra.ffa ?? extra.crowd ?? ''}`.replace(/\W+/g, '-'));
-  const problems = await page.locator('.ms-warn--error, .ms-problems').allInnerTexts().catch(() => []);
+  const problems = await page.locator('.setup-problems li, #panel-match .ui-field-error').allInnerTexts().catch(() => []);
   return { slots, problems };
 }
 async function runAndWait(label, timeoutS = 240) {
   const e0 = log.errors.length; const t0 = Date.now();
-  const runBtn = page.getByRole('button', { name: /^(Run bout|Running…)$/ });
+  const runBtn = page.getByRole('button', { name: /^(Run bout|Running…)$/ }).first();
   const disabled = await runBtn.isDisabled();
   if (disabled) return { label, disabled: true, why: (await page.locator('main').innerText()).match(/[^\n]*(pick|need|must|choose)[^\n]*/gi)?.slice(0, 3) };
   await runBtn.click();
@@ -44,7 +47,7 @@ async function runAndWait(label, timeoutS = 240) {
 }
 async function watchFromResult(label) {
   const e0 = log.errors.length; const t0 = Date.now();
-  const w = page.getByRole('button', { name: 'Watch', exact: true }).last();
+  const w = page.getByRole('button', { name: /^Watch( the fight)?$/ }).last();
   await w.click();
   let ok = false;
   try { await page.waitForFunction(() => window.__watch?.digest() && window.__ttff?.revealMs > 0 && window.__stats?.fps > 0, null, { timeout: 150000 }); ok = true; } catch { /* */ }
@@ -79,12 +82,12 @@ await nav(page, 'History'); await sleep(300);
 res.historyBefore = (await page.locator('main').innerText()).match(/The last (\d+) bouts/)?.[1];
 await setup('Teams', { preset: '2v2' });
 await page.locator('#ms-seed').fill('qa2-cancel');
-await page.getByRole('button', { name: 'Run bout' }).dblclick();
+await page.getByRole('button', { name: 'Run bout' }).first().dblclick();
 await sleep(3000);
 res.cancel = { runningText: await page.locator('.ms-progress').innerText().catch(() => null) };
 await page.getByRole('button', { name: 'Cancel' }).click().catch((e) => { res.cancel.err = String(e).slice(0, 100); });
 await sleep(1500);
-res.cancel.after = { tab: await curTab(), btn: await page.locator('.ms-head .btn--play').innerText(), status: await page.locator('.ms-progress, .ms-warn--error').allInnerTexts() };
+res.cancel.after = { tab: await curTab(), btn: await page.locator('.ms-head .page-actions .ui-btn--primary').innerText(), status: await page.locator('.ms-progress, .ms-warn--error').allInnerTexts() };
 // run again after cancel
 res.cancel.rerun = await runAndWait('after-cancel');
 console.log('cancel', JSON.stringify(res.cancel).slice(0, 600));
@@ -96,14 +99,14 @@ res.history = (await page.locator('main').innerText()).match(/The last (\d+) bou
 const e0 = log.errors.length;
 await nav(page, 'Tournaments');
 await page.locator('#tr-name').fill('QA2 Cup');
-await page.selectOption('#tr-size', '8');
+await page.getByRole('radiogroup', { name: 'Draw size' }).getByRole('radio', { name: '8' }).click();
 const boxes = page.locator('.tr-entrant input[type=checkbox]');
 const nBoxes = await boxes.count();
 for (let i = 0; i < Math.min(8, nBoxes); i++) if (!(await boxes.nth(i).isChecked())) await boxes.nth(i).check();
 await page.getByRole('button', { name: 'Create bracket' }).click(); await sleep(800);
 const t0 = Date.now(); let runs = 0; let stalled = false;
 for (;;) {
-  const btn = page.locator('.tr-next-row button.btn--play').first();
+  const btn = page.locator('.tr-next-row button').first();
   if (!(await btn.count())) break;
   await btn.click(); runs++;
   const s = Date.now();
