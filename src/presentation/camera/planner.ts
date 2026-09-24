@@ -13,10 +13,16 @@
  * finished recording and a bout being streamed.
  */
 import type { SimEvent, TickSnapshot } from '../../sim';
+import { RefereeTracker } from '../arena/referee';
 import {
   type CameraArena, insideWall, nearestPanelCentre, panelCentres, postClearance, wallDistanceAt,
 } from './geometry';
-import { atAzimuth, seeded, wrapAngle } from './math';
+import { standInPoints } from './keypoints';
+import { cornerSpots } from '../corner/spots';
+import { atAzimuth, seeded, type V3, wrapAngle } from './math';
+import {
+  type Capsule, fighterCapsules, occlusion, type SamplePoint, standingCapsules, subjectSamples,
+} from './occlusion';
 import { PLACEMENT, type ShotKind } from './shots';
 
 export const TICK_S = 0.1;
@@ -37,6 +43,17 @@ export const CUT_RULES = {
   strikeGuardTicks: 6,
   /** A knockdown cut goes in 0.4-3.5 s after the drop, or not at all. */
   kdCutWindowS: [0.4, 3.5] as const,
+  /**
+   * The knockdown exception (added in the broadcast polish pass). For the
+   * knockdown cut only, the strike that dropped the fighter — any strike in
+   * the `kdStrikeLookbackTicks` before the knockdown event — is guarded by its
+   * exact contact instant (tick + sub-tick offset): the cut goes in at least
+   * `strikeGuardS` after that contact, instead of waiting out the ±6-tick
+   * quantisation. Every other strike keeps the full ±6-tick guard. Result: the
+   * handheld is on the falling fighter 0.4-0.5 s after the punch instead of
+   * ≥ 0.7 s, while the fall is still happening.
+   */
+  kdStrikeLookbackTicks: 2,
   /** Nothing but a finish may cut during the first 2.5 s of a knockdown. */
   kdHoldS: 2.5,
   /** A new situation must persist this long before it earns a cut. */
@@ -98,10 +115,26 @@ export interface ShotPlan {
 
 export class StrikeIndex {
   private ticks: number[] = [];
+  /** Latest known contact instant (s) per strike tick; live-added ticks assume the end of the tick. */
+  private readonly contacts = new Map<number, number>();
 
   constructor(events: readonly SimEvent[] = []) {
-    for (const e of events) if (e.kind === 'strike') this.ticks.push(e.tick);
+    for (const e of events) {
+      if (e.kind !== 'strike') continue;
+      this.ticks.push(e.tick);
+      this.contacts.set(e.tick, Math.max(this.contacts.get(e.tick) ?? -Infinity, contactTime(e)));
+    }
     this.ticks.sort((a, b) => a - b);
+  }
+
+  /** The latest contact instant (s) of a strike with tick in [from, to], or -Infinity. */
+  latestContactIn(from: number, to: number): number {
+    let best = -Infinity;
+    for (let t = from; t <= to; t++) {
+      if (this.contacts.has(t)) best = Math.max(best, this.contacts.get(t)!);
+      else if (this.ticks.includes(t)) best = Math.max(best, (t + 1) * TICK_S);
+    }
+    return best;
   }
 
   add(tick: number): void {
@@ -111,6 +144,26 @@ export class StrikeIndex {
       t.push(tick);
       t.sort((a, b) => a - b);
     }
+  }
+
+  /**
+   * True when a strike outside [exemptFrom, exemptTo] resolves within `guard`
+   * ticks of `tick` (the knockdown exception, `CUT_RULES.kdStrikeLookbackTicks`).
+   */
+  nearExcept(tick: number, exemptFrom: number, exemptTo: number, guard = CUT_RULES.strikeGuardTicks): boolean {
+    const t = this.ticks;
+    let lo = 0;
+    let hi = t.length;
+    const from = tick - guard;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (t[mid] < from) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo; i < t.length && t[i] <= tick + guard; i++) {
+      if (t[i] < exemptFrom || t[i] > exemptTo) return true;
+    }
+    return false;
   }
 
   /** True when a strike resolves within `guard` ticks of `tick`. */
@@ -169,10 +222,44 @@ const cross2 = (ax: number, az: number, bx: number, bz: number): number => ax * 
  * fighters' line (a profile of both, not one's back), on the hard camera's side
  * of that line so screen direction holds, never lined up on a post.
  */
+/** What stands in a handheld's way, for `chooseOperator`. */
+export interface OperatorSight {
+  /** The referee on the floor (planner: `RefereeTracker` over the recording). */
+  referee?: { x: number; z: number; crouch: number } | null;
+  /**
+   * The fighter the shot is really about (the downed man on a knockdown): only
+   * he is sampled, and everyone else — his opponent included — may occlude.
+   */
+  focus?: number;
+}
+
+/** Weight of the occluded share of the subject in an operator spot's score (metres-equivalent). */
+export const OCCLUSION_WEIGHT = 8;
+
+/** Sample points and occluders for a handheld looking at `subjects` (stand-in bodies from the snapshot). */
+export function sightLines(
+  frame: TickSnapshot, subjects: readonly number[], sight: OperatorSight | undefined,
+): { samples: SamplePoint[]; occluders: Capsule[] } {
+  const samples: SamplePoint[] = [];
+  const occluders: Capsule[] = [];
+  const focus = sight?.focus;
+  frame.fighters.forEach((f, i) => {
+    if (f.posture === 'out' && frame.fighters.length > 2) return;
+    const pts = standInPoints(frame, null, 0, i);
+    const isSubject = focus !== undefined && focus >= 0 ? f.id === focus : subjects.length === 0 || subjects.includes(f.id);
+    if (isSubject) samples.push(...subjectSamples(pts));
+    else occluders.push(...fighterCapsules(pts));
+  });
+  const r = sight?.referee;
+  if (r) occluders.push(...standingCapsules(r.x, r.z, r.crouch));
+  return { samples, occluders };
+}
+
 export function chooseOperator(
   ca: CameraArena, frame: TickSnapshot, subjects: readonly number[], seed: string, salt: string,
-  avoidAzimuth?: number,
+  avoidAzimuth?: number, sight?: OperatorSight,
 ): number {
+  const lines = sight ? sightLines(frame, subjects, sight) : null;
   const fs = frame.fighters.filter((f) => subjects.length === 0 || subjects.includes(f.id));
   const live = fs.length > 0 ? fs : frame.fighters;
   const mx = live.reduce((s, f) => s + f.x, 0) / Math.max(1, live.length);
@@ -223,7 +310,14 @@ export function chooseOperator(
     // A cut to the same spot is a jump cut; a spot next to it barely better.
     const gap = avoidAzimuth === undefined ? Infinity : Math.abs(wrapAngle(az - avoidAzimuth));
     const same = gap < 0.05 ? 8 : gap < 0.9 ? 1.5 : 0;
-    const score = d + along * 2.4 + (wrongSide ? 40 : 0) + postPenalty + behindPost + same + seeded(seed, `${salt}:${i}`) * 0.5;
+    // The referee (or, on a knockdown, the striker) between this spot and the subject.
+    let hidden = 0;
+    if (lines && lines.occluders.length > 0 && lines.samples.length > 0) {
+      const cam: V3 = [p[0], PLACEMENT.handheldHeightM, p[2]];
+      hidden = occlusion(cam, lines.samples, lines.occluders);
+    }
+    const score = d + along * 2.4 + (wrongSide ? 40 : 0) + postPenalty + behindPost + same
+      + hidden * OCCLUSION_WEIGHT + seeded(seed, `${salt}:${i}`) * 0.5;
     if (score < bestScore) {
       bestScore = score;
       best = az;
@@ -232,15 +326,74 @@ export function chooseOperator(
   return best;
 }
 
-/** Corner robotic: a three-quarter front view of the fighter from outside the fence. */
-function cornerAzimuth(ca: CameraArena, frame: TickSnapshot, id: number, seed: string): number {
+/**
+ * Corner robotic: a three-quarter front view of the fighter from outside the
+ * fence. Between rounds he sits on the stool in his painted corner (red for
+ * fighter 0, blue for fighter 1: `corner/`), back to the post, so the camera
+ * is on the next panel along from that post, looking across at his face.
+ */
+export function cornerAzimuth(ca: CameraArena, frame: TickSnapshot, id: number, seed: string): number {
+  const side = seeded(seed, `corner:${id}`) < 0.5 ? -1 : 1;
+  const spots = ca.arena && frame.fighters.length === 2 ? cornerSpots(ca.arena) : null;
+  const idx = frame.fighters.findIndex((x) => x.id === id);
+  if (spots && (idx === 0 || idx === 1)) {
+    const post = spots[idx]!.post;
+    const postAz = Math.atan2(post[0], post[1]);
+    // Half a panel (octagon: π/8) round from the post: the panel centre beside it.
+    const step = ca.sides > 0 ? Math.PI / ca.sides : 0.4;
+    return nearestPanelCentre(ca, postAz + side * step * 1.05);
+  }
   const f = frame.fighters.find((x) => x.id === id) ?? frame.fighters[0];
   if (!f) return ca.mainAzimuth;
   const px = f.x + Math.sin(f.facing) * 12;
   const pz = f.z + Math.cos(f.facing) * 12;
-  const side = seeded(seed, `corner:${id}`) < 0.5 ? -1 : 1;
   const az = Math.atan2(px, pz) + side * 0.4;
   return ca.shape === 'unbounded' ? az : nearestPanelCentre(ca, az);
+}
+
+/**
+ * The winner's shot at the end (broadcast polish pass): a handheld square to
+ * the line between the two fighters (so their heads separate on screen, never
+ * one behind the other), on the winner's side of the cage centre-line toward
+ * the hard camera, and not with the referee between lens and winner. The
+ * referee stands beside the winner raising his hand (`arena/referee.ts`,
+ * 'raisingHand'), so the shot holds both.
+ */
+export function finishAzimuth(
+  ca: CameraArena, frame: TickSnapshot, winner: number, referee: { x: number; z: number; crouch: number } | null,
+  seed: string, n: number, avoidAzimuth?: number,
+): number {
+  const w = frame.fighters.find((f) => f.id === winner);
+  const l = frame.fighters.find((f) => f.id !== winner);
+  if (!w || !l) {
+    return chooseOperator(ca, frame, winner >= 0 ? [winner] : [], seed, `fin:${n}`, avoidAzimuth, { referee, focus: winner });
+  }
+  const lx = w.x - l.x;
+  const lz = w.z - l.z;
+  const len = Math.hypot(lx, lz) || 1;
+  const main = atAzimuth(ca.mainAzimuth, ca.mainRadius);
+  const lines = sightLines(frame, [winner], { referee, focus: winner });
+  let best = ca.mainAzimuth;
+  let bestScore = Infinity;
+  const unbounded = ca.shape === 'unbounded';
+  panelCentres(ca).forEach((az, i) => {
+    const p = unbounded
+      ? [w.x + Math.sin(az) * 3.4, 0, w.z + Math.cos(az) * 3.4]
+      : atAzimuth(az, wallDistanceAt(ca, az) + PLACEMENT.handheldOutsideM);
+    const dx = p[0] - w.x;
+    const dz = p[2] - w.z;
+    const d = Math.hypot(dx, dz) || 1;
+    // |cos| of the angle to the fighters' line: 0 = square to it (heads apart).
+    const along = Math.abs((dx * lx + dz * lz) / (d * len));
+    const towardMain = (p[0] * main[0] + p[2] * main[2]) / ((Math.hypot(p[0], p[2]) || 1) * (Math.hypot(main[0], main[2]) || 1));
+    const cam: V3 = [p[0], PLACEMENT.handheldHeightM, p[2]];
+    const hidden = lines.samples.length ? occlusion(cam, lines.samples, lines.occluders) : 0;
+    const gap = avoidAzimuth === undefined ? Infinity : Math.abs(wrapAngle(az - avoidAzimuth));
+    const score = d * 0.4 + along * 6 - towardMain * 1.2 + hidden * OCCLUSION_WEIGHT
+      + (postClearance(ca, az) < 0.1 ? 4 : 0) + (gap < 0.05 ? 3 : 0) + seeded(seed, `fin:${n}:${i}`) * 0.3;
+    if (score < bestScore) { bestScore = score; best = az; }
+  });
+  return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +409,8 @@ interface Request {
   deadline: number;
   subjects: number[];
   reposition?: boolean;
+  /** The one fighter the shot is about (knockdown: the downed man), for the sight lines. */
+  focus?: number;
 }
 
 export interface PlannerOptions {
@@ -281,6 +436,10 @@ export class ShotPlanner {
   private sitSince = 0;
   private lastStrikeTick = -1e9;
   private kdHoldUntil = -1;
+  /** Knockdown exception: strike ticks exempt from the guard for the pending knockdown cut. */
+  private kdExempt: [number, number] = [1, 0];
+  private recentStrikes: { tick: number; contact: number }[] = [];
+  private refNow: { x: number; z: number; crouch: number } | null = null;
   private breakStart = -1;
   private breakStep = 0;
   private groundCutaways = 0;
@@ -318,9 +477,14 @@ export class ShotPlanner {
     this.pending = r;
   }
 
-  /** Feed one recorded frame and the events stamped with its tick. */
-  step(frame: TickSnapshot, events: readonly SimEvent[]): void {
+  /**
+   * Feed one recorded frame and the events stamped with its tick. `referee`
+   * is where the official stands at this tick (planShots runs the arena's
+   * referee placement over the recording), so operator spots avoid him.
+   */
+  step(frame: TickSnapshot, events: readonly SimEvent[], referee?: { x: number; z: number; crouch: number } | null): void {
     const tick = frame.tick;
+    this.refNow = referee ?? null;
     this.lastTick = tick;
     this.lastFrame = frame;
 
@@ -359,6 +523,8 @@ export class ShotPlanner {
     switch (e.kind) {
       case 'strike':
         this.lastStrikeTick = tick;
+        this.recentStrikes.push({ tick, contact: contactTime(e) });
+        if (this.recentStrikes.length > 8) this.recentStrikes.shift();
         break;
       case 'roundStart':
         this.breakStart = -1;
@@ -394,10 +560,20 @@ export class ShotPlanner {
         const downed = e.target >= 0 ? e.target : e.actor;
         const by = e.target >= 0 ? e.actor : -1;
         const [lo, hi] = CUT_RULES.kdCutWindowS;
+        // The knockdown exception: the dropping strike is guarded by its exact
+        // contact instant, not by the ±6-tick window.
+        const exFrom = tick - CUT_RULES.kdStrikeLookbackTicks;
+        this.kdExempt = [exFrom, tick];
+        let earliest = tick + Math.round(lo / TICK_S);
+        for (const s of this.recentStrikes) {
+          if (s.tick >= exFrom && s.tick <= tick) {
+            earliest = Math.max(earliest, Math.ceil((s.contact + CUT_RULES.strikeGuardS) / TICK_S - 1e-9));
+          }
+        }
         this.request({
           kind: 'cageside', reason: 'knockdown', forced: true, priority: 8,
-          earliest: tick + Math.round(lo / TICK_S), deadline: tick + Math.round(hi / TICK_S),
-          subjects: by >= 0 ? [downed, by] : [downed],
+          earliest, deadline: tick + Math.round(hi / TICK_S),
+          subjects: by >= 0 ? [downed, by] : [downed], focus: downed,
         });
         break;
       }
@@ -583,7 +759,11 @@ export class ShotPlanner {
     if (tick < p.earliest) return;
     const cur = this.cur;
     let why: BlockedCut['reason'] | null = null;
-    if (this.strikes.near(tick)) why = 'strike';
+    const guarded = p.reason === 'knockdown'
+      ? this.strikes.nearExcept(tick, this.kdExempt[0], this.kdExempt[1])
+        || tick * TICK_S - this.strikes.latestContactIn(this.kdExempt[0], this.kdExempt[1]) < CUT_RULES.strikeGuardS - 1e-9
+      : this.strikes.near(tick);
+    if (guarded) why = 'strike';
     else if (!p.forced && cur && tick - cur.startTick < MIN_SHOT_TICKS) why = 'minShot';
     else if (!p.forced && tick < this.kdHoldUntil) why = 'kdHold';
     if (why) {
@@ -607,19 +787,20 @@ export class ShotPlanner {
     let heights: readonly [number, number] = [0, 0];
     let durationS = 0;
     let subjects = r.subjects;
+    const sight: OperatorSight = { referee: this.refNow, focus: r.focus };
     switch (r.kind) {
       case 'cageside':
       case 'ground': {
         const prev = this.cur && (this.cur.kind === 'cageside' || this.cur.kind === 'ground' || this.cur.kind === 'finish')
           ? this.cur.azimuth : undefined;
-        azimuth = chooseOperator(this.ca, frame, subjects, this.seed, `op:${n}`, prev);
+        azimuth = chooseOperator(this.ca, frame, subjects, this.seed, `op:${n}`, prev, sight);
         break;
       }
       case 'corner':
         azimuth = cornerAzimuth(this.ca, frame, subjects[0] ?? 0, this.seed);
         break;
       case 'finish':
-        azimuth = chooseOperator(this.ca, frame, subjects, this.seed, `fin:${n}`, this.cur?.azimuth);
+        azimuth = finishAzimuth(this.ca, frame, subjects[0] ?? -1, this.refNow, this.seed, n, this.cur?.azimuth);
         break;
       case 'jib': {
         // Swing between panel centres so the move settles clear of a post.
@@ -696,12 +877,25 @@ export function planShots(
   const strikes = new StrikeIndex(events);
   const roundStarts = opts.roundStarts ?? events.filter((e) => e.kind === 'roundStart').map((e) => e.tick);
   const planner = new ShotPlanner({ ...opts, roundStarts }, strikes);
+  // Where the referee is at every tick: the arena's own placement logic run
+  // over the recording (the picture's referee follows the same targets).
+  const arena = opts.arena.arena;
+  const tracker = arena && arena.shape !== 'unbounded' ? new RefereeTracker(arena, undefined, opts.arena.mainAzimuth) : null;
   let ei = 0;
+  let wi = 0;
   const byTick: SimEvent[] = [];
+  let first = true;
   for (const frame of frames) {
     byTick.length = 0;
     while (ei < events.length && events[ei].tick <= frame.tick) byTick.push(events[ei++]);
-    planner.step(frame, byTick);
+    let ref: { x: number; z: number; crouch: number } | null = null;
+    if (tracker) {
+      while (wi < ei && events[wi].tick <= frame.tick - 20) wi++;
+      const r = tracker.update(frame, frame.t, TICK_S, first, { events: events.slice(wi, ei) });
+      ref = r.present ? { x: r.x, z: r.z, crouch: r.crouch } : null;
+    }
+    first = false;
+    planner.step(frame, byTick, ref);
   }
   return planner.finish();
 }

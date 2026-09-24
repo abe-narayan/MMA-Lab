@@ -48,8 +48,8 @@ import { buildStreet } from './street';
 import { loadArenaTextures, type ArenaTextures } from './assets';
 import { attribute, pmremTexture } from 'three/tsl';
 
-export { refereePlacement, RefereeTracker } from './referee';
-export type { RefereePlacement, RefereeGesture } from './referee';
+export { refereePlacement, refereeDisplay, RefereeTracker } from './referee';
+export type { RefereePlacement, RefereeGesture, RefereeState, RefereeDisplay, RefereeContext } from './referee';
 export { crowdState } from './crowdReactions';
 export type { CrowdState } from './crowdReactions';
 
@@ -132,7 +132,7 @@ class Venue implements VenueSet {
   private quality: QualitySettings;
   private readonly red: string;
   private readonly blue: string;
-  private readonly sceneScratch: { phase: RefereeScene['phase']; fighters: { id: number; x: number; z: number; posture: RefereeScene['fighters'][number]['posture'] }[]; engagements: RefereeScene['engagements']; referee: RefereeScene['referee'] };
+  private readonly sceneScratch: { tick: number; obstacles: { x: number; z: number }[]; phase: RefereeScene['phase']; fighters: { id: number; x: number; z: number; posture: RefereeScene['fighters'][number]['posture'] }[]; engagements: RefereeScene['engagements']; referee: RefereeScene['referee'] };
 
   constructor(private readonly arena: Arena, q: QualitySettings, o: ArenaOptions, private readonly tex: ArenaTextures) {
     this.kind = setKindOf(arena);
@@ -146,7 +146,7 @@ class Venue implements VenueSet {
     this.cu.seedOffset.value = this.seedNum % 65536;
     this.screens.red.value.set(this.red);
     this.screens.blue.value.set(this.blue);
-    this.sceneScratch = { phase: 'pre', fighters: [], engagements: [], referee: { state: 'watching' } };
+    this.sceneScratch = { tick: 0, obstacles: [], phase: 'pre', fighters: [], engagements: [], referee: { state: 'watching' } };
 
     this.built = this.kind === 'octagon' || this.kind === 'ring' ? this.buildBroadcast(q)
       : this.kind === 'mat' ? this.buildHallSet(q) : this.buildStreetSet(q);
@@ -431,22 +431,37 @@ class Venue implements VenueSet {
 
     // Referee: interpolated floor positions, then the speed-limited follow.
     const s = this.sceneScratch;
+    s.tick = f.tick;
     s.phase = f.phase;
     s.engagements = f.engagements;
     s.referee = f.referee;
     s.fighters.length = 0;
+    s.obstacles.length = 0;
     const a = input.alpha;
     for (let i = 0; i < f.fighters.length; i++) {
       const p = f.fighters[i]!;
       const n = input.next?.fighters[i];
+      // Where the body is drawn (the animator compresses the pair's display
+      // separation), so he keeps clear of the bodies the viewer sees.
+      const w = fighters[i];
+      const hx = w ? w.pos[B.hips * 3] : NaN;
+      const hz = w ? w.pos[B.hips * 3 + 2] : NaN;
+      const shown = Number.isFinite(hx) && Number.isFinite(hz);
       s.fighters.push({
         id: p.id,
-        x: n ? p.x + (n.x - p.x) * a : p.x,
-        z: n ? p.z + (n.z - p.z) * a : p.z,
+        x: shown ? hx : n ? p.x + (n.x - p.x) * a : p.x,
+        z: shown ? hz : n ? p.z + (n.z - p.z) * a : p.z,
         posture: p.posture,
       });
+      if (w && (p.posture === 'down' || p.posture === 'ground' || p.posture === 'out')) {
+        for (const bone of [B.head, B.lFoot, B.rFoot]) {
+          const bx = w.pos[bone * 3], bz = w.pos[bone * 3 + 2];
+          if (Number.isFinite(bx) && Number.isFinite(bz)) s.obstacles.push({ x: bx, z: bz });
+        }
+      }
     }
-    const r = this.tracker.update(s, simTime, realDt * Math.max(0.05, input.playbackRate), input.discontinuity);
+    const r = this.tracker.update(s, simTime, realDt * Math.max(0.05, input.playbackRate), input.discontinuity,
+      { events: input.events as readonly SimEvent[] });
     this.referee = r.present ? r : null;
   }
 

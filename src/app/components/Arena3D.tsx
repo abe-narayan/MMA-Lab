@@ -318,6 +318,20 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
             <span style={{ letterSpacing: '0.18em', fontSize: 13, textTransform: 'uppercase', color: '#e2c26b' }}>
               Preparing broadcast…
             </span>
+            {/*
+              A compositor-driven sweep (a CSS transform animation): it keeps
+              moving even while the main thread is blocked, e.g. when a WebGL2
+              driver compiles shaders on the first draw.
+            */}
+            <style>{'@keyframes boutlab-sweep { from { transform: translateX(-100%); } to { transform: translateX(320%); } }'}</style>
+            <div style={{ width: 220, height: 2, background: '#12161b', borderRadius: 1, overflow: 'hidden' }}>
+              <div
+                style={{
+                  width: '30%', height: '100%', background: 'linear-gradient(90deg, transparent, #8a939e, transparent)',
+                  animation: 'boutlab-sweep 1.1s linear infinite', willChange: 'transform',
+                }}
+              />
+            </div>
             <div style={{ width: 220, height: 3, background: '#1b2027', borderRadius: 2, overflow: 'hidden' }}>
               <div
                 style={{

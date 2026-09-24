@@ -36,6 +36,7 @@ import type { CameraState, QualitySettings } from '../contract';
 import { STAGE_TUNING, type StageTuning } from './quality';
 import { StagePipeline, scalesInsidePipeline, togglesFor, type PassToggles } from './pipeline';
 import { DynamicResolution } from './dynres';
+import { installSkinnedVelocityFix, preparePreviousBones, snapshotPreviousBones } from './skinnedVelocity';
 
 export * from './quality';
 export { StagePipeline, togglesFor, scalesInsidePipeline, createLutTexture } from './pipeline';
@@ -114,6 +115,10 @@ export class Stage {
 
   /** Create the renderer and wait for its device. Throws when no GPU path works. */
   static async create(container: HTMLElement, opts: StageOptions): Promise<Stage> {
+    // Correct motion vectors for skinned bodies that share materials (see
+    // skinnedVelocity.ts). `?skinVelFix=0` leaves three's own path, for A/B.
+    const noFix = typeof location !== 'undefined' && new URLSearchParams(location.search).get('skinVelFix') === '0';
+    if (!noFix) installSkinnedVelocityFix();
     const want = opts.backend ?? requestedBackend();
     const renderer = new WebGPURenderer({
       antialias: false,
@@ -249,6 +254,10 @@ export class Stage {
   render(): void {
     if (!this.pipeline) return;
     this.renderer.info.reset();
+    // One node frame per presented frame, whatever three's own rAF did in
+    // between: skeletons, TAA and GTAO update exactly once per picture.
+    this.advanceNodeFrame();
+    snapshotPreviousBones(this.scene);
     this.pipeline.render(this.replayOn);
   }
 
@@ -258,10 +267,16 @@ export class Stage {
    * this does). Call after the set and the bodies are in the scene.
    */
   async precompile(onProgress?: (loaded: number, total: number) => void): Promise<void> {
+    preparePreviousBones(this.scene);
     await this.pipeline?.compileScene(this.scene, onProgress);
   }
 
   /** Compile the replay pipeline ahead of the first replay. */
+  /** The warm-up split into steps (see `StagePipeline.warmSteps`). */
+  warmUpSteps(): (() => void)[] {
+    return this.pipeline?.warmSteps() ?? [];
+  }
+
   warmUp(): void {
     this.pipeline?.warmReplay();
   }

@@ -46,6 +46,7 @@ import {
 } from './camera';
 import type { SimEvent, TickSnapshot } from '../sim';
 import { createRefereeActor, type RefereeActor } from './referee';
+import { CornerRest } from './corner';
 import type { ArenaOptions } from './arena';
 import { qualitySettings, defaultQualityFor, FrameMeter, type PassToggles } from './stage/index';
 import { createPlaceholderArena } from './placeholders/arena';
@@ -67,6 +68,8 @@ export interface StageLike {
   frameTiming(ms: number): void;
   render(): void;
   warmUp(): void;
+  /** The post warm-up as separate steps, so the page can paint between them (optional). */
+  warmUpSteps?(): (() => void)[];
   /** Compile the scene's materials without drawing (optional: fakes and old stages lack it). */
   precompile?(onProgress?: (loaded: number, total: number) => void): Promise<void>;
   info(): { drawCalls: number; triangles: number; internalWidth: number; internalHeight: number };
@@ -119,6 +122,7 @@ export function postOverrides(spec: string | null): Partial<PassToggles> | undef
     const [k, v] = part.split(':');
     if (!k || v === undefined) continue;
     if (k === 'aa') out.aa = v;
+    else if (k === 'view') out.debugView = v;
     else out[k] = v === '1' || v === 'true';
   }
   return out as Partial<PassToggles>;
@@ -178,6 +182,11 @@ export function hardCameraAngle(bout: BoutPresentation): number {
   }
 }
 
+/** Let the browser paint (the loading card) between long synchronous steps. */
+function yieldToPage(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function round2(x: number): number {
   return Math.round(x * 100) / 100;
 }
@@ -207,6 +216,8 @@ export class Presenter implements Presenter3D {
   private worlds: WorldPose[] = [];
   private request: CameraRequest = { mode: 'broadcast' };
   private referee: RefereeActor | null = null;
+  /** Stools and the seated fighters between rounds. */
+  private corner: CornerRest | null = null;
   private container: HTMLElement | null = null;
   private recording: { frames: readonly TickSnapshot[]; events: readonly SimEvent[] } | null = null;
   private replayState: ReplayState | null = null;
@@ -265,6 +276,8 @@ export class Presenter implements Presenter3D {
     if (token !== this.boutToken) return;
     this.modules.character = factory ? 'module' : 'placeholder';
     this.factory = factory ?? createPlaceholderCharacterFactory();
+    await yieldToPage();
+    if (token !== this.boutToken) return;
     this.buildActors();
 
     const animator = attempt('createAnimator', () => this.deps.createAnimator());
@@ -279,7 +292,16 @@ export class Presenter implements Presenter3D {
     this.camera.setRequest(this.request);
     this.applyDirectorExtras();
 
-    this.referee = createRefereeActor(bout, hardCameraAngle(bout));
+    // The official: a real, dressed body when the character module is in,
+    // else the capsule stand-in.
+    // Yield to the page between the heavy build steps so the loading card
+    // keeps painting (each body is ~50-120 ms of synchronous work).
+    await yieldToPage();
+    if (token !== this.boutToken) return;
+    this.referee = createRefereeActor(bout, hardCameraAngle(bout), {
+      factory: this.modules.character === 'module' ? this.factory : null, quality: q,
+    });
+    this.buildCorner();
 
     const stage = this.stage;
     if (stage) {
@@ -287,7 +309,22 @@ export class Presenter implements Presenter3D {
       stage.scene.environment = (this.arena.environment as Texture | null) ?? null;
       for (const a of this.actors) stage.scene.add(a.object3d);
       stage.scene.add(this.referee.object3d);
+      if (this.corner) stage.scene.add(this.corner.object3d);
       stage.applyShadowPolicy(stage.scene);
+    }
+  }
+
+  /** The rest-period staging (stools, fighters on them), for the current bodies and recording. */
+  private buildCorner(): void {
+    this.corner?.dispose();
+    this.corner = null;
+    if (!this.bout) return;
+    try {
+      this.corner = new CornerRest(this.bout, this.actors.map((a) => a.rest));
+      if (this.recording) this.corner.setRecording(this.recording.frames, this.recording.events);
+    } catch (err) {
+      console.warn('[presenter] corner staging failed:', err);
+      this.corner = null;
     }
   }
 
@@ -316,6 +353,7 @@ export class Presenter implements Presenter3D {
     if (this.recording && this.recording.frames === frames && this.recording.events === events) return;
     this.recording = { frames, events };
     if (isBroadcastDirector(this.camera)) this.camera.setRecording(frames, events);
+    this.corner?.setRecording(frames, events);
   }
 
   /** The instant replay on air (`ReplaySequencer.state`), or null for live. */
@@ -380,6 +418,8 @@ export class Presenter implements Presenter3D {
     this.arena = null;
     this.referee?.dispose();
     this.referee = null;
+    this.corner?.dispose();
+    this.corner = null;
     this.animator = null;
     this.camera = null;
     this.bout = null;
@@ -408,6 +448,8 @@ export class Presenter implements Presenter3D {
     }
 
     this.animator.evaluate(input, realDt, this.poses);
+    // Between rounds: walk to the corner, sit on the stool, back for the bell.
+    this.corner?.apply(input, this.poses, realDt);
     trace.push('animator');
 
     const roundTime = input.frame.roundTime;
@@ -427,6 +469,8 @@ export class Presenter implements Presenter3D {
     trace.push('arena');
     // Not in `trace`: the referee is an extra, not one of the contract modules.
     this.referee?.update(input, this.arena, this.worlds, realDt);
+    // The operators work around him.
+    if (isBroadcastDirector(this.camera)) this.camera.setReferee(this.referee?.world ?? null);
 
     const shot = this.camera.update(input, this.worlds, realDt);
     this.lastShot = shot;
@@ -446,6 +490,11 @@ export class Presenter implements Presenter3D {
         w.pos[B.spine2 * 3 + 2] - shot.position[2],
       );
       this.actors[i].setLOD(lodFor(d, cap));
+    }
+    const rc = this.referee?.chest();
+    if (rc) {
+      const d = Math.hypot(rc[0] - shot.position[0], rc[1] - shot.position[1], rc[2] - shot.position[2]);
+      this.referee!.setLOD(lodFor(d, cap));
     }
     trace.push('lod');
   }
@@ -468,6 +517,13 @@ export class Presenter implements Presenter3D {
       this.buildActors();
       if (this.stage) for (const a of this.actors) this.stage.scene.add(a.object3d);
       this.animator?.setBout(this.bout, this.actors.map((a) => a.rest));
+      this.referee?.dispose();
+      this.referee = createRefereeActor(this.bout, hardCameraAngle(this.bout), {
+        factory: this.modules.character === 'module' ? this.factory : null, quality: this.quality,
+      });
+      if (this.stage) this.stage.scene.add(this.referee.object3d);
+      this.buildCorner();
+      if (this.stage && this.corner) this.stage.scene.add(this.corner.object3d);
     }
     if (this.stage) this.stage.applyShadowPolicy(this.stage.scene);
   }
@@ -516,9 +572,19 @@ export class Presenter implements Presenter3D {
     }
     const t1 = this.deps.now();
     if (this.stage !== stage) return { sceneMs: t1 - t0, postMs: 0 };
-    // The post chains (live, then replay) still compile on their first draw.
+    // The post chains (live, then replay, then the live DoF) still compile on
+    // their first draw; one per task, yielding in between, so the page (and
+    // the loading card) can paint between the driver's compile stalls.
     stage.render();
-    stage.warmUp();
+    if (stage.warmUpSteps) {
+      for (const step of stage.warmUpSteps()) {
+        await yieldToPage();
+        if (this.stage !== stage) break;
+        step();
+      }
+    } else {
+      stage.warmUp();
+    }
     return { sceneMs: Math.round(t1 - t0), postMs: Math.round(this.deps.now() - t1) };
   }
 

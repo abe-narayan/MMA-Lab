@@ -32,6 +32,8 @@ export interface CameraArena {
   /** Radius and height of the hard-camera platform. */
   mainRadius: number;
   mainHeight: number;
+  /** The sim arena this was made from (the planner runs the referee placement on it). */
+  arena?: Arena;
 }
 
 const CAGE_HEIGHT = 1.95;
@@ -61,6 +63,7 @@ export function makeCameraArena(arena: Arena, bounds?: ArenaSet['bounds'] | null
     mainAzimuth: Math.PI,
     mainRadius: 0,
     mainHeight: 0,
+    arena,
   };
   // A post must never sit dead-centre behind the pair on the main shot, so the
   // platform faces a panel centre rather than a post.

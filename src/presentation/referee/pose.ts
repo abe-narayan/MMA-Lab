@@ -90,7 +90,7 @@ export class RefereeAnimator {
     const left: V3 = [Math.cos(face), 0, -Math.sin(face)];
     const c = clamp(p.crouch, 0, 1);
     const g = p.gesture;
-    const reaching = g === 'break' || g === 'stop';
+    const reaching = g === 'break' || g === 'stop' || g === 'ready';
 
     // ---- root and trunk ---------------------------------------------------------
     for (let i = 0; i < pose.local.length; i += 4) {
@@ -215,7 +215,18 @@ export class RefereeAnimator {
       sh[0] + fwd[0] * 0.08 + left[0] * s * 0.05, sh[1] - armLen * 0.92, sh[2] + fwd[2] * 0.08 + left[2] * s * 0.05,
     ];
     const lead = s < 0; // the right hand does the signalling
+    // Raising the winner's hand: the arm on the winner's side goes straight up
+    // beside the winner's shoulder (holding his wrist), the other hangs.
+    const winnerSide = (focus[0] - sh[0]) * left[0] + (focus[2] - sh[2]) * left[2] > 0 ? 1 : -1;
     switch (g) {
+      case 'raise':
+        return s === winnerSide
+          ? [sh[0] + (focus[0] - sh[0]) * 0.45, sh[1] + armLen * 0.92, sh[2] + (focus[2] - sh[2]) * 0.45]
+          : relaxed();
+      case 'ready':
+        return [
+          sh[0] + fwd[0] * 0.4 + left[0] * s * 0.1, sh[1] - 0.3, sh[2] + fwd[2] * 0.4 + left[2] * s * 0.1,
+        ];
       case 'break': return reach(0.92);
       case 'stop': return lead ? reach(0.96) : reach(0.8, -0.15);
       case 'count':

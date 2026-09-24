@@ -24,8 +24,11 @@ import { resolveRuleset, type RulesetId, type SimEvent, type TickSnapshot } from
 import type {
   ArenaSet, BoutPresentation, CameraDirector, CameraRequest, CameraState, FrameInput,
 } from '../contract';
-import type { WorldPose } from '../rig/skeleton';
-import { type CameraArena, clampToBounds, makeCameraArena, wallDistanceAt } from './geometry';
+import { B, type WorldPose } from '../rig/skeleton';
+import { type CameraArena, clampToBounds, insideWall, makeCameraArena, wallDistanceAt } from './geometry';
+import {
+  AVOID, bodyCapsules, type Capsule, fighterCapsules, OCCLUSION_LIMIT, occlusion, type SamplePoint, subjectSamples,
+} from './occlusion';
 import { fovToTanHalf, lookBasis, requiredTanHalf, solveFraming, tanHalfToFov } from './framing';
 import {
   type FighterPoints, type FramingSet, fighterPoints, framingPoints, pairMid,
@@ -56,6 +59,8 @@ interface Goal {
   allowInside: boolean;
   /** Push-in multiplier on the lens (replays), 1 = none. */
   zoomMul: number;
+  /** Zoom-in spring override (rad/s): the knockdown push-in is quicker than a drift. */
+  zoomIn?: number;
 }
 
 export interface DirectorDebug {
@@ -70,6 +75,10 @@ export interface DirectorDebug {
   timeline: number;
   /** A cut the rules are holding back right now, if any. */
   blocked: string | null;
+  /** Share of the subject hidden (referee / other fighter) from the lens this frame. */
+  occlusion: number;
+  /** The operator's current dodge: handheld azimuth offset (rad) or hard-camera slide/boom (m). */
+  avoid: [number, number];
 }
 
 const DEFAULT_ASPECT = 16 / 9;
@@ -115,7 +124,19 @@ export class BroadcastCameraDirector implements CameraDirector {
   private lastState: CameraState | null = null;
   private dbg: DirectorDebug = {
     shot: 'main', label: 'MAIN', source: 'plan', entryIndex: -1, reason: '', shotSeconds: 0, timeline: 0, blocked: null,
+    occlusion: 0, avoid: [0, 0],
   };
+
+  // The referee (an occluder the operators work around) and the dodge state.
+  private refereePose: WorldPose | null = null;
+  private readonly avoidA = new Spring1();
+  private readonly avoidB = new Spring1();
+  private avoidTarget: [number, number] = [0, 0];
+  private avoidKey = '';
+  private lastOcclusion = 0;
+  /** Post-fight handheld: direction from the winner, chosen when the shot starts. */
+  private finishDir = 0;
+  private finishKey = '';
 
   /** User camera (free / orbit), manipulated by `FreeCameraController`. */
   readonly free: FreeCameraState = createFreeCameraState();
@@ -175,6 +196,16 @@ export class BroadcastCameraDirector implements CameraDirector {
     this.replay = state;
   }
 
+  /**
+   * The referee's posed body this frame (null: none on the floor). The
+   * operators treat him as an occluder: a handheld walks the apron, the hard
+   * camera slides along its platform or booms up, until he hides no more than
+   * `OCCLUSION_LIMIT` of the fighters they are shooting.
+   */
+  setReferee(pose: WorldPose | null): void {
+    this.refereePose = pose;
+  }
+
   /** Force one shot kind in broadcast mode (dev tools, tests); null to release. */
   lockShot(kind: ShotKind | null): void {
     this.locked = kind;
@@ -190,6 +221,8 @@ export class BroadcastCameraDirector implements CameraDirector {
   }
 
   reset(): void {
+    this.avoidKey = '';
+    this.finishKey = '';
     this.lastKey = '';
     this.lastSimTime = NaN;
     this.holdClock = 0;
@@ -286,7 +319,7 @@ export class BroadcastCameraDirector implements CameraDirector {
 
     const kind = entry.kind;
     const spec = SHOTS[kind];
-    const goal = this.goal(kind, entry, ca, pts, midSm, shotT, replaySeg);
+    const goal = this.goal(kind, entry, ca, pts, midSm, shotT, replaySeg, input, dt, snap, key, poses);
 
     // Smooth like an operator.
     if (snap) {
@@ -297,7 +330,7 @@ export class BroadcastCameraDirector implements CameraDirector {
     const pos: V3 = [...(goal.posOmega === Infinity ? (this.posS.reset(goal.pos), goal.pos) : this.posS.step(goal.pos, goal.posOmega, dt))] as V3;
     let aim: V3 = [...this.aimS.step(goal.target, spec.aimOmega, dt)] as V3;
     const goalTan = goal.tanHalf * goal.zoomMul;
-    let tanHalf = this.tanS.step(goalTan, goalTan > this.tanS.x ? spec.zoomOutOmega : spec.zoomInOmega, dt);
+    let tanHalf = this.tanS.step(goalTan, goalTan > this.tanS.x ? spec.zoomOutOmega : goal.zoomIn ?? spec.zoomInOmega, dt);
 
     // Safety: whatever the springs are doing, the framed bodies stay in the frame.
     if (goal.keep.length > 0) {
@@ -360,6 +393,8 @@ export class BroadcastCameraDirector implements CameraDirector {
     this.dbg = {
       shot: kind, label: state.shotName, source, entryIndex, reason: entry.reason,
       shotSeconds: timeline - this.shotStartTimeline, timeline, blocked,
+      occlusion: Math.round(this.lastOcclusion * 100) / 100,
+      avoid: [Math.round(this.avoidA.x * 100) / 100, Math.round(this.avoidB.x * 100) / 100],
     };
     return state;
   }
@@ -487,10 +522,106 @@ export class BroadcastCameraDirector implements CameraDirector {
 
   // ---- the operators --------------------------------------------------------
 
+  /**
+   * Sight lines for this shot: what must be seen (the subjects' heads, chests,
+   * hips) and what may block it (the referee; the other fighters when the
+   * shot is about one of them).
+   */
+  private sight(subjects: FighterPoints[], all: FighterPoints[]): { samples: SamplePoint[]; occluders: Capsule[] } {
+    const samples: SamplePoint[] = [];
+    const occluders: Capsule[] = [];
+    const ids = new Set(subjects.map((p) => p.id));
+    for (const p of all) {
+      if (ids.has(p.id)) samples.push(...subjectSamples(p));
+      else occluders.push(...fighterCapsules(p));
+    }
+    if (this.refereePose) occluders.push(...bodyCapsules(this.refereePose));
+    return { samples, occluders };
+  }
+
+  /**
+   * The operator's dodge. `posAt(offset)` is where the lens would be with a
+   * given offset (handheld: azimuth along the apron; hard camera: slide and
+   * boom). The dodge target changes only when the current one lets the subject
+   * be hidden beyond `OCCLUSION_LIMIT` (then the smallest offset that clears
+   * it to `AVOID.clearTo`, else the least bad), and goes home once home is
+   * clear again; the lens walks there on a spring. A cut or a seek starts the
+   * shot already clear.
+   */
+  private dodge(
+    key: string, candidates: readonly (readonly [number, number])[], posAt: (o: readonly [number, number]) => V3,
+    sight: { samples: SamplePoint[]; occluders: Capsule[] }, dt: number, snap: boolean,
+  ): V3 {
+    const occ = (o: readonly [number, number]): number => occlusion(posAt(o), sight.samples, sight.occluders);
+    if (sight.samples.length === 0 || sight.occluders.length === 0) {
+      this.avoidTarget = [0, 0];
+    } else {
+      const home = occ([0, 0]);
+      const choose = (): [number, number] => {
+        if (home <= OCCLUSION_LIMIT) return [0, 0];
+        let best: readonly [number, number] = [0, 0];
+        let bestOcc = home;
+        for (const c of candidates) {
+          const o = occ(c);
+          if (o <= AVOID.clearTo) return [c[0], c[1]];
+          if (o < bestOcc - 0.05) { bestOcc = o; best = c; }
+        }
+        return [best[0], best[1]];
+      };
+      if (snap || key !== this.avoidKey) {
+        this.avoidTarget = choose();
+      } else if (this.avoidTarget[0] !== 0 || this.avoidTarget[1] !== 0) {
+        if (home < AVOID.homeBelow) this.avoidTarget = [0, 0];
+        else if (occ(this.avoidTarget) > OCCLUSION_LIMIT) this.avoidTarget = choose();
+      } else if (home > OCCLUSION_LIMIT) {
+        this.avoidTarget = choose();
+      }
+    }
+    if (snap || key !== this.avoidKey) {
+      this.avoidA.reset(this.avoidTarget[0]);
+      this.avoidB.reset(this.avoidTarget[1]);
+      this.avoidKey = key;
+    } else {
+      this.avoidA.step(this.avoidTarget[0], AVOID.omega, dt);
+      this.avoidB.step(this.avoidTarget[1], AVOID.omega, dt);
+    }
+    const pos = posAt([this.avoidA.x, this.avoidB.x]);
+    this.lastOcclusion = sight.samples.length ? occlusion(pos, sight.samples, sight.occluders) : 0;
+    return pos;
+  }
+
+  /**
+   * A knockdown in the last few seconds (or a fighter still down): who fell and
+   * who dropped him. The hard camera pushes in on them.
+   */
+  private knockdownFocus(input: FrameInput): { downed: number; by: number } | null {
+    const tick = input.frame.tick;
+    let kd: SimEvent | null = null;
+    for (const e of input.events) {
+      if (e.kind === 'knockdown' && e.tick <= tick && tick - e.tick <= 25) kd = e;
+    }
+    if (kd) {
+      const downed = kd.target >= 0 ? kd.target : kd.actor;
+      return { downed, by: kd.target >= 0 ? kd.actor : -1 };
+    }
+    const down = input.frame.fighters.find((f) => f.posture === 'down');
+    if (down && input.frame.phase === 'round') {
+      return { downed: down.id, by: input.frame.fighters.find((f) => f.id !== down.id)?.id ?? -1 };
+    }
+    return null;
+  }
+
+  /** The post-fight handheld walks into the cage (a bounded arena with a wall). */
+  private handheldInside(ca: CameraArena, entry: ShotPlanEntry): boolean {
+    return ca.shape !== 'unbounded' && entry.reason === 'post';
+  }
+
   private goal(
     kind: ShotKind, entry: ShotPlanEntry, ca: CameraArena, pts: FighterPoints[], mid: V3, shotT: number,
-    seg: ReplayState['segment'] | null,
+    seg: ReplayState['segment'] | null, input: FrameInput, dt: number, snap: boolean, key: string,
+    poses: readonly WorldPose[] = [],
   ): Goal {
+    this.lastOcclusion = 0;
     const spec = SHOTS[kind];
     const aspect = this.aspect;
     const live = pts.filter((p) => p.posture !== 'out');
@@ -526,7 +657,24 @@ export class BroadcastCameraDirector implements CameraDirector {
       case 'reverse': {
         const az = kind === 'reverse' ? ca.mainAzimuth + Math.PI : ca.mainAzimuth;
         const base: V3 = unbounded ? add(mid, atAzimuth(az, 7.5)) : atAzimuth(az, ca.mainRadius);
-        const pos: V3 = [base[0], kind === 'reverse' ? ca.mainHeight - 0.5 : ca.mainHeight, base[2]];
+        const home: V3 = [base[0], kind === 'reverse' ? ca.mainHeight - 0.5 : ca.mainHeight, base[2]];
+        // The platform: slide along it (tangent to the cage) and boom up to see past the referee.
+        const tx = Math.cos(az);
+        const tz = -Math.sin(az);
+        const kd = kind === 'main' && !seg ? this.knockdownFocus(input) : null;
+        const shotSubjects = kd ? all.filter((p) => p.id === kd.downed || p.id === kd.by) : kind === 'main' ? all : subjects;
+        const pos = this.dodge(
+          `${key}:main`, AVOID.mainOffsets,
+          (o) => [home[0] + tx * o[0], Math.min(ca.ceiling - 0.8, home[1] + o[1]), home[2] + tz * o[0]],
+          this.sight(kd ? all.filter((p) => p.id === kd.downed) : shotSubjects, all), dt, snap,
+        );
+        if (kd && shotSubjects.length > 0) {
+          // The knockdown push-in: the operator punches in on the falling
+          // fighter (and the man who dropped him) — a zoom, not a cut, so the
+          // strike guard does not apply.
+          const g = framed(pos, shotSubjects, 'full', 0.72);
+          return { ...g, keepSafe: 0.74, zoomIn: 3.4, posOmega: Infinity };
+        }
         // Lead room: frame a little of where the pair is heading.
         const vx = all.reduce((s, p) => s + p.velocity[0], 0) / Math.max(1, all.length);
         const vz = all.reduce((s, p) => s + p.velocity[1], 0) / Math.max(1, all.length);
@@ -542,22 +690,75 @@ export class BroadcastCameraDirector implements CameraDirector {
         return { ...g, keepSafe: 0.74, posOmega: unbounded ? 1.2 : Infinity };
       }
 
-      case 'cageside':
-      case 'ground':
       case 'finish': {
+        if (this.handheldInside(ca, entry)) {
+          // After the stoppage the handhelds are inside the cage (as on every
+          // broadcast): 2.3 m from the winner on the chosen side, square to
+          // the winner-loser line (the planner's `finishAzimuth`), at eye
+          // height, holding the winner and the referee raising his hand.
+          const w = subjects[0] ?? all[0];
+          // In front of the winner (his chest's facing, from the pose), a
+          // little to one side, 2.3 m off, inside the cage: his face, not his
+          // back. Chosen when the shot starts and held (an operator walks up
+          // and plants), then the dodge works around the referee.
+          const at = (dirAz: number): V3 => {
+            let r = 2.3;
+            let p: V3 = [w.ground[0] + Math.sin(dirAz) * r, 1.62, w.ground[2] + Math.cos(dirAz) * r];
+            while (r > 1.2 && !insideWall(ca, p[0], p[2], 0.4)) {
+              r -= 0.1;
+              p = [w.ground[0] + Math.sin(dirAz) * r, 1.62, w.ground[2] + Math.cos(dirAz) * r];
+            }
+            return p;
+          };
+          if (snap || this.finishKey !== key) {
+            this.finishKey = key;
+            const idx = input.frame.fighters.findIndex((f) => f.id === w.id);
+            const face = idx >= 0 && poses[idx] ? chestFacing(poses[idx]!) : null;
+            const base = face ?? entry.azimuth;
+            const sight = this.sight([w], all);
+            let best = base + 0.45;
+            let bestScore = Infinity;
+            [0.45, -0.45, 0.8, -0.8, 0, 1.2, -1.2].forEach((o, i) => {
+              const p = at(base + o);
+              const inside = insideWall(ca, p[0], p[2], 0.35) ? 0 : 5;
+              const room = Math.hypot(p[0] - w.ground[0], p[2] - w.ground[2]);
+              const score = occlusion(p, sight.samples, sight.occluders) * 4 + inside + (2.3 - room) + i * 0.05;
+              if (score < bestScore) { bestScore = score; best = base + o; }
+            });
+            this.finishDir = best;
+          }
+          const pos = this.dodge(
+            `${key}:finish`, AVOID.handheldAzimuths.map((a) => [a, 0] as const), (o) => at(this.finishDir + o[0]),
+            this.sight([w], all), dt, snap,
+          );
+          const extra: V3[] = [];
+          if (this.refereePose) {
+            const r = this.refereePose;
+            extra.push([r.tip[B.head * 3], r.tip[B.head * 3 + 1], r.tip[B.head * 3 + 2]]);
+            for (const hand of [B.lHand, B.rHand]) {
+              const y = r.tip[hand * 3 + 1];
+              if (y > r.tip[B.head * 3 + 1]) extra.push([r.tip[hand * 3], y, r.tip[hand * 3 + 2]]);
+            }
+          }
+          const g = framed(pos, [w], 'torso', 0.62, extra, [0, 0.06]);
+          return { ...g, posOmega: 1.2, keepSafe: 0.9, allowInside: true };
+        }
+      }
+      // falls through: no cage to walk into (unbounded) uses the apron handheld
+      case 'cageside':
+      case 'ground': {
         const low = kind === 'ground';
-        const az = entry.azimuth;
-        let pos: V3;
-        if (unbounded) {
-          pos = add(mid, atAzimuth(az, 3.4, 0));
-        } else {
-          pos = atAzimuth(az, wallDistanceAt(ca, az) + PLACEMENT.handheldOutsideM, 0);
+        const az0 = entry.azimuth;
+        const apron = (az: number): V3 => {
+          if (unbounded) return add(mid, atAzimuth(az, 3.4, 0));
+          const p = atAzimuth(az, wallDistanceAt(ca, az) + PLACEMENT.handheldOutsideM, 0);
           // The operator walks the apron a little toward the action.
           const tx = Math.cos(az);
           const tz = -Math.sin(az);
-          const slide = clamp((mid[0] - pos[0]) * tx + (mid[2] - pos[2]) * tz, -0.9, 0.9) * 0.6;
-          pos = [pos[0] + tx * slide, 0, pos[2] + tz * slide];
-        }
+          const slide = clamp((mid[0] - p[0]) * tx + (mid[2] - p[2]) * tz, -0.9, 0.9) * 0.6;
+          return [p[0] + tx * slide, 0, p[2] + tz * slide];
+        };
+        let pos: V3 = apron(az0);
         // Standing work is shot through the mesh; a fighter on the canvas is
         // shot from above the top rail, the operator's arms up. Never at rail
         // height, where the rail itself would fill the lens.
@@ -569,10 +770,26 @@ export class BroadcastCameraDirector implements CameraDirector {
           if (ca.wallHeight > 0 && Math.abs(h - ca.wallHeight) < 0.35) h = ca.wallHeight + PLACEMENT.overRailM;
           this.handheldH = h;
         }
-        pos[1] = this.handheldH;
+        const hh = this.handheldH ?? PLACEMENT.handheldHeightM;
+        // Walk the apron around the referee (and, on a one-fighter shot, the other fighter).
+        pos = this.dodge(
+          `${key}:hh`, AVOID.handheldAzimuths.map((a) => [a, 0] as const),
+          (o) => { const p = apron(az0 + o[0]); return [p[0], hh, p[2]]; },
+          this.sight(subjects, all), dt, snap,
+        );
         const set = kind === 'finish' ? 'torso' : low ? 'ground' : setFor(subjects, 'torso');
         const safe = seg ? 0.74 : spec.safe;
-        const g = framed(pos, subjects, set, safe, [], low ? [0, 0.12] : [0, 0.05]);
+        // The finish: the winner and the referee raising his hand, both in frame.
+        const extra: V3[] = [];
+        if (kind === 'finish' && this.refereePose) {
+          const w = this.refereePose;
+          extra.push([w.tip[B.head * 3], w.tip[B.head * 3 + 1], w.tip[B.head * 3 + 2]]);
+          for (const hand of [B.lHand, B.rHand]) {
+            const y = w.tip[hand * 3 + 1];
+            if (y > w.tip[B.head * 3 + 1]) extra.push([w.tip[hand * 3], y, w.tip[hand * 3 + 2]]);
+          }
+        }
+        const g = framed(pos, subjects, set, safe, extra, low ? [0, 0.12] : [0, 0.05]);
         return { ...g, posOmega: 1.4, keepSafe: 0.9 };
       }
 
@@ -607,15 +824,46 @@ export class BroadcastCameraDirector implements CameraDirector {
       }
 
       case 'corner': {
-        const az = entry.azimuth;
+        const az0 = entry.azimuth;
         const f = subjects[0] ?? all[0];
-        const wd = wallDistanceAt(ca, az);
-        let pos: V3 = unbounded || !Number.isFinite(wd)
-          ? add(f.ground, atAzimuth(az, 2.6, 0))
-          : atAzimuth(az, wd + PLACEMENT.cornerOutsideM, 0);
+        if (input.frame.phase === 'break' && !unbounded) {
+          // Between rounds a handheld works inside the cage in front of the
+          // corner (over the cutman's shoulder): 1.9 m in front of the seated
+          // fighter and a little to one side, lens just above his eye line.
+          const idx = input.frame.fighters.findIndex((x) => x.id === f.id);
+          const face = idx >= 0 && poses[idx] ? chestFacing(poses[idx]!) : null;
+          const base = face ?? Math.atan2(-f.ground[0], -f.ground[2]);
+          const side = (entry.seed & 1) === 0 ? 0.42 : -0.42;
+          const at = (o: number): V3 => {
+            let r = 1.9;
+            const a = base + side + o;
+            let p: V3 = [f.ground[0] + Math.sin(a) * r, 1.38, f.ground[2] + Math.cos(a) * r];
+            while (r > 1.2 && !insideWall(ca, p[0], p[2], 0.35)) {
+              r -= 0.1;
+              p = [f.ground[0] + Math.sin(a) * r, 1.38, f.ground[2] + Math.cos(a) * r];
+            }
+            return p;
+          };
+          const pos = this.dodge(
+            `${key}:cornerIn`, AVOID.handheldAzimuths.map((x) => [x * 0.7, 0] as const), (o) => at(o[0]),
+            this.sight([f], all), dt, snap,
+          );
+          const g = framed(pos, [f], 'face', 0.5, [], [0, 0.04]);
+          return { ...g, posOmega: 1.4, keepSafe: 0.9, focus: f.head, allowInside: true };
+        }
         let ch: number = PLACEMENT.cornerHeightM;
         if (ca.wallHeight > 0 && Math.abs(ch - ca.wallHeight) < 0.35) ch = ca.wallHeight + PLACEMENT.overRailM;
-        pos = [pos[0], ch, pos[2]];
+        const at = (az: number): V3 => {
+          const wd = wallDistanceAt(ca, az);
+          const p: V3 = unbounded || !Number.isFinite(wd)
+            ? add(f.ground, atAzimuth(az, 2.6, 0))
+            : atAzimuth(az, wd + PLACEMENT.cornerOutsideM, 0);
+          return [p[0], ch, p[2]];
+        };
+        const pos = this.dodge(
+          `${key}:corner`, AVOID.handheldAzimuths.map((a) => [a * 0.6, 0] as const), (o) => at(az0 + o[0]),
+          this.sight([f], all), dt, snap,
+        );
         const g = framed(pos, [f], f.posture === 'standing' || f.posture === 'clinch' ? 'face' : 'ground', spec.safe);
         return { ...g, posOmega: 1.4, keepSafe: 0.92, focus: f.head };
       }
@@ -643,3 +891,13 @@ export class BroadcastCameraDirector implements CameraDirector {
   }
 }
 
+/** Azimuth (sim convention) a posed body's chest faces: the rest pose faces +Z. */
+function chestFacing(w: WorldPose): number | null {
+  const i = B.spine2 * 4;
+  const x = w.quat[i]!, y = w.quat[i + 1]!, z = w.quat[i + 2]!, qw = w.quat[i + 3]!;
+  // Rotate (0, 0, 1) by the quaternion.
+  const fx = 2 * (x * z + qw * y);
+  const fz = 1 - 2 * (x * x + y * y);
+  if (!Number.isFinite(fx) || !Number.isFinite(fz) || Math.hypot(fx, fz) < 1e-3) return null;
+  return Math.atan2(fx, fz);
+}

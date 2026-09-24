@@ -244,8 +244,11 @@ describe('camera director: framing and placement', () => {
       for (const s of runOf(b)) {
         const [x, y, z] = s.state.position;
         if (SHOTS[s.kind].wide) expect(insideWall(ca, x, z, 0.3), `${b.name} ${s.kind} t=${s.t}`).toBe(false);
-        // Inside the wall only from above (the overhead on the truss).
-        if (insideWall(ca, x, z)) expect(y).toBeGreaterThan(ca.wallHeight + 1.5);
+        // Inside the wall only from above (the overhead on the truss) — or the
+        // post-fight handheld, which walks into the cage once the bout is over
+        // (broadcast polish pass), never while it is live.
+        const postFight = s.kind === 'finish' && s.holding;
+        if (insideWall(ca, x, z) && !postFight) expect(y).toBeGreaterThan(ca.wallHeight + 1.5);
         expect(Math.hypot(x, z)).toBeLessThan(ca.outerRadius);
         expect(y).toBeLessThan(ca.ceiling);
         // Never at top-rail height, where the rail would fill the lens.

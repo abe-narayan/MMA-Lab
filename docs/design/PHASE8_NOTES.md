@@ -934,3 +934,97 @@ CORNER), `finish` (TKO card), `after-cut`, `webgl2`, `fallback2d`.
 
 **Not covered by `docs/ASSETS.md`**: `static/assets/body/skinmaps.bin`, `static/assets/body/skinmaps.json`
 (new character files) and `static/assets/README.md`.
+
+### Broadcast polish pass
+
+Fixes for the integration critique above. Code: `referee/` (body, `clothing.ts`), `arena/referee.ts`
+(presentation state machine), `camera/occlusion.ts`, `camera/director.ts`, `camera/planner.ts`,
+`corner/` (rest period), `stage/skinnedVelocity.ts`, `stage/pipeline.ts` (live DoF), presenter wiring,
+the loading card in `Arena3D.tsx`, a QA hook `window.__watch` in `Watch.tsx`. Tests:
+`tests/presentation.polish.test.ts` (11). Captures: `docs/screenshots/phase8-polish-{before,after}-*.png`
+(the "before" set is an older sim build of the same demo seed; the sim changed during this pass, so the
+"after" set uses `?demo=watch-demo-4:1:3`, which has a break, a knockdown and a finish), plus
+`phase8-polish-velocity-{before,after}.png` and the WebGL2 load timelines. Capture tools:
+`scripts/dev/polish-shots.mjs` (many shots from one page load, event-relative seeks, optional GPU
+benchmark) and `scripts/dev/load-timeline.mjs` (long tasks and frame gaps while loading, drawn as a PNG).
+
+**What changed.**
+1. *Referee body.* A real skinned man from the character factory (`refereeDefinition`: 1.80 m, 86 kg,
+   forties, neutral build, short hair, bare hands; tone/face/hair seeded from the bout), dressed by
+   `clothing.ts`: shirt (short sleeves), trousers and shoes cut from his own body mesh by dominant bone,
+   Taubin-smoothed to take the anatomy out, offset 1.3-3.2 cm, hems straightened along the limb axes; the
+   skin under the clothes is removed from the body's index buffers (no poke-through, no hidden shading).
+   Capsule fallback without the character module.
+2. *Referee state.* `refereeDisplay()` maps the sim's display state plus the frame and the recent events
+   to watching / separating / counting / warning / stopping / knockdown / standingUp / stoppage /
+   raisingHand / roundStart / break. Finding: the sim's `separating` is its doctor/foul *pause*, which in
+   the capture bout outlived the action (tick 4019 to the end, through a knockdown, a takedown and ground
+   work). A separation is now shown only while there is something to separate (clinched or close, nobody
+   on the canvas, no strike in the last second), or for 1.6 s after a `refereeBreak`. New gestures:
+   `ready` (over a downed man) and `raise` (the winner's hand). Side hysteresis while watching; he walks
+   (at most 1.9 m/s) and runs only to intervene; in the break he stands on the neutral side, clear of both
+   corners; he keeps clear of the *drawn* bodies (hips, and head/feet of a fighter on the canvas).
+3. *Occlusion.* `occlusion()` = weighted share (head 2, chest 1.5, hips 1) of the subject hidden by the
+   referee's capsules (and, for a one-fighter shot, the other fighter's). Director: when above 30 %, a
+   handheld walks the apron (0.14-0.56 rad), the hard camera slides 0.9/1.8 m along its platform and/or
+   booms up 0.9 m, until at most 15 %; home again below 10 %; a cut starts clear. Planner: `planShots`
+   runs the arena's `RefereeTracker` over the recording and scores operator spots with 8 x occlusion.
+4. *Speckled halo.* Root cause found with the new `?stagePost=view:velocity`: three r186 builds a skinned
+   mesh's previous-frame position from a previous-bones buffer bound to the skeleton of the *first* object
+   that built the (shared) material, so every other body got wrong motion vectors: a paused, motionless
+   fighter showed several pixels of motion (mean of the motion image 36.6 before, 1.7 after, paused frame).
+   `stage/skinnedVelocity.ts` rebuilds the previous position from a per-object
+   `referenceBuffer('skeleton.previousBoneMatrices')`, snapshotted once per presented frame
+   (`?skinVelFix=0` for A/B). The stage also advances the node frame once per render, so skeletons, TAA
+   and GTAO update exactly once per picture. The TAAU node is three's, unchanged.
+5. *Live depth of field.* A third `RenderPipeline` (`liveDof`), used while `CameraState.dof > 0`: thin-lens
+   falloff (`focalLength = k*z`, blur complete at |z - focus| = k*z), so the fence 0.35 m from the lens goes
+   soft while the fighters stay sharp and the crowd barely softens. Only CAGESIDE / CAGESIDE LOW use it
+   (corner and finish handhelds are now inside the cage, no mesh in front). Warmed up with the replay one.
+6. *Knockdown.* Documented exception `CUT_RULES.kdStrikeLookbackTicks`: for the knockdown cut only, the
+   dropping strike (at most 2 ticks before the event) is guarded by its exact contact instant + 0.4 s
+   instead of 6 ticks either side; every other strike keeps the 6-tick guard. The cut lands 0.4-0.5 s after
+   the punch, during the fall, on the operator spot that best shows the *downed* man (the striker counts as
+   an occluder). The hard camera also pushes in on the pair (a zoom, not a cut).
+7. *Corners.* `corner/`: stools appear in the red/blue corners (octagon post caps; ring turnbuckles) for
+   the break; each fighter walks to his corner (the referee's gait on his skeleton), sits (IK: feet flat,
+   forearms on thighs, breathing), stands about 7 s before the bell and walks to the next round's mark,
+   with crossfades. CORNER is now a handheld inside the cage 1.9 m in front of the seated fighter (his
+   face, from his chest's facing), as on a real broadcast. No cornermen (not done).
+8. *Finish.* The post-roll handheld walks into the cage: 2.3 m in front of the winner (from his pose), the
+   side chosen to avoid the referee and the loser, framing the winner's torso plus the referee's head and
+   raised hand; the planner picks a spot square to the winner-loser line; the referee stands beside the
+   winner.
+9. *Loading.* Build steps yield to the page (before the bodies, before the referee); the post warm-up runs
+   one pipeline per task; the loading card has a compositor-driven CSS sweep that keeps moving through
+   driver stalls.
+
+**Measurements** (Arc 140V, machine shared with other agents; single runs vary by about 5 ms).
+- High, 2560x1440, WebGPU (`benchmark(60)` GPU-bound ms / live fps): MAIN 11.7-12.3 ms / 60 fps;
+  CAGESIDE 20.4 ms / 52 fps (live DoF is about 2-3 ms of it; the same shot with capsule bodies is about
+  16 ms); CORNER (inside) about 51 fps; finish 18.2 ms. The wide broadcast holds 60; close-ups do not.
+- WebGL2 load (`load-timeline.mjs`): baseline of this build with a warm driver cache: live 4.1 s,
+  longest main-thread task 0.63 s. After, warm cache: live 5.4 s, longest 0.62 s. After, first load with
+  the new shader sources (cold cache): live 97 s, longest block 28.3 s (the first draw of the pipelines,
+  compiled by ANGLE/D3D on first use). The reviewer's 14.5 s / 12 s was also a cold figure, on a lighter
+  shader set. Splitting the warm-up did not shorten that single first-draw block.
+- Tests: `presentation.polish` 11/11. Across the presentation suites 134/139 pass; the 5 failures
+  (grappling registration, referee body on ground frames, finish edit, two replay-planner tests) fail the
+  same way on the pre-pass presentation code with the current sim (the calibration work changed the
+  demo bouts: several now end in round 1).
+
+**Still wrong.**
+- Close-up shots miss 60 fps at High 1440p (character shading at close range is most of it).
+- WebGL2 cold first load blocks the main thread for about 28 s in one ANGLE compile; only a warm shader
+  cache (second load) is fast. A real fix needs fewer/lighter WebGL2 shader variants or a worker.
+- The referee's clothes are a body-derived shell: tight across the seat and crotch, no folds, collar or
+  belt; they read as dark jersey rather than slacks.
+- The finish still depends on the animation: at `ended` the fighters stand chest to chest and the
+  winner's own arm is not raised (the referee raises his).
+- No cornermen, cutman or bucket in the cage between rounds; the walk to the corner is the referee's
+  gait; the seated pose is generic.
+- The planner estimates the referee from sim positions, the picture from drawn positions (the animator
+  compresses separation), so a planned operator spot can be slightly more occluded than predicted (the
+  live dodge then corrects it).
+- Sim issue (not fixed here): the referee display state stays `separating` after a doctor/foul pause
+  while the bout continues (`src/sim/core/bind.ts`, `pauseKind`).

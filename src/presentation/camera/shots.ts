@@ -77,11 +77,11 @@ export const SHOTS: Readonly<Record<ShotKind, ShotSpec>> = {
   },
   corner: {
     label: 'CORNER', wide: false, framing: 'face', safe: 0.55, fovMin: 8, fovMax: 45,
-    aimOmega: 2.4, zoomInOmega: 1.2, zoomOutOmega: 4, handheldDeg: 0.45, dof: 0.45, shake: 0, minFrameM: 0.75,
+    aimOmega: 2.4, zoomInOmega: 1.2, zoomOutOmega: 4, handheldDeg: 0.45, dof: 0, shake: 0, minFrameM: 0.75,
   },
   finish: {
     label: 'CAGESIDE', wide: false, framing: 'torso', safe: 0.6, fovMin: 10, fovMax: 60,
-    aimOmega: 2.4, zoomInOmega: 1.2, zoomOutOmega: 4, handheldDeg: 0.6, dof: 0.4, shake: 0.6, minFrameM: 1.1,
+    aimOmega: 2.4, zoomInOmega: 1.2, zoomOutOmega: 4, handheldDeg: 0.6, dof: 0, shake: 0.6, minFrameM: 1.1,
   },
   follow: {
     label: 'FOLLOW', wide: false, framing: 'full', safe: 0.72, fovMin: 24, fovMax: 70,

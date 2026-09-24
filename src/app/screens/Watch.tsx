@@ -357,6 +357,23 @@ export function Watch(props: WatchProps): JSX.Element {
     p.seekTick(t);
   }, { seek: true }), [apply]);
 
+  // QA hook for capture scripts (scripts/dev/polish-shots.mjs): several
+  // captures from one page load instead of recompiling every shader per shot.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const hook = {
+      seek: (t: number) => seekToTick(t),
+      play: () => apply((p) => p.play()),
+      pause: () => apply((p) => p.pause()),
+      camera: (m: CameraMode3D) => setCamera3d(m),
+      tick: () => playerRef.current?.tick ?? -1,
+      events: () => (playerRef.current?.events ?? []).map((e) => ({ kind: e.kind, tick: e.tick, actor: e.actor, target: e.target })),
+    };
+    const w = window as unknown as { __watch?: typeof hook };
+    w.__watch = hook;
+    return () => { if (w.__watch === hook) delete w.__watch; };
+  }, [seekToTick, apply]);
+
   /** Every replay goes through the sequencer: slow motion, the REPLAY bug, the replay camera. */
   const replayLast = useCallback((seconds: number) => apply((p, seq) => {
     const tick = p.tick;

@@ -5,6 +5,7 @@
  *     └─ GTAO (at internal resolution) ───────────┐
  *   AO composite (colour × AO) [+ SSR]           ┘  internal res, one quad
  *     └─ TAAU (internal → output) | TRAA (native) | nothing          output res
+ *          └─ live handhelds: thin-lens depth of field (the fence at the lens goes soft)
  *          └─ replay only: depth of field → motion blur
  *               └─ bloom (mip chain at half res, threshold above paper white)
  *                    └─ tone map (ACES filmic) + sRGB encode
@@ -30,8 +31,8 @@
  *  - RCAS sharpening follows TAAU (as in FSR) to restore the crispness a
  *    temporal upscale softens; FXAA needs sRGB input, so it follows the grade.
  *
- * Two `RenderPipeline`s share every node up to the temporal resolve: `live`
- * and `replay`. Switching between them is free (no shader rebuild), and the
+ * Three `RenderPipeline`s share every node up to the temporal resolve: `live`,
+ * `liveDof` (the close handhelds) and `replay`. Switching between them is free (no shader rebuild), and the
  * replay one is warmed up at start so the first instant replay does not hitch.
  */
 import {
@@ -39,7 +40,7 @@ import {
   NoColorSpace, Vector2, type Camera, type Node, type Object3D, type Scene, type WebGPURenderer,
 } from 'three/webgpu';
 import {
-  Fn, float, int, interleavedGradientNoise, metalness, mix, mrt, normalView, output, pass,
+  Fn, float, int, interleavedGradientNoise, max as tslMax, metalness, mix, mrt, normalView, output, pass,
   packNormalToRGB, renderOutput, roughness, rtt, sample, screenCoordinate, screenUV, smoothstep,
   texture3D, uniform, unpackRGBToNormal, uv, vec2, vec3, vec4, velocity,
 } from 'three/tsl';
@@ -66,10 +67,19 @@ export interface PassToggles {
   /** Temporal/spatial anti-aliasing and upscaling. */
   aa: 'none' | 'fxaa' | 'smaa' | 'traa' | 'taau';
   dof: boolean;
+  /**
+   * Live depth of field on the close handhelds (cageside, corner, finish):
+   * the fence mesh a few centimetres from the lens goes soft, as it does
+   * through a real lens, while the fighters stay sharp. A third pipeline,
+   * used only while the shot asks for it (`CameraState.dof > 0`).
+   */
+  liveDof: boolean;
   motionBlur: boolean;
   grade: boolean;
   sharpen: boolean;
   vignetteGrain: boolean;
+  /** QA only (`?stagePost=view:velocity`): show the motion vectors instead of the picture. */
+  debugView?: 'velocity';
 }
 
 export function togglesFor(q: QualitySettings): PassToggles {
@@ -82,6 +92,7 @@ export function togglesFor(q: QualitySettings): PassToggles {
     bloom: q.bloom,
     aa,
     dof: q.replayDepthOfField,
+    liveDof: q.replayDepthOfField,
     motionBlur: q.replayMotionBlur,
     grade: true,
     sharpen: aa === 'taau' || aa === 'traa',
@@ -130,6 +141,8 @@ function grainOffset(frame: number, out: Vector2): Vector2 {
 export class StagePipeline {
   readonly live: RenderPipeline;
   readonly replay: RenderPipeline;
+  /** The live picture with the handheld depth of field (the same as `live` when off). */
+  readonly liveDof: RenderPipeline;
   readonly toggles: PassToggles;
 
   private readonly scenePass: N;
@@ -148,6 +161,11 @@ export class StagePipeline {
   private readonly uGrain: N;
   private readonly uVignette: N;
   private readonly uGrade = uniform(1);
+  /** Live DoF: focus distance and the lens constant k (blur complete at |z - focus| = k·z). */
+  private readonly uLiveFocus = uniform(3);
+  private readonly uLiveK = uniform(4);
+  private readonly uLiveBokeh = uniform(1.6);
+  private liveDofOn = false;
   private frameIndex = 0;
   private internalScale: number;
   private readonly aoResolution: number;
@@ -240,8 +258,20 @@ export class StagePipeline {
     }
 
     // ---- the live and replay tails ---------------------------------------
-    const tail = (input: N, replay: boolean): N => {
+    const tail = (input: N, replay: boolean, liveDof = false): N => {
       let c: N = input;
+      if (liveDof) {
+        // A thin-lens circle of confusion grows with |z - focus| / z: the
+        // fence 0.35 m from the lens is far out of focus, the far side of the
+        // cage only a little. DepthOfFieldNode blurs completely at
+        // |z - focus| = focalLength, so focalLength = k·z reproduces that
+        // falloff (k from the shot's DoF strength, `setDepthOfField`).
+        const viewDist: N = scenePass.getViewZNode().negate();
+        const range: N = tslMax(viewDist.mul(this.uLiveK), 0.05);
+        const d: N = dof(c, scenePass.getViewZNode(), this.uLiveFocus, range, this.uLiveBokeh);
+        this.disposables.push(d);
+        c = d;
+      }
       if (replay && t.dof) {
         // Focal range: how far from the focus plane before blur is complete.
         const d: N = dof(c, scenePass.getViewZNode(), this.uFocus, this.uFocalRange, this.uBokeh);
@@ -287,9 +317,23 @@ export class StagePipeline {
     this.live.outputColorTransform = false;
     this.live.outputNode = tail(hdr, false);
 
+    if (t.debugView === 'velocity' && vel) {
+      // Motion vectors in pixels of the internal image: red = x, green = y (abs, ×0.25), blue = none.
+      const px: N = vel.xy.mul(vec2(scenePass.getTextureNode('output').size())).mul(0.5).abs().mul(0.25);
+      this.live.outputNode = vec4(px.x, px.y, float(0.02), 1);
+    }
+
     this.replay = new RenderPipeline(renderer);
     this.replay.outputColorTransform = false;
     this.replay.outputNode = (t.dof || t.motionBlur) ? tail(hdr, true) : this.live.outputNode;
+
+    if (t.liveDof) {
+      this.liveDof = new RenderPipeline(renderer);
+      this.liveDof.outputColorTransform = false;
+      this.liveDof.outputNode = tail(hdr, false, true);
+    } else {
+      this.liveDof = this.live;
+    }
   }
 
   /** Vignette and grain in display space: the last, cheapest touch. */
@@ -326,9 +370,20 @@ export class StagePipeline {
     if (this.aoNode) this.aoNode.resolutionScale = this.aoResolution * s;
   }
 
-  /** Depth of field for replays, from the camera director's shot. */
+  /**
+   * Depth of field from the camera director's shot: the replay DoF (focus and
+   * strength), and the live handheld DoF, which is on while `strength > 0`.
+   */
   setDepthOfField(focusM: number, strength: number): void {
     this.uFocus.value = Math.max(0.3, focusM);
+    // Live: strength 0.35 (cageside) → k ≈ 3.2: the fence at 0.35 m is fully
+    // soft, the fighters (±0.4 m around focus) stay sharp, the far side of the
+    // cage only slightly soft.
+    this.liveDofOn = strength > 0.01;
+    this.uLiveFocus.value = Math.max(0.3, focusM);
+    this.uLiveK.value = 1.1 / Math.max(0.05, Math.min(1, strength));
+    // Bokeh radius in half-resolution texels at full CoC: ~10 px on a 1080p picture at 0.35 (wider radii cost texture cache on the Arc).
+    this.uLiveBokeh.value = 2 + 9 * Math.min(1, strength);
     // Strength 1 ≈ a long lens at f/2.8 on a fighter 4 m away: sharp over about
     // a metre, fully soft 1.2 m beyond it.
     const s = Math.min(1, Math.max(0, strength));
@@ -360,7 +415,7 @@ export class StagePipeline {
     this.uGrainOffset.value.copy(grainOffset(this.frameIndex++, this.uGrainOffset.value));
     this.uBlur.value = this.cutFrames > 0 ? 0 : 0.5;
     if (this.cutFrames > 0) this.cutFrames--;
-    (replay ? this.replay : this.live).render();
+    (replay ? this.replay : this.liveDofOn ? this.liveDof : this.live).render();
   }
 
   /**
@@ -368,9 +423,21 @@ export class StagePipeline {
    * the first knockdown replay. The frame is immediately overdrawn by `live`.
    */
   warmReplay(): void {
-    if (this.replayWarm || this.replay.outputNode === this.live.outputNode) return;
+    for (const step of this.warmSteps()) step();
+  }
+
+  /**
+   * The extra pipelines' first draws (replay, live DoF) as separate steps, so a
+   * caller can yield to the page between them: on WebGL2 each first draw can
+   * block for seconds while the driver compiles.
+   */
+  warmSteps(): (() => void)[] {
+    if (this.replayWarm) return [];
     this.replayWarm = true;
-    this.replay.render();
+    const steps: (() => void)[] = [];
+    if (this.replay.outputNode !== this.live.outputNode) steps.push(() => this.replay.render());
+    if (this.liveDof !== this.live) steps.push(() => this.liveDof.render());
+    return steps;
   }
 
   /**
@@ -427,6 +494,7 @@ export class StagePipeline {
   dispose(): void {
     this.live.dispose();
     if (this.replay !== this.live) this.replay.dispose();
+    if (this.liveDof !== this.live) this.liveDof.dispose();
     for (const d of this.disposables) {
       try { d.dispose(); } catch { /* already gone */ }
     }
