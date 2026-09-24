@@ -30,7 +30,8 @@
  *      so one heavy job can never take more than 75 % of the CPU, and the
  *      desktop keeps two cores even while two jobs run.
  *
- * Environment: HEAVY_SLOTS (default 2), HEAVY_NEED_GB (default 1.6),
+ * Environment: HEAVY_SLOTS (default 3; the memory and CPU gates, not the slot
+ * count, are what hold the 93 % cap), HEAVY_NEED_GB (default 1.6),
  * HEAVY_HEAP_MB (default 2048), HEAVY_CAP (default 0.93),
  * HEAVY_CPU_START (default 0.70), HEAVY_AFFINITY (hex mask, default 3F).
  */
@@ -39,7 +40,7 @@ import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:f
 import { constants, cpus, freemem, setPriority, totalmem, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const SLOTS = Number(process.env.HEAVY_SLOTS ?? 2);
+const SLOTS = Number(process.env.HEAVY_SLOTS ?? 3);
 const NEED_GB = Number(process.env.HEAVY_NEED_GB ?? 1.6);
 const HEAP_MB = Number(process.env.HEAVY_HEAP_MB ?? 2048);
 const CAP = Number(process.env.HEAVY_CAP ?? 0.93);
