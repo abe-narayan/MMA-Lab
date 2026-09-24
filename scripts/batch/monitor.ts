@@ -20,7 +20,7 @@
  *   - `poolBudget`: §6.1 sizing (CPU budget from the cores this process may
  *     use, memory budget from free RAM above the 7 % floor).
  *   - `confineSelf`: below-normal priority and, on Windows, a processor
- *     affinity mask (default 0x3F = 6 of 8 cores) on this process; worker
+ *     affinity mask (default 0x1F = 5 of 8 cores) on this process; worker
  *     threads are threads of this process and so inherit both.
  */
 import { execFileSync } from 'node:child_process';

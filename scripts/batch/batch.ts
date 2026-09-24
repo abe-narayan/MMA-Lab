@@ -146,7 +146,7 @@ export async function runBatch(o: BatchOptions): Promise<BatchSummary> {
   manifest.machine = machine();
 
   // ---- pool sizing -------------------------------------------------------------
-  const affinity = o.affinity ?? '3F';
+  const affinity = o.affinity ?? '1F';
   const confined = o.confine ? confineSelf(affinity) : 'not confined (library call)';
   const throttle: ThrottleOptions = { ...DEFAULT_THROTTLE, ...o.throttle };
   const perWorkerBytes = (o.perWorkerMB ?? 200) * 2 ** 20;

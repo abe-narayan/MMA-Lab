@@ -91,7 +91,7 @@ async function main(): Promise<void> {
     throttle: { cap, resumeBelow: Number(str(args, 'resume-below', '0.85')) },
     sampleMs: Number(str(args, 'sample-ms', '2000')),
     perWorkerMB: Number(str(args, 'per-worker-mb', '200')),
-    affinity: str(args, 'affinity', '3F'),
+    affinity: str(args, 'affinity', '1F'),
     confine: true,
   });
   if (summary.errors > 0) process.exitCode = 1;

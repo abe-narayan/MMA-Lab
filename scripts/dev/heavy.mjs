@@ -24,16 +24,16 @@
  * (headless Chromium compiling shaders, esbuild, tsc) are multi-threaded. So
  * the wrapper also
  *   5. waits until machine-wide CPU use is below `CPU_START` before starting;
- *   6. on Windows, confines itself to `AFFINITY` cores (default 6 of 8, mask
- *      0x3F) at below-normal priority before spawning; both are inherited by
+ *   6. on Windows, confines itself to `AFFINITY` cores (default 5 of 8, mask
+ *      0x1F) at below-normal priority before spawning; both are inherited by
  *      every child process (Chromium's GPU and renderer processes included),
- *      so one heavy job can never take more than 75 % of the CPU, and the
- *      desktop keeps two cores even while two jobs run.
+ *      so heavy jobs together can never take more than 62.5 % of the CPU, and the
+ *      desktop always keeps three cores.
  *
  * Environment: HEAVY_SLOTS (default 3; the memory and CPU gates, not the slot
  * count, are what hold the 93 % cap), HEAVY_NEED_GB (default 1.6),
  * HEAVY_HEAP_MB (default 2048), HEAVY_CAP (default 0.93),
- * HEAVY_CPU_START (default 0.70), HEAVY_AFFINITY (hex mask, default 3F).
+ * HEAVY_CPU_START (default 0.70), HEAVY_AFFINITY (hex mask, default 1F).
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -45,7 +45,7 @@ const NEED_GB = Number(process.env.HEAVY_NEED_GB ?? 1.6);
 const HEAP_MB = Number(process.env.HEAVY_HEAP_MB ?? 2048);
 const CAP = Number(process.env.HEAVY_CAP ?? 0.93);
 const CPU_START = Number(process.env.HEAVY_CPU_START ?? 0.70);
-const AFFINITY = process.env.HEAVY_AFFINITY ?? '3F';
+const AFFINITY = process.env.HEAVY_AFFINITY ?? '1F';
 // A slot whose owner process is gone is reclaimed at once; a live owner keeps
 // its slot however long its job runs (up to a 12 h safety net).
 const STALE_MS = 12 * 60 * 60 * 1000;
