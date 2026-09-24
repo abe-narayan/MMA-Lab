@@ -15,8 +15,8 @@ be rolled back independently.
 | 5 Skill tiers | tier catalogue → behaviour/animation | **Done** — 196 rules wired into decisions, execution and defence | `b8215e6` |
 | 6 Fighter creator | `src/app/**` | **Done** — database, 7-section editor, live derived panel, import/export | `06c47ac` … `d26d5a3` |
 | 7 Match modes & features | match setup, tournaments, history, commentary, replay, spectator | **Done** — all modes, 14 rulesets x 9 arenas, worker-run bouts | see Phase 7 summary |
-| 8 Graphics & animation | `src/presentation/**`, `docs/ASSETS.md` | Not started (spec in ch. 08) | |
-| 9 Calibration & validation | `docs/CALIBRATION.md` | Not started (129-row target table in ch. 09 §7) | |
+| 8 Graphics & animation | `src/presentation/**`, `docs/ASSETS.md`, `docs/design/PHASE8_NOTES.md` | **Done**: three r186 WebGPU/WebGL2 stage with TSL post, stat-driven MakeHuman bodies, mocap + procedural animation with IK, paired grapple solver, 9 arenas, broadcast director and replays, referee, corners and post-fight ceremony. Polished further in the overnight passes below | `cbcec1f` … `d470cc8` |
+| 9 Calibration & validation | `docs/CALIBRATION.md`, `docs/design/PHASE9_TUNING.md`, `QA_FINDINGS.md` | **Done (partial calibration)**: batch runner and 125 metric functions, edge-case QA (QA-1..14), 31 sim bugs fixed, engine 5.0.0. Master rows PASS 1 → 23 of 125 (22 WIDE, 80 FAIL) over 8,180 bouts | `3a78295` … `2720d60` |
 
 ## Phase 0 — summary
 - Existing engine: deterministic 0.1 s tick, seeded RNG, digest-verified replays, 128 passing tests; but a
@@ -61,7 +61,7 @@ be rolled back independently.
 - `dmg.rawScale` corrected against chapter 05's own acceptance row (see
   `docs/design/PHASE4_FINDINGS.md`). Bouts now run 10.8 min with a realistic method mix.
 
-## Current headline batch (40 bouts, two regional pros, MMA 3×5)
+## Phase 4 headline batch (historical: 40 bouts, two regional pros, MMA 3×5; current numbers in `docs/CALIBRATION.md`)
 
 | Metric | Sim | Target |
 | --- | --- | --- |
@@ -139,7 +139,78 @@ comparing byte-for-byte.
   the authored skill shape survives; specialisations reshape mean-neutrally so nobody climbs a tier
   by ticking boxes.
 
+## Phase 8 — summary (details: `docs/design/PHASE8_NOTES.md`)
+- **Foundation** (`cbcec1f`, `ad1f83f`): three.js 0.169 → 0.186. A canonical 52-bone skeleton from MPFB2's rig,
+  with FK verified to 1.7e-8 m. Two-bone IK. The presentation contract. The resource governor (`scripts/dev/heavy.mjs`).
+- **Stage, camera, standing animation, assets** (`c6b858b`):
+  - WebGPURenderer with a WebGL2 fallback, a TSL post chain (GTAO, TAAU/TRAA, bloom, ACES, broadcast LUT) and four
+    quality presets;
+  - a broadcast director (4 s minimum shot, no cut on a strike) and instant replays;
+  - all 54 techniques landing on the recorded contact instant;
+  - 99 retargeted ACCAD/CMU clips.
+- **Arenas and grappling** (`7f1a94b`): the 9 arenas at the sim's wall geometry; paired poses for all 74 positions;
+  115 of 187 transitions animated; 54 submissions staged.
+- **Characters** (`84c1ecc`, `4a967da`): stat-driven MakeHuman bodies whose height and reach land within 1 mm of the
+  fighter's stats. Skin with subsurface, sweat and zoned damage; hair; kit. Baked detail maps; 380 targets.
+- **Integration and mocap** (`020bb14`, `3b0eccc`): the broadcast integrated in Watch. 36 of 54 techniques plus
+  defences and idle driven by capture.
+- **Broadcast polish** (`d470cc8`): a real referee body with clothing and occlusion avoidance; live cageside DoF;
+  corner shots between rounds.
+- **Sim fixes surfaced by the animation work:**
+  - strikes from any distance (engine 4.1.0, `d49ec09`);
+  - facing while moving and the engagement approach line (4.2.0, `93703b2`);
+  - the referee's "Work!" warning emitted every tick (4.3.0, `c876264`).
+
+## Phase 9 — summary (details: `docs/design/PHASE9_TUNING.md`, `docs/CALIBRATION.md`)
+- **Batch runner and metrics** (`3a78295`): a worker-thread runner with a CPU/RAM governor; 12 plans (229 cells);
+  metric functions for 125 of the 129 targets. The pre-tuning baseline (engine 4.3.0, 1,187 bouts) passed 1 row.
+- **Edge-case QA** (`d610ff6`, `8ae9ad4`): QA-1..14.
+  - The multi-fighter referee latch, street/crowd endings, grappling rulesets throwing strikes, unreachable fouls
+    and tournament stalls were fixed in Phase 9.
+  - Recorded frames moved to typed-array columns: 1v1 5R heap +45.8 → +4.9 MB.
+- **Tuning** (`2720d60`, engine 5.0.0): 31 sim bugs fixed, most with pins in `tests/phase9.bugs.test.ts`. Over
+  8,180 bouts:
+  - master rows PASS/WIDE/FAIL went from 1/5/107 to 23/22/80;
+  - SLpM 3.95 (target 3.90);
+  - outcome mix KO-TKO/SUB/DEC 29/21/49 (target 32/18/49);
+  - 3R duration 10.6 min (10.6);
+  - identical fighters win 51.7 % as side A.
+- **Misses carried forward:** tier populations, KD → finish conversion, KD by weight class, grappling shape by
+  class, strategy checks. Several need model decisions rather than parameters.
+
+## Overnight polish (2026-09-23/24)
+
+A series of independent, measured passes after Phases 8–9. Each has a write-up with before/after numbers.
+`FINAL_REPORT.md` collects them.
+
+| Pass | What it did (headline numbers) | Write-up | Commits |
+| --- | --- | --- | --- |
+| Final-pass audit | Read-only checklist (C1–C4, H1–H6, M, L) that drove the cleanup, determinism and docs work | `docs/design/AUDIT_FINAL.md` | `d47dff5` |
+| Independent review of Phases 8–9 | Found that bouts run from the app never started (the worker was never posted its message) and that the old venue was left in the scene, both fixed in `075d641`. Its other findings (import crash on prototype keys, GPU leaks, the heavy.mjs locks, Watch stuck on "Preparing broadcast…", device loss) were fixed in the passes below | `docs/design/REVIEW_PHASE8_9.md` | `075d641` |
+| Resource governor | Arguments quoted for cmd.exe, locks reaped only when the owner is dead, a start gate, 3 slots, pinning to 5 of 8 cores, a 90 % memory gate | `scripts/dev/heavy.mjs` header | `0688ff3`, `4b72613`, `f97be32`, `7a5b42f`, `1ea0bd9` |
+| Watch screen and replays; finish and corner | Viewport-first layout, keyboard map, stats at the playhead. Compressed archives (portable 3.4 KB vs 25–228 KB v4 JSON). IndexedDB library. React work at 4× 83 → 20 ms/s. 2D fallback on device loss. Post-fight ceremony and cornermen | `docs/design/WATCH_REPLAY_PASS.md`, PHASE8_NOTES "Finish and corner pass" | `b9525ab` |
+| Animation quality 1–3 | Automated audit over ~140 k frames. Pops 335 → 26 per fighter-minute. Standing slide > 0.5 cm 9.3 % → 1.1 %. Contact misses 18.4 % → 1.3 %. Evaluate p95 0.50 → 0.36 ms | PHASE8_NOTES "Animation quality pass" 1–3 | `f04dea9`, `9a0adf1`, `de1507f` |
+| Camera polish | Automated audit over 64,915 frames. Clipping 156 → 0. Aim jerk p95 3.75 → 2.13. Pan reversals 5.9 → 2.5 per minute. Replay camera max speed 11.3 → 0.64 screens/s | PHASE8_NOTES "Camera polish pass" | `3d1d80a` |
+| Calibration tuning (Phase 9) | Engine 5.0.0. Master rows PASS 1 → 23 | `docs/design/PHASE9_TUNING.md` | `2720d60` |
+| Arena and lighting lookdev | Canvas banding fixed. Near-fence lens blur. Fight marks (sweat, blood from recorded cuts) baked deterministically and wired to the recording | PHASE8_NOTES "Arena and lighting lookdev pass" | `fe1d335`, `91abcaa` |
+| Rendering performance 1 | Lens DoF 4 → ~1 ms. GPU-timed dynamic resolution. Shared programs 331 → 148 compiles. WebGL2 cold longest freeze 31 s → 1.7 s. LOW–ULTRA profiles with an automatic default | PHASE8_NOTES "Performance pass" | `37fa643`, `4e9f4c4` |
+| Simulation performance | 2.3–2.7× faster with results bit-identical (310/310 golden). 1,000-bout batch 756 → 294 s. New 41-bout golden test | `docs/design/SIM_PERF_PASS.md` | `23d329a` |
+| Browser QA2 | 11 findings, including the WebGPU rebuild hang, the quality-switch crash, the bout-switch leak, and team wins shown as no contest | `docs/design/QA2_FINDINGS.md` | `1ea0bd9` |
+| UI/UX overhaul (UI pass 1) | Design system; fighter editor profile view with parameter-effect tests; Batch screen (5,000 bouts, 0 errors, fingerprint identical for any worker count); QA2 #4, #5, #7–#10 fixed | `docs/design/UI_PASS.md` | `d1f14bf`, `55c7d66` |
+| Batch runner headroom | Pauses at 88 % CPU/RAM, resumes below 80 % | `scripts/batch/monitor.ts` | `07960bb` |
+| Cleanup | Legacy v3 stack retired. CI determinism on the v4 golden corpus. 31 MB of unused assets removed. `dist/` 53.3 → 18.4 MB | AUDIT_FINAL (resolved items) | `f54d16e`, `fdc9dfd` |
+| Rendering performance 2 | WebGL2 cold load 38.9 s → 9.7–16.0 s. Close-shot scene pass −11 to −23 %. Corner camera clear of the crew. QA2 #1 (WebGPU rebuild hang) and #2 (quality-switch crash) fixed | PHASE8_NOTES "Performance pass 2" | _uncommitted at time of writing_ |
+| Leak fix | QA2 #3: five retainers found. WebGL2 heap over bout switches 42 → 182 MB before, 39.6 → 49.4 MB over 20 switches after; renderer counts flat | PHASE8_NOTES "Leak fix" | _uncommitted at time of writing_ |
+| UI pass 2 | Code splitting: first-screen JS 1,048 → 375 KB gzip; TTI 458 → 302 ms. Step-based Match setup and Tournaments. Debug switches gated (audit H3). App per-frame costs (H4) | UI_PASS "UI pass 2" | _uncommitted at time of writing_ |
+| Realism pass | Engine 6.0.0 (draft) | `docs/design/REALISM_PASS.md` | _placeholder: to be filled when it lands_ |
+| Final documentation | README rewrite, `FINAL_REPORT.md`, this section | `FINAL_REPORT.md` | _uncommitted at time of writing_ |
+
 ## Known gaps carried forward
+
+(Historical list from Phases 4–6. F-3 was closed in `0540e9a`. The T2/T3 separation, durability and output items
+went to Phase 9: output volume now meets its target, and tier populations remain open (`PHASE9_TUNING.md` §5).
+The current list is in `FINAL_REPORT.md` §28.)
+
 - **Style preferences do not affect a bout** (F-3). Favourite techniques, combos, go-to submissions
   and takedown preferences are authored, validated and stored, but no AI code reads them. Phase 7.
 - **T2 and T3 are not separated** in the win matrix (~37-43% both directions). The tier *logic* is
