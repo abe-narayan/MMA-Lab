@@ -58,6 +58,8 @@ if (before) {
 if (has('--examples')) {
   console.log('\n## Unexplained rotation pops by bucket:bone:layer (top 25)');
   for (const [k, v] of Object.entries(all.popHist).sort((a, b) => b[1] - a[1]).slice(0, 25)) console.log(`  ${String(v).padStart(6)}  ${k}`);
+  console.log('\n## Post-roll / corner pops by bone:layer (top 12)');
+  for (const [k, v] of Object.entries(all.popHist).filter(([k]) => /^(post|corner):/.test(k)).sort((a, b) => b[1] - a[1]).slice(0, 12)) console.log(`  ${String(v).padStart(6)}  ${k}`);
   console.log('\n## Joint-limit frames by limit:bucket:layer (top 25)');
   for (const [k, v] of Object.entries(all.jointHist).sort((a, b) => b[1] - a[1]).slice(0, 25)) console.log(`  ${String(v).padStart(6)}  ${k}`);
   console.log('\n## Worst examples');

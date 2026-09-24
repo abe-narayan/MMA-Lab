@@ -256,14 +256,25 @@ export class FinishStage {
     const pa = samplePath(sc.aLegs, t);
     const pb = samplePath(sc.bLegs, t);
     const pr = samplePath(sc.refLegs, t);
-    const holding = t >= tl.hold - 0.25;
     const bStanding = !sc.lying || (tl.standUp !== null && t >= tl.standUp[1]);
     const attending = !!tl.attend && t >= tl.attend[0] && t <= tl.attend[1];
     const pts: P2[] = [[pr.x, pr.z], [pa.x, pa.z]];
-    const fixed = [holding || attending, holding];
-    if (bStanding) { pts.push([pb.x, pb.z]); fixed.push(holding); }
+    const fixed = [attending, false];
+    if (bStanding) { pts.push([pb.x, pb.z]); fixed.push(false); }
     const obstacles = sc.lying && !bStanding ? sc.lying.points.map((p) => ({ p, r: 0.42 })) : [];
-    const sep = separatePoints(pts, fixed, 0.58, obstacles, this.sepMemo);
+    // Once the referee holds them everyone is on his mark (the separation is
+    // off). The switch used to be a step at hold - 0.25 s: a fighter the
+    // separation had kept off his mark (up to 48 cm) jumped onto it in one
+    // frame. Now the separated points ease onto the marks over the 0.6 s
+    // before it.
+    const holdW = smooth((t - (tl.hold - 0.85)) / 0.6);
+    const sep = holdW >= 1 ? pts.map((p) => [p[0], p[1]] as P2) : separatePoints(pts, fixed, 0.58, obstacles, this.sepMemo);
+    if (holdW > 0 && holdW < 1) {
+      for (let k = 0; k < sep.length; k++) {
+        if (k === 0 && attending) continue;
+        sep[k] = [sep[k]![0] + (pts[k]![0] - sep[k]![0]) * holdW, sep[k]![1] + (pts[k]![1] - sep[k]![1]) * holdW];
+      }
+    }
     // The referee may kneel close to the downed man; the obstacles keep the others off him.
     const refXZ = attending ? pts[0]! : sep[0]!;
     const aXZ = sep[1]!;

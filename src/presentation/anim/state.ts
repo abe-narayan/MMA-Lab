@@ -33,6 +33,12 @@ export interface Swing {
   fromLift: number;
   /** A deliberate novice cross-step (its landing is not re-aimed in flight). */
   crossed: boolean;
+  /**
+   * How far past its landing the step is aimed (ms of the body's smoothed
+   * travel): a moving fighter plants ahead of where the body will be, so each
+   * step covers ground instead of catching up (see `updateFeet`).
+   */
+  lead: number;
 }
 
 export interface FootState {
@@ -126,6 +132,31 @@ export function createDelta(): Delta {
     handOff: [[0, 0, 0], [0, 0, 0]],
     idle: null,
   };
+}
+
+/**
+ * Reset a delta to `createDelta()`'s values in place (pass 3: a fresh delta
+ * per fighter per frame was ~20 small arrays of garbage a frame, and the
+ * collector's pauses showed in the frame-time tail). Layers replace the
+ * array fields they write with fresh arrays, so zeroing in place is safe.
+ */
+export function resetDelta(d: Delta): Delta {
+  const z = (v: V3): void => { v[0] = 0; v[1] = 0; v[2] = 0; };
+  z(d.rootOff); d.rootFns.length = 0; z(d.pelvisOff); z(d.pelvisWorld);
+  d.pelvisYaw = 0; d.pelvisPitch = 0; d.pelvisRoll = 0;
+  d.spineYaw = 0; d.spinePitch = 0; d.spineRoll = 0;
+  d.headYaw = 0; d.headPitch = 0; d.headRoll = 0; d.lookW = 1;
+  d.clavRaise[0] = 0; d.clavRaise[1] = 0; d.clavFwd[0] = 0; d.clavFwd[1] = 0;
+  d.frameYaw = 0; d.stanceWidth = 1; d.bounce = 1; d.heel = 1;
+  for (const c of d.feet) {
+    c.pivot = 0; c.lift = 0; c.liftW = 0; c.liftAdd = 0; c.ankle = null; c.ankleW = 0; c.pole = null;
+    c.airPitch = 0; c.hold = false; c.land = null; c.landYaw = null;
+  }
+  d.face.fill(0);
+  z(d.evade); d.guardDrop = 0; d.guardDown = 0;
+  z(d.handOff[0]); z(d.handOff[1]);
+  d.idle = null;
+  return d;
 }
 
 export function createSpec(fr: Frame): BodySpec {
@@ -235,6 +266,17 @@ export interface FighterState {
   handF: [HandFollow, HandFollow] | null;
   /** Which side of a lying body the standing root is kept on (±1; 0: none). */
   clearSide: number;
+  /**
+   * The body's travel velocity as the footwork reads it (world, m/s): the
+   * display root's velocity through a critically damped follow (~0.2 s), so
+   * the sim's 100 ms stop-go surges plan steps from their average rather than
+   * re-stepping at every surge (null until the first standing frame).
+   */
+  loco: { v: V3; a: V3 } | null;
+  /** Scratch for this frame's idle residual (see `Delta.idle`). */
+  idleBuf: Float64Array | null;
+  /** The pelvis reach drop as applied (m) and its rate: it is released with inertia (`buildBody`). */
+  pelDrop: { v: number; vel: number } | null;
 }
 
 export interface HandFollow { p: V3; v: V3; q: V3; qv: V3; at: number }
@@ -261,7 +303,7 @@ export function createFighterState(index: number, id: number, rig: RigInfo, tier
     lastYaw: 0, initialised: false, planted: [true, true], reachW: [1, 1], debugLayer: 'L0',
     delta: createDelta(), spec: createSpec({ ox: 0, oz: 0, yaw: 0, c: 1, s: 0 }), lastSpec: null,
     displayRoot: [0, 0, 0], displayVel: [0, 0, 0], ikTargets: [],
-    cap: null, capAction: null, capDefence: null, actStrike: '', actDefence: '', feetSeed: null, weapon: null, contactFinal: null, handF: null, clearSide: 0,
+    cap: null, capAction: null, capDefence: null, actStrike: '', actDefence: '', feetSeed: null, weapon: null, contactFinal: null, handF: null, clearSide: 0, loco: null, idleBuf: null, pelDrop: null,
   };
 }
 

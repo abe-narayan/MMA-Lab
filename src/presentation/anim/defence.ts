@@ -17,7 +17,7 @@ import {
 } from './math';
 import { worldP, type BodySpec } from './spec';
 import type { Ctx, Delta } from './state';
-import { gToWorld, guardFrame, type GuardPose } from './stance';
+import { footNow, gToWorld, guardFrame, type GuardPose } from './stance';
 import { classify, envelope, type StrikeInfo } from './strikes';
 import type { ActionTiming } from './timing';
 
@@ -325,9 +325,8 @@ function legRaise(ctx: Ctx, ad: ActiveDefence, leg: 0 | 1, d: Delta): void {
   const fr = ctx.frame;
   const w = ad.w;
   const out = leg === 0 ? 1 : -1;
-  const f = st.feet[leg];
   const ctl = d.feet[leg];
-  const base: V3 = [f.ball[0], 0, f.ball[2]];
+  const base: V3 = footNow(st, leg, ctx.nowMs).ball;
   let lift: V3;
   let pole: V3;
   const hip = add(base, [0, st.rig.hipsY * 0.9, 0]);

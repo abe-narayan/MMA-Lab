@@ -273,6 +273,65 @@ export function forwardKinematics(out: WorldPose, pose: Pose, rest: RestSkeleton
   return out;
 }
 
+/** Bone indices of the subtree rooted at each bone (itself first, parents before children). */
+const SUBTREE: Int16Array[] = (() => {
+  const lists: number[][] = Array.from({ length: BONE_COUNT }, () => []);
+  for (let i = 0; i < BONE_COUNT; i++) {
+    // Every ancestor of i (and i itself) gets i, in index order (parents first).
+    for (let a = i; a >= 0; a = BONE_PARENT[a]) lists[a].push(i);
+  }
+  return lists.map((l) => Int16Array.from(l.sort((x, y) => x - y)));
+})();
+
+/**
+ * Forward kinematics of one subtree only (the bone `root` and everything below
+ * it), assuming `out` is already current for `root`'s parent. The animator's
+ * solves change one limb at a time (a leg's IK, an arm's, the fingers' curl):
+ * a full pass after each of them was a quarter of the animation's cost.
+ */
+export function forwardKinematicsSubtree(out: WorldPose, pose: Pose, rest: RestSkeleton, root: number): WorldPose {
+  const { head, tail } = rest;
+  const list = SUBTREE[root];
+  for (let k = 0; k < list.length; k++) {
+    const i = list[k];
+    const p = BONE_PARENT[i];
+    const q = i * 4;
+    if (p < 0) {
+      out.pos.set(pose.rootPos, 0);
+      mulQuat(out.quat, q, pose.rootQuat, 0, pose.local, q);
+    } else {
+      const pq = p * 4;
+      const ox = head[i * 3] - head[p * 3];
+      const oy = head[i * 3 + 1] - head[p * 3 + 1];
+      const oz = head[i * 3 + 2] - head[p * 3 + 2];
+      rotateInto(out.pos, i * 3, out.quat, pq, ox, oy, oz);
+      out.pos[i * 3] += out.pos[p * 3];
+      out.pos[i * 3 + 1] += out.pos[p * 3 + 1];
+      out.pos[i * 3 + 2] += out.pos[p * 3 + 2];
+      mulQuat(out.quat, q, out.quat, pq, pose.local, q);
+    }
+    const tx = tail[i * 3] - head[i * 3];
+    const ty = tail[i * 3 + 1] - head[i * 3 + 1];
+    const tz = tail[i * 3 + 2] - head[i * 3 + 2];
+    rotateInto(out.tip, i * 3, out.quat, q, tx, ty, tz);
+    out.tip[i * 3] += out.pos[i * 3];
+    out.tip[i * 3 + 1] += out.pos[i * 3 + 1];
+    out.tip[i * 3 + 2] += out.pos[i * 3 + 2];
+  }
+  return out;
+}
+
+/**
+ * Move a whole world pose by (dx, dy, dz): what forward kinematics gives after
+ * a pure root translation, without redoing it.
+ */
+export function translateWorld(w: WorldPose, dx: number, dy: number, dz: number): void {
+  for (let i = 0; i < BONE_COUNT; i++) {
+    w.pos[i * 3] += dx; w.pos[i * 3 + 1] += dy; w.pos[i * 3 + 2] += dz;
+    w.tip[i * 3] += dx; w.tip[i * 3 + 1] += dy; w.tip[i * 3 + 2] += dz;
+  }
+}
+
 /** out[o..o+3] = a[ai..] * b[bi..] (Hamilton product). Safe when out aliases a. */
 export function mulQuat(
   out: Float32Array, o: number, a: Float32Array, ai: number, b: Float32Array, bi: number,

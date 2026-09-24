@@ -21,6 +21,8 @@ import { foldReach } from '../src/presentation/rig/ik';
 import { buildRequest } from '../src/presentation/anim/grapple';
 import { separatePoints } from '../src/presentation/finish';
 import { restState } from '../src/presentation/corner';
+import { clampPelvis } from '../src/presentation/anim/stance';
+import { fistPoint, solveHand, worldP } from '../src/presentation/anim/spec';
 
 const lib = loadMotion();
 const FRAME = 1000 / 60;
@@ -428,5 +430,159 @@ describe('pass 2: after a submission', () => {
     });
     expect(worst).toBeLessThan(0.03);
     expect(jump).toBeLessThan(0.06); // no hips jump over a frame while he gets up
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Animation quality pass 3 (docs/design/PHASE8_NOTES.md, "Animation quality
+// pass 3"): lift-off / plant continuity, the reach assist and the pelvis
+// clamp, footwork cadence, close-range contact, the subtree FK.
+// ---------------------------------------------------------------------------
+
+describe('pass 3: exactness of the cheaper solve', () => {
+  it('subtree forward kinematics leaves exactly what a full pass would', () => {
+    const sb = buildScenario({
+      fighters: [archetype('arch.champion_complete'), archetype('arch.regional_pro_allrounder')],
+      stances: ['orthodox', 'orthodox'], start: [[0, 0], [0, 1.25]], durationMs: 2500,
+      actions: [{ fighter: 0, technique: 'tech.jab', commitMs: 837, result: 'landed' }],
+    });
+    const an = new StandingAnimator({ motion: lib });
+    an.setBout(sb.bout, sb.rests);
+    const out = [createPose(), createPose()];
+    const w = createWorldPose();
+    let worst = 0;
+    for (let t = 0; t <= 2400; t += FRAME) {
+      an.evaluate(frameAt(sb, t, t === 0), FRAME / 1000, out);
+      for (const i of [0, 1]) {
+        const st = an.fighterState(i)!;
+        forwardKinematics(w, st.pose, sb.rests[i]!);
+        for (let k = 0; k < w.pos.length; k++) worst = Math.max(worst, Math.abs(w.pos[k]! - st.world.pos[k]!));
+      }
+    }
+    expect(worst).toBeLessThan(1e-5);
+  });
+});
+
+describe('pass 3: the pelvis reach clamp is smooth', () => {
+  it('the hips drop at a bounded rate as a foot moves out to the leg length (no sqrt singularity)', () => {
+    const sb = buildScenario({
+      fighters: [archetype('arch.champion_complete'), archetype('arch.regional_pro_allrounder')],
+      stances: ['orthodox', 'orthodox'], start: [[0, 0], [0, 2]], durationMs: 500, actions: [],
+    });
+    const an = new StandingAnimator({ motion: null });
+    an.setBout(sb.bout, sb.rests);
+    an.evaluate(frameAt(sb, 0, true), FRAME / 1000, [createPose(), createPose()]);
+    const st = an.fighterState(0)!;
+    const spec = st.spec;
+    const y0 = spec.pelvis[1];
+    const drops: number[] = [];
+    // The rear foot slid back 1 mm at a time, well past where the leg reaches.
+    const b0 = [...spec.feet[1].ball] as [number, number, number];
+    for (let k = 0; k <= 700; k++) {
+      spec.pelvis[1] = y0;
+      spec.feet[1].ball = [b0[0], 0, b0[2] - k * 0.001];
+      st.reachW = [1, 1];
+      clampPelvis(spec, st);
+      drops.push(y0 - spec.pelvis[1]);
+    }
+    let maxRate = 0;
+    for (let k = 1; k < drops.length; k++) maxRate = Math.max(maxRate, drops[k]! - drops[k - 1]!);
+    // At most ~3 mm of drop per mm of foot travel, and never past the 12 cm limit.
+    expect(maxRate).toBeLessThan(0.0035);
+    expect(Math.max(...drops)).toBeLessThanOrEqual(0.12 * st.rig.scale + 1e-9);
+  });
+});
+
+describe('pass 3: close-range punches', () => {
+  it('a jab aimed straight out to the side of a bladed lead shoulder lands (the elbow pole is not on the reach line)', () => {
+    const sb = buildScenario({
+      fighters: [archetype('arch.champion_complete'), archetype('arch.regional_pro_allrounder')],
+      stances: ['orthodox', 'orthodox'], start: [[0, 0], [0, 2]], durationMs: 500, actions: [],
+    });
+    const an = new StandingAnimator({ motion: null });
+    an.setBout(sb.bout, sb.rests);
+    an.evaluate(frameAt(sb, 0, true), FRAME / 1000, [createPose(), createPose()]);
+    const st = an.fighterState(0)!;
+    const sh = worldP(st.world, B.lArm);
+    // Chest-frame +x (own left) of the lead shoulder, 36 cm out; the pole just
+    // below the target (a straight captured elbow put 1.6x along the arm).
+    const q = [st.world.quat[B.spine2 * 4]!, st.world.quat[B.spine2 * 4 + 1]!, st.world.quat[B.spine2 * 4 + 2]!, st.world.quat[B.spine2 * 4 + 3]!];
+    const rot = (v: number[]): number[] => {
+      const [x, y, z, w] = q as [number, number, number, number];
+      const tx = 2 * (y * v[2]! - z * v[1]!), ty = 2 * (z * v[0]! - x * v[2]!), tz = 2 * (x * v[1]! - y * v[0]!);
+      return [v[0]! + w * tx + (y * tz - z * ty), v[1]! + w * ty + (z * tx - x * tz), v[2]! + w * tz + (x * ty - y * tx)];
+    };
+    const out = rot([0.36, 0, 0]), below = rot([0.36, -0.07, 0]);
+    const h = st.spec.hands[0];
+    h.pos = [sh[0] + out[0]!, sh[1] + out[1]!, sh[2] + out[2]!];
+    h.pole = [sh[0] + below[0]!, sh[1] + below[1]!, sh[2] + below[2]!];
+    h.w = 1; h.fistTarget = true; h.exact = false;
+    solveHand(st.spec, st.rig, st.pose, st.world, 0);
+    forwardKinematics(st.world, st.pose, st.rig.rest);
+    const f = fistPoint(st.world, st.rig, 0);
+    expect(Math.hypot(f[0] - h.pos[0], f[1] - h.pos[1], f[2] - h.pos[2])).toBeLessThan(0.03);
+  });
+
+  it('a jab thrown with the fighters 0.6 m apart lands on the surface at the recorded instant', () => {
+    const sb = buildScenario({
+      fighters: [archetype('arch.pressure_boxer'), archetype('arch.counter_striker')],
+      stances: ['orthodox', 'orthodox'], start: [[0, 0], [0, 0.62]], durationMs: 3000,
+      actions: [
+        { fighter: 0, technique: 'tech.jab', commitMs: 1037, result: 'landed' },
+        { fighter: 1, technique: 'tech.jab', commitMs: 2037, result: 'blocked', defence: 'def.block_high' },
+      ],
+    });
+    const r = audit(asRecording(sb, 'closejab'), { post: 0, motion: lib });
+    expect(r.contact.surface.n).toBe(2);
+    expect(r.contact.surface.max).toBeLessThan(5);
+  });
+});
+
+describe('pass 3: footwork', () => {
+  it('stop-go recorded motion is covered in few, unhurried steps with no leg pops', () => {
+    const moves = [];
+    for (let k = 0; k < 20; k++) moves.push({ fighter: 0, fromMs: 800 + k * 200, toMs: 900 + k * 200, vx: k % 2 ? 2.3 : 0, vz: k % 2 ? 0 : 2.3 });
+    const sb = buildScenario({
+      fighters: [archetype('arch.champion_complete'), archetype('arch.regional_pro_allrounder')],
+      stances: ['orthodox', 'orthodox'], start: [[-2, -2], [2, 2]], durationMs: 5200, actions: [], moves,
+    });
+    const r = audit(asRecording(sb, 'stopgo3'), { post: 0, motion: lib });
+    const legPops = Object.entries(r.popHist).filter(([k]) => /standing:.(Shin|Thigh):/.test(k)).reduce((a, [, v]) => a + v, 0);
+    expect(legPops).toBeLessThanOrEqual(2);
+    // Before pass 3 (the audit set): median swing 0.13 s, 11 % of steps under 8 cm.
+    expect(r.steps.dur.pct(0.5)).toBeGreaterThan(0.14);
+    expect((r.steps.len.n - r.steps.len.over) / Math.max(1, r.steps.len.n)).toBeLessThan(0.1);
+  });
+
+  it('a planted foot pivots without a yaw-rate step (the pivot eases in with the error)', () => {
+    const sb = buildScenario({
+      fighters: [archetype('arch.champion_complete'), archetype('arch.regional_pro_allrounder')],
+      stances: ['orthodox', 'orthodox'], start: [[0, 0], [0, 2]], durationMs: 2500, actions: [],
+      moves: [{ fighter: 1, fromMs: 600, toMs: 1600, vx: 1.2, vz: 0 }],
+    });
+    const an = new StandingAnimator({ motion: null });
+    an.setBout(sb.bout, sb.rests);
+    const out = [createPose(), createPose()];
+    let prev: [number, number] | null = null;
+    const prevRate = [0, 0];
+    let worstJerk = 0;
+    for (let t = 0; t <= 2400; t += FRAME) {
+      an.evaluate(frameAt(sb, t, t === 0), FRAME / 1000, out);
+      const st = an.fighterState(0)!;
+      const y: [number, number] = [st.feet[0].yaw, st.feet[1].yaw];
+      if (prev) {
+        for (const s of [0, 1]) {
+          // In the air, or just landed (the plant takes the landing yaw): not a pivot.
+          if (st.feet[s]!.swing || st.feet[s]!.landedAt > t - 3 * FRAME) { prevRate[s] = 0; continue; }
+          const r = Math.atan2(Math.sin(y[s]! - prev[s]!), Math.cos(y[s]! - prev[s]!));
+          worstJerk = Math.max(worstJerk, Math.abs(r - prevRate[s]!));
+          prevRate[s] = r;
+        }
+      }
+      prev = y;
+    }
+    // Change of the per-frame yaw rate, radians (the old rule switched
+    // 0 -> 0.045 rad/frame the moment the error passed 6°).
+    expect(worstJerk).toBeLessThan(0.03);
   });
 });

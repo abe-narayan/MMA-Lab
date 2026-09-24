@@ -28,7 +28,7 @@ import {
 import { ankleOf, worldP, type BodySpec } from './spec';
 import { forwardKinematics } from '../rig/skeleton';
 import type { Ctx, Delta, FighterState } from './state';
-import type { GuardPose } from './stance';
+import { footNow, type GuardPose } from './stance';
 import { blockPoint, missPoint, targetPoint, type AimInput, type Approach } from './targets';
 import { TECH, type ActionTiming, type Region } from './timing';
 
@@ -894,8 +894,9 @@ export function legPass(
     ? toWorld(fr, [(kf === 0 ? 1 : -1) * 0.1 * s, rig.hipsY - 0.05 * s, (kf === ctx.lead ? 0.12 : -0.12) * s])
     : worldP(w, kf === 0 ? B.lUpLeg : B.rUpLeg);
   const L = rig.legLen;
+  const fn = footNow(st, kf, ctx.nowMs);
   const planted = ankleOf(rig, kf, {
-    ball: st.feet[kf].ball, yaw: st.feet[kf].yaw, lift: 0, airPitch: 0, pole: [0, 0, 0], toeFlat: 1, ankle: null,
+    ball: fn.ball, yaw: fn.yaw, lift: 0, airPitch: 0, pole: [0, 0, 0], toeFlat: 1, ankle: null,
   });
   const fwd = dirToWorld(fr, [0, 0, 1]);
   const { ankleC, poleC, chamber, poleCh } = kickGeometry(ctx, tm, info, hipJ, T);
@@ -937,13 +938,19 @@ export function legPass(
       pole = vlerp(poleC, poleCh, smooth(r / 0.45));
     } else {
       // Land: back into stance, or square in front for an untrained kicker.
+      // The untrained kicker's foot comes down square in front: the ANKLE
+      // lands where that ball of the foot puts it (the ball point itself used
+      // to be the ankle target, 14 cm off: the planted foot slid that far as
+      // the override faded), and the ball stops following the body once the
+      // override starts fading out (it is on the floor then).
+      const ballL = toWorld(fr, [(kf === 0 ? 1 : -1) * 0.2 * s, 0, 0.1 * s]);
       const land = noReset
-        ? toWorld(fr, [(kf === 0 ? 1 : -1) * 0.2 * s, 0.07 * s, 0.1 * s])
+        ? ankleOf(st.rig, kf, { ball: [ballL[0], 0, ballL[2]], yaw: fr.yaw, lift: 0, airPitch: 0, pole: [0, 0, 0], toeFlat: 1, ankle: null })
         : planted;
       ank = arcLerp(hipJ, chamber, land, smooth((r - 0.45) / 0.55));
       pole = vlerp(poleCh, add(land, add(scale(fwd, 0.6), [0, 0.5, 0])), smooth((r - 0.45) / 0.55));
-      if (noReset && r > 0.6) {
-        ctl.land = [land[0], 0, land[2]];
+      if (noReset && r > 0.6 && e.rec < 0.88) {
+        ctl.land = [ballL[0], 0, ballL[2]];
         ctl.landYaw = fr.yaw;
       }
     }

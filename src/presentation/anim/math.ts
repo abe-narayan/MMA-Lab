@@ -43,6 +43,22 @@ export function bump(t: number): number {
   const x = clamp01(t);
   return Math.sin(Math.PI * x);
 }
+/**
+ * 0 -> 1 -> 0 bump over [0,1] with ZERO slope at both ends (sin²): a foot's
+ * weight shift, clearance and toe-off start and stop at rest, so a lift-off or
+ * a touch-down is never a velocity step (`bump` starts at full speed: measured,
+ * a shin or hips jolt at every lift-off and landing).
+ */
+export function bumpC1(t: number): number {
+  const s = Math.sin(Math.PI * clamp01(t));
+  return s * s;
+}
+/** Early-peaking pulse over [0,1] (peak 1 at t = 0.4), zero slope at both ends: a toe-off. */
+export function earlyPulse(t: number): number {
+  const x = clamp01(t);
+  const y = 1 - x;
+  return 28.935 * x * x * y * y * y;
+}
 /** Window: rises over [a,b], holds, falls over [c,d]. */
 export function windowW(t: number, a: number, b: number, c: number, d: number): number {
   if (t <= a || t >= d) return 0;

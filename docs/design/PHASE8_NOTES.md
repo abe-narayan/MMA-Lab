@@ -1698,3 +1698,161 @@ separation (one 65 cm jump when a walker passed straight through).
   separation pops lags fast transitions. At post t = 0 the submission pose itself overlaps 12 cm.
 - Evaluate cost: mean 0.24 ms for two fighters is within the ~0.3 ms budget, but p95 is 0.55 ms (0.49 before);
   the contact pass, the chest-frame hand spring and the carry-hands re-solve are the new work to trim.
+
+### Animation quality pass 3
+
+A third pass on pass 2's "still wrong" list, measured with the same harness on the same cached recordings (9 bouts,
+140 399 frames). Code: `anim/stance.ts`, `anim/animator.ts`, `anim/spec.ts`, `anim/state.ts`, `anim/capture.ts`,
+`anim/capStrikes.ts`, `anim/strikes.ts`, `anim/defence.ts`, `anim/math.ts`, `anim/grapple/{solve,solver}.ts`,
+`rig/skeleton.ts`, `finish/index.ts`. Harness: step metrics (steps per metre of the displayed root's travel and per
+standing minute, step length and swing time distributions), a post-roll / corner pop breakdown in `--examples`, and
+a fix to the pop histogram's layer key. Diagnostics: `scripts/dev/anim-leg-diag.ts` (every thigh / shin pop with the
+foot's swing phase, reach, heel, pelvis height), `scripts/dev/anim-contact3-diag.ts` (each contact miss: the aim in
+the chest frame against the arm's reach, the hand spec, the fade). Tests: 7 new in
+`presentation.anim-quality.test.ts`. The "before" column is HEAD (pass 2) through the current harness.
+
+**What was wrong, at the root, and the fix.**
+1. *The largest standing leg pops were the hips lunging 15-40 cm in a frame during punches.* The reach assist moved
+   the pelvis by the arm IK's residual error, which also counted what a close-range fist could not do, not only an
+   out-of-reach target: at aims 35-45 cm from the shoulder it pushed the hips to its 20 cm cap and toggled 4 ↔ 17 cm
+   between frames. It now carries the geometric shortfall only (the aim past the arm's full reach, softplus over
+   2 cm, eased into the cap), a continuous function of the aim and the shoulder.
+2. *The pelvis reach clamp had a square-root singularity.* The drop for a foot at horizontal distance h is
+   v − √(L² − h²): its slope is unbounded as h approaches the leg's length, so a foot stepping wide dropped the hips
+   3-5 cm a frame, and the hard 12 cm floor stopped them dead. Past 94 % of the reach the drop now follows its
+   tangent (at most ~2.8 mm per mm) and the total eases into the 12 cm limit. The release was the other half: when
+   the foot that bound the clamp landed or lifted, the hips came back up 5-9 cm in one frame. The drop is now
+   applied at once but released through a critically damped follow (~0.1 s); rising late only bends the knees a
+   little longer, so every foot stays reachable.
+3. *Lift-off and touch-down started and stopped at full speed.* The weight shift, the foot's air pitch, the toe-off
+   and the procedural step height were `sin(πu)` shapes (full slope at 0 and 1); the swing's horizontal progress
+   ended with the captured curve's own slope at 10 % / 90 % of the swing; the in-flight re-aim stopped dead at 80 %.
+   All now start and end at rest (sin², an early pulse, smoothstep into the captured progress, a tapered re-aim).
+   A new swing that began the frame after its foot landed started from the heel of the plant before the previous
+   swing (a 10-40° heel snap): the drawn heel is now recorded every frame. A planted foot's pivot switched on at 6°
+   of yaw error (0 → 2.6°/frame); it now eases in over 3-9°.
+4. *An action's foot pitch and the foot it started from.* A kick or a check's `airPitch` (up to 52°) applied in full
+   from the action's first frame, whatever its weight on the leg: the foot, and the ankle that pivots about the ball,
+   jumped. It is now weighted by the action's hold on the leg. A kick that began while its foot was still in a step
+   anchored its path on the plant the step had left; when the step landed underneath, the leg jumped by the step
+   (the worst standing slide, 45-47 cm in one frame). Actions now start from where the foot is drawn (`footNow`).
+   The captured foot pivot of a strike was the wrapped yaw change clamped to ±1.4 rad; a lifted foot's yaw near π
+   flipped a planted foot 160° in a frame. It now rolls off to 0 at ±π. The untrained kicker's "no reset" landing
+   used one point as both the ankle target and the ball of the foot (14 cm apart); the ankle now lands where that
+   ball puts it.
+5. *Close-range jabs missed (16 of 305 contacts > 5 cm).* Two causes. (a) From a chest bladed ~90° off the target
+   the aim lies straight out to the side of the lead shoulder; the captured straight-arm elbow put the pole on the
+   reach line, and the arm pole's escape pushed it "out to the arm's side" — along the reach line itself. The fist
+   IK then ended 13-17 cm off a target 35-45 cm from the shoulder. The escape now uses the part of "out"
+   perpendicular to the reach, falling back to "elbow down". (b) A defender's glove jammed against the puncher's
+   shoulder (7-15 cm from it) left the elbow folded at its limit: when the aim is closer than the fist reaches at
+   ~115° of elbow flexion, the hips now give ground by the missing room (softplus, ≤ 12 cm, weighted by the punch's
+   extension) — the small step back of a jab thrown in the pocket.
+6. *Post-roll.* At the decision ceremony the post-fight point separation was switched off in one frame at
+   hold − 0.25 s, and a fighter it had kept off his mark (up to 48 cm) jumped onto it; the separated points now ease
+   onto the marks over the 0.6 s before (post-roll translation pops 13 → 2, worst post-roll slide 49 → 13 cm).
+
+**Weight and momentum (the footwork).** The sim moves in 100 ms surges; planning steps from that velocity re-stepped
+at every surge, and a 5.6 cm trigger while moving made many short catch-up steps (median swing 0.13 s, 11.5 % of steps
+under 8 cm, 228 steps per standing minute per fighter). Now:
+- the footwork plans from a smoothed travel velocity (critically damped, ~0.2 s; the displayed root and the hips
+  still follow the record);
+- a step covers a stride that grows with that speed — per foot 15 cm + 0.26 s × v, at most 46 cm, scaled by the
+  guard style (`stride`: long guard 1.12, Thai 0.88, peek-a-boo 0.9) and by tier (a novice's 15 % shorter) — by
+  aiming it `lead` ms of travel past where the body will be when it lands; the swing time follows the step length
+  (180 ms + 230 ms per 60 cm, × the tier's step time); the re-step threshold is 9 cm (novice 13 cm) whether moving
+  or not;
+- while travelling the hips lead by ~3 cm per m/s (≤ 5 cm) and the trailing foot's heel rises up to 10° (push-off);
+- the bounce rate and height are per guard style (`rhythm`, `hop`: a Thai fighter rocks slowly and low, a
+  peek-a-boo fighter bobs quickly).
+
+Result: 228 → 171 steps per standing minute, 8.5 → 6.4 per metre of root travel, median step 21 → 29 cm, median swing
+0.13 → 0.18 s, steps under 8 cm 11.5 → 4.3 %, with planted-foot sliding down (p99 2.0 → 0.56 cm/frame) and the stance
+order about the same (2.83 → 2.91 %). Reference [E, assumptions, not measured here]: a boxer's step-drag moves each
+foot ~15-25 cm adjusting and ~35-50 cm travelling; walking is ~0.7 m a step (≈ 0.4 × stature) at ~1.4 m/s. The capture
+library's own step takes (ACCAD, a deep karate stance) measure 2.4-3.9 steps per metre, 50-85 cm a step per foot,
+0.30-0.40 s swings at 0.3-1 m/s — an upper bound for step length, and the swing time the new footwork approaches.
+Knees now track 60 % toward the toes (from 40 %): the longer steps had doubled the loaded-knee / foot twist
+(0.46 → 1.08 %); it is now 0.33 %.
+
+**Cost.** Profiled (`--cpu-prof` on the audit): full forward kinematics was a quarter of all time — `solveSpec` ran a
+52-bone pass after each stage, the arm IK after each fist-target iteration, the pair solver after every limb pass.
+`rig/skeleton.ts` gains `forwardKinematicsSubtree` (precomputed parents-first subtree lists) and `translateWorld`; the
+stages now recompute only what they changed (head, legs, feet, arms, forearms / fingers; the pair solver's clavicles
+and limbs, hands, a root-only separation). The poses are unchanged (a test compares against a full pass; the audit's
+quality metrics were identical with and without it). Also: the idle loops' residual channels are tabulated once per
+loop instead of sampling the clip and running FK twice per fighter per frame; a small cache of captured feature
+frames (a strike's layers read the same clip time several times a frame); the per-frame `Delta` and the idle buffer
+are reset in place (no per-frame garbage). Two fighters, back to back under the same machine load: all modes
+0.22 / 0.50 → 0.15 / 0.36 ms (mean / p95), standing 0.18 / 0.45 → 0.10 / 0.23 ms.
+
+**Before / after** (same cached recordings, 9 bouts, 140 399 frames; joint rows at 0 % both sides omitted):
+
+| Metric | Before (pass 2) | After |
+|---|---|---|
+| footSlide.standing (cm/planted frame: mean / p99 / max / >0.5cm) | 0.08 / 2.01 / 44.85 / 4.38% | 0.03 / 0.56 / 26.51 / 1.13% |
+| footSlide.engaged (cm/planted frame: mean / p99 / max / >0.5cm) | 0.22 / 5.31 / 95.17 / 6.08% | 0.22 / 5.31 / 95.17 / 6.11% |
+| footSlide.corner (cm/planted frame: mean / p99 / max / >0.5cm) | 0.06 / 1.74 / 20.83 / 2.56% | 0.06 / 1.75 / 22.00 / 2.53% |
+| footSlide.post (cm/planted frame: mean / p99 / max / >0.5cm) | 0.29 / 4.10 / 48.72 / 13.28% | 0.28 / 4.02 / 12.98 / 13.54% |
+| hipFreeze (frames frozen / sim-moving frames, longest ms) | 1.05% (451/42960), 83 | 0.85% (364/42960), 83 |
+| joint.elbowOverflex (% fighter-frames) | 0.17% | 0.17% |
+| joint.kneeOverflex (% fighter-frames) | 0.01% | 0.01% |
+| joint.kneeFootTwist (% fighter-frames) | 0.46% | 0.33% |
+| joint.spineTwist (% fighter-frames) | 0.43% | 0.43% |
+| joint.spineSide (% fighter-frames) | 0.41% | 0.41% |
+| pops (unexplained one-frame spikes per fighter-minute) | 42.15 | 25.96 |
+| pops.standing (rot / trans count) | 2535 / 287 | 1367 / 87 |
+| pops.engaged (rot / trans count) | 643 / 2 | 641 / 2 |
+| pops.corner (rot / trans count) | 50 / 0 | 47 / 0 |
+| pops.post (rot / trans count) | 110 / 13 | 96 / 2 |
+| groundPen.standing (frames >1cm, max cm) | 0.44%, 9.19 | 0.41%, 9.17 |
+| groundPen.engaged (frames >1cm, max cm) | 0.02%, 11.17 | 0.02%, 11.17 |
+| groundPen.corner (frames >1cm, max cm) | 2.08%, 4.53 | 2.08%, 4.53 |
+| groundPen.post (frames >1cm, max cm) | 0.46%, 17.69 | 0.46%, 17.69 |
+| interpen.standing (frames >2cm, p99 / max cm) | 0.06%, 0.00 / 12.01 | 0.04%, 0.00 / 12.01 |
+| interpen.limbStanding (frames >5cm, max cm) | 1.38%, 16.85 | 1.17%, 16.86 |
+| interpen.engaged (frames >5cm, p99 / max cm) | 8.29%, 9.39 / 22.72 | 8.30%, 9.66 / 22.72 |
+| interpen.engagedCore (firm-body capsules: frames >2cm, p99 / max cm) | 1.30%, 2.24 / 20.78 | 1.27%, 2.21 / 20.78 |
+| contact.surface (n, median / p90 / max cm, >5cm) | 305, 0.68 / 3.23 / 16.45, 5.25% | 305, 0.55 / 2.14 / 15.96, 1.31% |
+| contact.inRange (recorded ≤ 1.6 m punch / 1.9 m kick: n, median / p90 / max cm, >5cm) | 304, 0.69 / 3.23 / 16.45, 5.26% | 304, 0.55 / 2.14 / 15.96, 1.32% |
+| contact.aim (IK error: median / p90 / max cm) | 0.96 / 10.04 / 19.08 | 0.90 / 5.33 / 16.10 |
+| steps (per metre of root travel / per standing minute) | 8.52 / 227.92 | 6.41 / 171.45 |
+| steps.length (cm at 1.73 m: p10 / median / p90, <8cm) | 7.44 / 21.45 / 47.76, 11.52% | 11.48 / 28.51 / 59.95, 4.25% |
+| steps.swing (s: p10 / median / p90) | 0.08 / 0.13 / 0.22 | 0.13 / 0.18 / 0.27 |
+| disagree.clinchButApart (% of applicable frames) | 2.04% of 29032 | 2.02% of 29032 |
+| disagree.facingOff (% of applicable frames) | 1.54% of 142319 | 1.61% of 142302 |
+| disagree.simFacingInfo (% of applicable frames) | 3.72% of 158909 | 3.80% of 158851 |
+| disagree.stanceMismatch (% of applicable frames) | 2.83% of 158319 | 2.91% of 158259 |
+| evaluate ms (2 fighters, all modes: mean / p95) (back to back, same load) | 0.22 / 0.50 | 0.15 / 0.36 |
+| evaluate ms (2 fighters standing: mean / median / p95) (back to back, same load) | 0.18 / 0.11 / 0.45 | 0.10 / 0.07 / 0.23 |
+
+Reading it: unexplained pops per fighter-minute 42 → 26 (standing rotation ÷ 1.9, standing translation ÷ 3.3,
+post-roll translation 13 → 2), planted-foot sliding ÷ 2.7 in the mean and ÷ 3.6 at the p99 (worst frame 45 → 27 cm),
+contact misses ÷ 4 (5.25 → 1.31 %, the fist IK error p90 halved), knee-foot twist below pass 2, the post-roll's worst
+slide 49 → 13 cm, fewer and longer steps, and evaluate p95 under 0.4 ms for two fighters.
+
+**Captures** (`docs/screenshots/anim3-*.png`, before left of / above after): `anim3-footwork` (6 s of the champion's
+travel, top-down: where each foot lands), `anim3-legs` (a close-range boxing exchange: shin angular speed and the hips'
+distance from the root — the reach-assist lunges), `anim3-steps` (step length and swing time over four bouts).
+Regenerate: `scripts/dev/anim3-captures.ts` against the old and the new code, then `anim3-captures.mjs before.json
+after.json`.
+
+**Tried and backed out.** A knee-pole guard for the legs like the arms' (pole pushed off the hip-ankle line): no
+change in standing pops, and it rolled the captured get-up's knees so an ankle went 41 cm under the canvas. Raising a
+still-stretched planted foot's heel for what the pelvis clamp no longer gives: no gain in sliding, slightly more pops.
+Removing the push-off heel or restoring the old pivot rule: no effect on the knee twist (the knee pole's toe share
+was the lever).
+
+**Still wrong.**
+- Standing pops remain (1 367 rotation, 87 translation): arms in strikes (forearm / upper arm, ~270), legs in the
+  strike layer (the support and kicking legs of kicks and stepping punches, ~220), legs in the stance layer (~190,
+  many with a foot near the leg's full reach). Engaged pops (641) are the grapple solver's, untouched here.
+- The worst standing slides (18-27 cm in a frame) are all the kicking foot of a rear round kick as the kick's ankle
+  override hands the foot back to the footwork.
+- The step-length tail is long (p90 60 cm per foot): the sim's fast lateral bursts at 2+ m/s ask for strides near the
+  46 cm cap plus the error that triggered the step. Stance and facing disagreement rose slightly (2.83 → 2.91 %,
+  1.54 → 1.61 %): longer steps take a little longer to re-establish the stance.
+- Contact: 4 of 305 still > 5 cm — a shovel hook at 0.58 m (the body is too close for a hook's arc), a captured
+  `jab_step`, an elbow and a calf kick; the 0.17 % elbow over-flexion is still the rear-naked-choke defender.
+- Evaluate p95 under load is noisy: 0.36 ms back to back, 0.48 ms in a run hours earlier under heavier load. The pair
+  solver (grapple frames) is now the larger share of the all-modes tail.

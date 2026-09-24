@@ -27,7 +27,7 @@
 import type { FighterSnapshot, SimEvent, TickSnapshot } from '../../sim';
 import type { AnimDebug, Animator, BoutPresentation, FrameInput } from '../contract';
 import {
-  B, blendPose, copyPose, createPose, createWorldPose, forwardKinematics, resetPose,
+  B, blendPose, copyPose, createPose, createWorldPose, forwardKinematics, forwardKinematicsSubtree, resetPose,
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
 import { grappleSolver, type GrappleContext } from './grappleApi';
@@ -41,7 +41,7 @@ import { condition, hitReactions, incomingFlinch, turnAway } from './reactions';
 import { fistPoint, getLocal, rigInfo, solveHand, solveSpec, worldP } from './spec';
 import { buildBody, clampPelvis, guardHands } from './stance';
 import {
-  createDelta, createFighterState, createSpec, type Ctx, type Delta, type FighterState, type KnockInfo,
+  createDelta, createFighterState, createSpec, resetDelta, type Ctx, type Delta, type FighterState, type KnockInfo,
 } from './state';
 import { aimPoint, classify, envelope, legPass, strikeBody, strikeHands, strikeRootOffset } from './strikes';
 import { KNEE_MAX_FLEX, LIMBS, solveTwoBone } from '../rig/ik';
@@ -297,7 +297,7 @@ export class StandingAnimator implements Animator {
     for (let i = 0; i < n; i++) {
       const ctx = ctxs[i]!;
       const st = ctx.st;
-      st.delta = createDelta();
+      resetDelta(st.delta);
       if (st.spec.frame.ox === 0 && st.spec.frame.oz === 0) st.spec = createSpec(ctx.frame);
       st.spec.free = false;
       if (st.mode === 'grapple' && (engagedPair.has(i) || st.lastSpec)) {
@@ -380,7 +380,7 @@ export class StandingAnimator implements Animator {
         const act = tm.activeEnd - tm.contact;
         const w = elbow ? windowW(ctx.nowMs - tm.contact, -170, -15, act, act + 170) : 1;
         if (w > 0) {
-          this.reachAssist(ctx, tm, info.hand as 0 | 1, elbow ? aim : null, w, () => {
+          this.reachAssist(ctx, tm, info.hand as 0 | 1, elbow ? aim : null, w, aim, () => {
             hands();
             solveSpec(st.spec, st.rig, st.pose, st.world, true);
           });
@@ -466,6 +466,13 @@ export class StandingAnimator implements Animator {
     for (let i = 0; i < n; i++) {
       const st = this.st[i];
       st.lastSpec = st.spec;
+      // Each foot's heel as finally drawn (the reach clamp may have raised it,
+      // a swing may just have landed): the next lift-off starts from there.
+      // (A swing that began the frame after its foot landed used to start from
+      // the heel of the plant BEFORE that swing: a 10-40° heel snap.)
+      if (st.mode === 'standing' || st.mode === 'getup') {
+        for (const side of [0, 1] as const) st.feet[side].lift = st.spec.feet[side].lift;
+      }
       if (out[i]) copyPose(out[i], st.pose);
       const tm = ctxs[i]!.my;
       this.debugInfo[i] = {
@@ -530,7 +537,8 @@ export class StandingAnimator implements Animator {
       const chain = wp.leg === 0 ? LIMBS.lLeg : LIMBS.rLeg;
       solveTwoBone(st.pose, st.world, rig.rest, chain, add(wp.ankle, drift), add(wp.pole, drift), w, KNEE_MAX_FLEX);
     }
-    forwardKinematics(st.world, st.pose, rig.rest);
+    // Only the weapon limb changed.
+    forwardKinematicsSubtree(st.world, st.pose, rig.rest, wp.hand === 0 ? B.lArm : wp.hand === 1 ? B.rArm : wp.leg === 0 ? B.lUpLeg : B.rUpLeg);
     const t = st.ikTargets.find((x) => x.name === 'aim' || x.name === 'kick');
     if (t) t.pos = add(t.pos, drift);
   }
@@ -742,7 +750,7 @@ export class StandingAnimator implements Animator {
       st.debugLayer = `L1 ${ad.motion}${captured ? ' [mocap]' : ''}`;
     }
     if (cap) {
-      d.idle = idleResidual(cap, st.tiers.guardStyle, ctx.f.stance, st.seed, ctx.nowMs / 1000, new Float64Array(NCH));
+      d.idle = idleResidual(cap, st.tiers.guardStyle, ctx.f.stance, st.seed, ctx.nowMs / 1000, st.idleBuf ??= new Float64Array(NCH));
       if (d.idle && st.debugLayer === 'L0') st.debugLayer = 'L0 [mocap]';
     }
     for (const fn of d.rootFns) {
@@ -781,59 +789,112 @@ export class StandingAnimator implements Animator {
   }
 
   /**
-   * Closed-loop reach: when the arm cannot reach its path point (the target is
-   * further than the lunge estimate allowed), carry the hips and chest the
+   * Reach: when the weapon's target is beyond what the arm reaches (the lunge
+   * estimate allowed less than the target needs), carry the hips and chest the
    * rest of the way — the planted feet stay put (the pelvis drops to keep them
    * in reach). Misses are left short: falling short IS the miss.
+   *
+   * Pass 3: the carry is the GEOMETRIC shortfall — how far the target lies past
+   * the arm's full reach from the shoulder (the upper arm's for an elbow),
+   * eased in (softplus over ~2 cm) — a continuous function of where the target
+   * and the shoulder are. It used to be the arm IK's residual error after the
+   * solve, which also counted what the arm's blend and the fist's offset left
+   * over at close range: measured, the hips lunged up to the 20 cm cap at
+   * targets 35-45 cm from the shoulder and toggled between 4 and 17 cm from
+   * frame to frame (the largest standing leg pops, 25-40°/frame).
    */
   private reachAssist(
-    ctx: Ctx, tm: ActionTiming, hand: 0 | 1, elbow: V3 | null, weight: number, retarget: () => void,
+    ctx: Ctx, tm: ActionTiming, hand: 0 | 1, elbow: V3 | null, weight: number, punchAim: V3, retarget: () => void,
   ): void {
     if (tm.result === 'missed' || tm.result === 'evaded') return;
     const st = ctx.st;
     const spec = st.spec;
     const h = spec.hands[hand];
     if (!h.fistTarget && !elbow) return;
+    const rig = st.rig;
     const y0 = spec.pelvis[1];
-    let moved = 0;
-    const cap = 0.2 * st.rig.scale * weight;
-    for (let it = 0; it < 4; it++) {
-      const wp = elbow ? worldP(st.world, hand === 0 ? B.lForeArm : B.rForeArm) : fistPoint(st.world, st.rig, hand);
+    const R = elbow ? rig.upperArm * 0.985 : rig.armLen * 0.99 + rig.fistLen;
+    const sig = 0.02 * rig.scale;
+    const cap = 0.2 * rig.scale * weight;
+    const shortfall = (): { s: number; d: V3 } => {
+      const sh = worldP(st.world, hand === 0 ? B.lArm : B.rArm);
       const goal = elbow ?? h.pos;
-      const err = sub(goal, wp);
-      const e3 = Math.hypot(err[0], err[1], err[2]);
-      if (e3 < 0.003 || moved >= cap) break;
-      const k = Math.min(e3 * weight, cap - moved) / e3;
-      moved += e3 * k;
-      spec.pelvis = [spec.pelvis[0] + err[0] * k, spec.pelvis[1] + err[1] * k * 0.7, spec.pelvis[2] + err[2] * k];
-      spec.spinePitch += e3 * k * 0.5;
+      const d = sub(goal, sh);
+      const dl = Math.hypot(d[0], d[1], d[2]);
+      const x = (dl - R) / sig;
+      const sp = sig * (x > 20 ? x : Math.log1p(Math.exp(x)));
+      return { s: sp, d: dl > 1e-6 ? [d[0] / dl, d[1] / dl, d[2] / dl] : [0, 0, 0] };
+    };
+    // Too close (pass 3, goal: the close-range jab): an aim nearer the
+    // shoulder than the fist reaches with the elbow at ~115° (a defender's
+    // glove jammed against the puncher's shoulder, a head that came in) left
+    // the elbow folded at its limit, the fist 12-19 cm short of it. The body
+    // gives ground instead — the hips move away from the aim by the missing
+    // room (softplus, capped at 12 cm), the way a jab thrown in the pocket
+    // comes with a small step back — and the arm extends onto it.
+    const ext = elbow ? 0 : envelope(tm, ctx.nowMs).ext;
+    if (!elbow && ext > 0) {
+      const L1 = rig.upperArm, L2 = rig.foreArm + rig.fistLen;
+      const rMin = Math.sqrt(L1 * L1 + L2 * L2 - 2 * L1 * L2 * Math.cos(Math.PI - ROOM_FLEX));
+      // Keyed on the punch's AIM (the hand path starts at the guard, close to
+      // the shoulder by design) and weighted by the extension toward it.
+      const wR = weight * smooth(ext);
+      const capB = 0.12 * rig.scale * wR;
+      let back = 0;
+      for (let it = 0; it < 2; it++) {
+        const sh = worldP(st.world, hand === 0 ? B.lArm : B.rArm);
+        const dx = punchAim[0] - sh[0], dz = punchAim[2] - sh[2];
+        const dl = Math.hypot(dx, punchAim[1] - sh[1], dz);
+        const hl = Math.hypot(dx, dz);
+        if (hl < 1e-4) break;
+        const x = (rMin - dl) / sig;
+        const need = sig * (x > 20 ? x : Math.log1p(Math.exp(x)));
+        const want = capB * Math.tanh((back + need * wR) / Math.max(1e-6, capB));
+        const k = want - back;
+        if (k < 0.002) break;
+        back = want;
+        spec.pelvis = [spec.pelvis[0] - dx / hl * k, spec.pelvis[1], spec.pelvis[2] - dz / hl * k];
+        clampPelvis(spec, st);
+        solveSpec(spec, rig, st.pose, st.world, false);
+      }
+      if (back > 0.002) return;
+    }
+    let moved = 0;
+    for (let it = 0; it < 2; it++) {
+      const { s: sf, d } = shortfall();
+      // The total carry eases into its cap (C¹), never past it.
+      const want = cap * Math.tanh((moved + sf * weight) / Math.max(1e-6, cap));
+      const k = want - moved;
+      if (k < 0.002) break;
+      moved = want;
+      spec.pelvis = [spec.pelvis[0] + d[0] * k, spec.pelvis[1] + d[1] * k * 0.7, spec.pelvis[2] + d[2] * k];
+      spec.spinePitch += k * 0.5;
       clampPelvis(spec, st);
-      // Never squat into a punch: past 6 cm of drop, lean instead.
-      if (spec.pelvis[1] < y0 - 0.06) spec.pelvis[1] = y0 - 0.06;
-      solveSpec(spec, st.rig, st.pose, st.world, false);
+      // Never squat into a punch: past 6 cm of drop, lean instead (eased).
+      const dropped = y0 - spec.pelvis[1];
+      if (dropped > 0.04) spec.pelvis[1] = y0 - (0.04 + 0.02 * Math.tanh((dropped - 0.04) / 0.02));
+      solveSpec(spec, rig, st.pose, st.world, false);
       if (elbow) retarget();
     }
     // Still short (a square or turned body jabbing from the far shoulder): turn
     // the chest so the punching shoulder comes round toward the target, up to
-    // 20° more than the technique's own turn.
+    // 20° more than the technique's own turn, in proportion to the shortfall.
     if (elbow) return;
     let turned = 0;
     const maxTurn = 20 * DEG * weight;
     for (let it = 0; it < 2; it++) {
-      const wp = fistPoint(st.world, st.rig, hand);
-      const err = Math.hypot(h.pos[0] - wp[0], h.pos[1] - wp[1], h.pos[2] - wp[2]);
-      if (err < 0.02 || turned >= maxTurn) break;
+      const { s: sf } = shortfall();
+      if (sf < 0.005 || turned >= maxTurn) break;
       const c = worldP(st.world, B.spine2);
-      const s = worldP(st.world, hand === 0 ? B.lArm : B.rArm);
-      const ax = s[0] - c[0], az = s[2] - c[2], bx = h.pos[0] - c[0], bz = h.pos[2] - c[2];
+      const sh = worldP(st.world, hand === 0 ? B.lArm : B.rArm);
+      const ax = sh[0] - c[0], az = sh[2] - c[2], bx = h.pos[0] - c[0], bz = h.pos[2] - c[2];
       const th = Math.atan2(az * bx - ax * bz, ax * bx + az * bz);
-      // Proportional to the shortfall, so it fades in continuously from 2 cm.
-      const mag = Math.min(Math.abs(th) * 0.6, (err - 0.02) / 0.25, maxTurn - turned);
+      const mag = Math.min(Math.abs(th) * 0.6, sf / 0.25, maxTurn - turned);
       const step = Math.sign(th) * mag;
-      if (Math.abs(step) < 0.01) break;
+      if (Math.abs(step) < 0.002) break;
       turned += Math.abs(step);
       spec.spineYaw += step;
-      solveSpec(spec, st.rig, st.pose, st.world, false);
+      solveSpec(spec, rig, st.pose, st.world, false);
     }
   }
 
@@ -944,7 +1005,7 @@ export class StandingAnimator implements Animator {
       const st = this.st[i];
       const ctx = ctxs[i];
       if (!ctx) continue;
-      const d = createDelta();
+      const d = resetDelta(scratchDelta);
       hitReactions(ctx, d);
       condition(ctx, d);
       forwardKinematics(st.world, st.pose, st.rig.rest);
@@ -956,7 +1017,7 @@ export class StandingAnimator implements Animator {
       add1(B.head, qypr(d.headYaw * 0.6, d.headPitch * 0.6, d.headRoll * 0.6));
       add1(B.spine2, qypr(d.spineYaw * 0.4, d.spinePitch * 0.4, d.spineRoll * 0.4));
       st.pose.face.set(d.face);
-      forwardKinematics(st.world, st.pose, st.rig.rest);
+      forwardKinematicsSubtree(st.world, st.pose, st.rig.rest, B.spine2);
     }
   }
 
@@ -999,8 +1060,7 @@ export class StandingAnimator implements Animator {
         ctx.vel = [0, 0, 0];
         ctx.my = null;
         ctx.incoming = [];
-        st.delta = createDelta();
-        const d = st.delta;
+        const d = resetDelta(st.delta);
         d.spinePitch += 16 * DEG;
         d.headPitch += 12 * DEG;
         d.pelvisOff[2] -= 0.08 * s;
@@ -1051,6 +1111,12 @@ export class StandingAnimator implements Animator {
     void now;
   }
 }
+
+/** Elbow flexion past which a punch's aim is too close for the arm: the body gives ground (`reachAssist`). */
+const ROOM_FLEX = 115 * Math.PI / 180;
+
+/** Scratch delta for the reactions drawn on top of an engaged pair. */
+const scratchDelta = createDelta();
 
 /** Natural frequency (rad/s) of the guard hands' critically damped follow (~45 ms lag on a ramp). */
 const HAND_FOLLOW_W = 45;

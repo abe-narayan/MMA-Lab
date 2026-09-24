@@ -110,6 +110,15 @@ export interface LoopStats {
   duration: number;
   mean: Float64Array;
   std: Float64Array;
+  /**
+   * The normalised residual (`loopResidual`) of every frame of the loop,
+   * frames × NCH (pass 3: sampling the clip and running FK on it twice per
+   * fighter per frame was the idle layer's whole cost; the loop is played
+   * frame-interpolated from this table instead, wrapping as the sampler does).
+   */
+  tab: Float64Array;
+  fps: number;
+  frames: number;
 }
 
 /** Residual channels of the idle / step layers. */
@@ -132,8 +141,30 @@ export class CapRig {
 
   constructor(readonly lib: MotionLibrary, readonly rig: RigInfo) {}
 
-  /** Sample clip `h` at clip seconds `t` and reduce it to features. */
+  /**
+   * Sample clip `h` at clip seconds `t` and reduce it to features. The last
+   * few results are kept (pass 3): a strike's layers read the same clip time
+   * several times a frame (body, both hands, the leg). The returned frame is
+   * shared: callers only read it.
+   */
   frame(h: number, t: number, loop = false, inPlace = false): CapFrame {
+    const key = h * 4 + (loop ? 2 : 0) + (inPlace ? 1 : 0);
+    const cache = this.cache;
+    for (let i = 0; i < cache.length; i++) {
+      const c = cache[i];
+      if (c.key === key && c.t === t) return c.f;
+    }
+    const f = this.sampleFrame(h, t, loop, inPlace);
+    const slot = cache[this.cacheNext];
+    slot.key = key; slot.t = t; slot.f = f;
+    this.cacheNext = (this.cacheNext + 1) % cache.length;
+    return f;
+  }
+
+  private readonly cache: { key: number; t: number; f: CapFrame }[] = Array.from({ length: 6 }, () => ({ key: -1, t: NaN, f: null as unknown as CapFrame }));
+  private cacheNext = 0;
+
+  private sampleFrame(h: number, t: number, loop: boolean, inPlace: boolean): CapFrame {
     const pose = this.pose;
     this.lib.sample(h, t, pose, { loop, rootMotion: inPlace ? 'inPlace' : 'full' });
     const s = this.rig.scale;
@@ -214,9 +245,12 @@ export class CapRig {
     const h = this.lib.handle(id);
     const info = this.lib.info(h);
     const n = info.frames;
-    const mean = new Float64Array(NCH), sq = new Float64Array(NCH), v = new Float64Array(NCH);
+    const mean = new Float64Array(NCH), sq = new Float64Array(NCH);
+    const tab = new Float64Array(n * NCH);
+    const v = new Float64Array(NCH);
     for (let f = 0; f < n; f++) {
       CapRig.channels(this.frame(h, f / info.fps, true, true), v);
+      tab.set(v, f * NCH);
       for (let c = 0; c < NCH; c++) { mean[c] += v[c]; sq[c] += v[c] * v[c]; }
     }
     const std = new Float64Array(NCH);
@@ -224,15 +258,22 @@ export class CapRig {
       mean[c] /= n;
       std[c] = Math.sqrt(Math.max(1e-12, sq[c] / n - mean[c] * mean[c]));
     }
-    const st: LoopStats = { h, duration: info.duration, mean, std };
+    for (let f = 0; f < n; f++) {
+      for (let c = 0; c < NCH; c++) tab[f * NCH + c] = clamp((tab[f * NCH + c] - mean[c]) / std[c], -3, 3);
+    }
+    const st: LoopStats = { h, duration: info.duration, mean, std, tab, fps: info.fps, frames: n };
     this.loops.set(id, st);
     return st;
   }
 
   /** Normalised residual (value - mean) / std of each channel at loop time t. */
   loopResidual(ls: LoopStats, t: number, out: Float64Array): Float64Array {
-    CapRig.channels(this.frame(ls.h, t, true, true), out);
-    for (let c = 0; c < NCH; c++) out[c] = clamp((out[c] - ls.mean[c]) / ls.std[c], -3, 3);
+    const n = ls.frames;
+    let ft = t * ls.fps;
+    ft = ((ft % n) + n) % n;
+    const i0 = Math.floor(ft), a = ft - i0, i1 = i0 + 1 === n ? 0 : i0 + 1;
+    const tb = ls.tab, o0 = i0 * NCH, o1 = i1 * NCH;
+    for (let c = 0; c < NCH; c++) out[c] = tb[o0 + c] + (tb[o1 + c] - tb[o0 + c]) * a;
     return out;
   }
 

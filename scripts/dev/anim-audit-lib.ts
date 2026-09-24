@@ -206,6 +206,13 @@ export interface AuditResult {
   groundPen: Record<Bucket, Stat>;
   interpen: { standing: Stat; engaged: Stat; limbStanding: Stat; engagedCore: Stat };
   contact: { surface: Stat; inRange: Stat; aim: Stat; count: number; missing: number };
+  /**
+   * Standing footwork (pass 3): every step a standing foot takes (the ball
+   * leaves the floor and lands again, not higher than a step — kicks and knees
+   * excluded), its length (plant to plant, horizontal) and swing time, and how
+   * far the displayed root travelled while standing (for steps per metre).
+   */
+  steps: { n: number; len: Stat; dur: Stat; hipPath: number; standMin: number };
   disagree: Record<string, number>;
   disagreeBase: Record<string, number>;
   evalMs: Stat;
@@ -231,6 +238,7 @@ function newResult(): AuditResult {
     groundPen: per(() => new Stat(1)),
     interpen: { standing: new Stat(2), engaged: new Stat(5), limbStanding: new Stat(5), engagedCore: new Stat(2) },
     contact: { surface: new Stat(5), inRange: new Stat(5), aim: new Stat(3), count: 0, missing: 0 },
+    steps: { n: 0, len: new Stat(8), dur: new Stat(0.5), hipPath: 0, standMin: 0 },
     disagree: {},
     disagreeBase: {},
     evalMs: new Stat(1),
@@ -266,6 +274,11 @@ export function mergeResults(rs: AuditResult[]): AuditResult {
     o.contact.aim.merge(r.contact.aim);
     o.contact.count += r.contact.count;
     o.contact.missing += r.contact.missing;
+    o.steps.n += r.steps.n;
+    o.steps.len.merge(r.steps.len);
+    o.steps.dur.merge(r.steps.dur);
+    o.steps.hipPath += r.steps.hipPath;
+    o.steps.standMin += r.steps.standMin;
     for (const [k, v] of Object.entries(r.disagree)) o.disagree[k] = (o.disagree[k] ?? 0) + v;
     for (const [k, v] of Object.entries(r.disagreeBase)) o.disagreeBase[k] = (o.disagreeBase[k] ?? 0) + v;
     o.evalMs.merge(r.evalMs);
@@ -282,7 +295,7 @@ export function mergeResults(rs: AuditResult[]): AuditResult {
 
 /** A debug layer reduced to its family (no clip ids, no reaction suffix). */
 function layerKey(layer: string): string {
-  return layer.replace(/[mocap [^]]*]/, '[mocap]').replace(/ +L2$/, '').replace(/^(grapple [^ ]+).*$/, '$1');
+  return layer.replace(/\[mocap [^\]]*\]/, '[mocap]').replace(/ +L2$/, '').replace(/^(grapple [^ ]+).*$/, '$1');
 }
 
 // ---- geometry helpers ------------------------------------------------------
@@ -431,7 +444,12 @@ export interface AuditOptions {
 
 interface FState {
   prevToe: [V3 | null, V3 | null];
+  /** Step tracking: where each foot last stood, when it lifted, how high it went (null: on the floor). */
+  plantAt: [V3 | null, V3 | null];
+  liftT: [number | null, number | null];
+  liftMax: [number, number];
   prevHip: V3 | null;
+  prevRoot: V3 | null;
   prevRel: Float64Array | null;
   hipSpeedEma: number;
   /** Per-bone angular speed (deg / nominal frame) one and two frames back. */
@@ -533,7 +551,7 @@ export function audit(rec: Recording, opts: AuditOptions = {}): AuditResult {
   const post = opts.post ?? 0;
 
   const fs: FState[] = rec.rests.map(() => ({
-    prevToe: [null, null], prevHip: null, prevRel: null, hipSpeedEma: 0, freezeRun: 0, w1: null, w2: null, d1: 0, d2: 0, prevCtx: null, run: 0,
+    prevToe: [null, null], plantAt: [null, null], liftT: [null, null], liftMax: [0, 0], prevHip: null, prevRoot: null, prevRel: null, hipSpeedEma: 0, freezeRun: 0, w1: null, w2: null, d1: 0, d2: 0, prevCtx: null, run: 0,
     lastStanceChange: -1e9, lastStance: '', lastPosture: '', postureSince: -1e9, lastMode: '', modeSince: -1e9,
   }));
   const relA = new Float64Array(POP_BONES.length * 4);
@@ -609,6 +627,26 @@ export function audit(rec: Recording, opts: AuditOptions = {}): AuditResult {
           if (slide > 0.5) note(`slide:${b}`, { bout: rec.spec.name, t: tLabel, fighter: i, what: `foot ${side} slide cm/frame`, value: slide, layer });
         }
         f.prevToe[side] = onFloor ? toe : null;
+        // ---- steps (standing only; a seek or another bucket forgets the foot) ----
+        if (b !== 'standing' || dt <= 0) { f.plantAt[side] = null; f.liftT[side] = null; continue; }
+        if (onFloor) {
+          const lt = f.liftT[side];
+          const from = f.plantAt[side];
+          if (lt !== null && from) {
+            const air = tLabel - lt;
+            // A step: back down within 0.8 s, never higher than a step (a kick or a knee lifts the ankle past 25 cm).
+            if (air < 0.8 && f.liftMax[side] < 0.25 * s) {
+              R.steps.n++;
+              R.steps.len.add(Math.hypot(toe[0] - from[0], toe[2] - from[2]) * 100 / s);
+              R.steps.dur.add(air);
+            }
+          }
+          f.liftT[side] = null;
+          f.plantAt[side] = toe;
+        } else if (f.plantAt[side]) {
+          if (f.liftT[side] === null) { f.liftT[side] = tLabel; f.liftMax[side] = 0; }
+          f.liftMax[side] = Math.max(f.liftMax[side], P(w, side === 0 ? B.lFoot : B.rFoot)[1] - rest.head[B.lFoot * 3 + 1]!);
+        }
       }
       // ---- hip freeze (open standing only) ----
       const hip = P(w, B.hips);
@@ -626,6 +664,15 @@ export function audit(rec: Recording, opts: AuditOptions = {}): AuditResult {
         f.d1 = d0;
       }
       if (!(f.prevHip && dt > 0)) { f.d1 = 0; f.d2 = 0; }
+      // Steps per metre: of the displayed root's travel (the sim's recorded
+      // path as the animator places it, smoothed), not the hips' (sway, lunges
+      // and weight shifts move the hips without any travel).
+      const root = an.fighterState(i)!.displayRoot;
+      if (b === 'standing' && f.prevRoot && dt > 0) {
+        R.steps.hipPath += Math.hypot(root[0] - f.prevRoot[0], root[2] - f.prevRoot[2]) / s;
+        R.steps.standMin += dt / 60;
+      }
+      f.prevRoot = [root[0], root[1], root[2]];
       f.prevHip = hip;
       if (b === 'standing' && dt > 0) {
         const nx = F1?.fighters[i];
@@ -921,6 +968,10 @@ export function summarize(r: AuditResult): Record<string, string> {
   o['contact.surface (n, median / p90 / max cm, >5cm)'] = `${c.surface.n}, ${f2(c.surface.pct(0.5))} / ${f2(c.surface.pct(0.9))} / ${f2(c.surface.max)}, ${pc(c.surface.over, c.surface.n)}`;
   o['contact.inRange (recorded ≤ 1.6 m punch / 1.9 m kick: n, median / p90 / max cm, >5cm)'] = `${c.inRange.n}, ${f2(c.inRange.pct(0.5))} / ${f2(c.inRange.pct(0.9))} / ${f2(c.inRange.max)}, ${pc(c.inRange.over, c.inRange.n)}`;
   o['contact.aim (IK error: median / p90 / max cm)'] = `${f2(c.aim.pct(0.5))} / ${f2(c.aim.pct(0.9))} / ${f2(c.aim.max)}`;
+  const sp = r.steps;
+  o['steps (per metre of root travel / per standing minute)'] = `${f2(sp.n / Math.max(1e-6, sp.hipPath))} / ${f2(sp.n / Math.max(1e-6, sp.standMin))}`;
+  o['steps.length (cm at 1.73 m: p10 / median / p90, <8cm)'] = `${f2(sp.len.pct(0.1))} / ${f2(sp.len.pct(0.5))} / ${f2(sp.len.pct(0.9))}, ${pc(sp.len.n - sp.len.over, sp.len.n)}`;
+  o['steps.swing (s: p10 / median / p90)'] = `${f2(sp.dur.pct(0.1))} / ${f2(sp.dur.pct(0.5))} / ${f2(sp.dur.pct(0.9))}`;
   for (const k of Object.keys(r.disagreeBase).sort()) o[`disagree.${k} (% of applicable frames)`] = `${pc(r.disagree[k] ?? 0, r.disagreeBase[k] ?? 0)} of ${r.disagreeBase[k]}`;
   o['evaluate ms (2 fighters, all modes: mean / p95)'] = `${f2(r.evalMs.mean)} / ${f2(r.evalMs.pct(0.95))}`;
   o['evaluate ms (2 fighters standing: mean / median / p95)'] = `${f2(r.evalStandMs.mean)} / ${f2(r.evalStandMs.pct(0.5))} / ${f2(r.evalStandMs.pct(0.95))}`;

@@ -16,7 +16,7 @@
  * positive roll = lean right).
  */
 import {
-  B, BONE_COUNT, boneIndex, forwardKinematics,
+  B, BONE_COUNT, boneIndex, forwardKinematics, forwardKinematicsSubtree,
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
 import { KNEE_MAX_FLEX, LIMBS, foldReach, solveTwoBone } from '../rig/ik';
@@ -315,17 +315,19 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
     const qNeck = qslerp(chest, qHead, 0.42);
     setWorldRot(pose, world, B.neck, B.spine2, qNeck);
     setLocal(pose, B.head, qmul(qconj(qNeck), qHead));
-    forwardKinematics(world, pose, rest);
+    forwardKinematicsSubtree(world, pose, rest, B.neck);
 
     // Legs.
     for (const side of [0, 1] as const) {
       const f = spec.feet[side];
       const chain = side === 0 ? LIMBS.lLeg : LIMBS.rLeg;
       let ankle = ankleOf(rig, side, f);
-      if (!f.ankle) ankle = softReach(worldP(world, chain.upper), ankle, rig);
+      const hip = worldP(world, chain.upper);
+      if (!f.ankle) ankle = softReach(hip, ankle, rig);
       solveTwoBone(pose, world, rest, chain, ankle, f.pole, 1, KNEE_MAX_FLEX);
     }
-    forwardKinematics(world, pose, rest);
+    forwardKinematicsSubtree(world, pose, rest, B.lUpLeg);
+    forwardKinematicsSubtree(world, pose, rest, B.rUpLeg);
     for (const side of [0, 1] as const) {
       const f = spec.feet[side];
       const shinB = side === 0 ? B.lLeg : B.rLeg;
@@ -334,7 +336,8 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
       setWorldRot(pose, world, footB, shinB, qmul(qy(f.yaw), qx(f.lift + f.airPitch)));
       setLocal(pose, toeB, qx(-(f.lift + f.airPitch) * f.toeFlat * 0.85));
     }
-    forwardKinematics(world, pose, rest);
+    forwardKinematicsSubtree(world, pose, rest, B.lFoot);
+    forwardKinematicsSubtree(world, pose, rest, B.rFoot);
   }
 
   // Arms.
@@ -347,7 +350,9 @@ export function solveSpec(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
     setLocal(pose, fb.bone, fb.thumb ? qy(a * (fb.side === 0 ? 1 : 1) * 0.6) : qz(a));
   }
   pose.face.set(spec.face);
-  forwardKinematics(world, pose, rest);
+  // Only the forearms down changed since the arms were solved (the twist, the fingers).
+  forwardKinematicsSubtree(world, pose, rest, B.lForeArm);
+  forwardKinematicsSubtree(world, pose, rest, B.rForeArm);
 }
 
 /**
@@ -372,9 +377,24 @@ function armPole(world: WorldPose, side: 0 | 1, sh: V3, target: V3, pole: V3): V
   const c0 = Math.cos(POLE_CONE);
   const k = clamp((c - c0) / (1 - c0), 0, 1);
   if (k <= 0) return pole;
-  const out = qrot(worldQ(world, B.spine2), [side === 0 ? 1 : -1, 0, 0]);
+  // Out to the arm's own side, less its part along the reach line; when the
+  // reach itself points out to that side (a jab from a chest bladed ~90° off
+  // the target), "out" is along the line and would not move the pole off it
+  // (measured: the fist then ended 13-17 cm off a target 35-45 cm from the
+  // shoulder): the elbow goes down instead.
+  const cq = worldQ(world, B.spine2);
+  const u: V3 = [v[0] / vl, v[1] / vl, v[2] / vl];
+  const out = qrot(cq, [side === 0 ? 1 : -1, 0, 0]);
+  let dir = madd(out, u, -dot(out, u));
+  const ol = len(dir);
+  if (ol < 0.6) {
+    const down = qrot(cq, [0, -1, 0]);
+    const dp = madd(down, u, -dot(down, u));
+    dir = madd(scale(dir, ol / 0.6), dp, 1 - ol / 0.6);
+  }
+  dir = norm(dir);
   const w = k * k * (3 - 2 * k) * pl;
-  return [pole[0] + out[0] * w, pole[1] + out[1] * w, pole[2] + out[2] * w];
+  return [pole[0] + dir[0] * w, pole[1] + dir[1] * w, pole[2] + dir[2] * w];
 }
 /**
  * A guard / defence hand is kept in FRONT of its shoulder, at least the reach
@@ -432,7 +452,7 @@ export function solveHand(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
       const reachable = len(sub(target, sh)) < rig.armLen * 0.995;
       for (let it = 0; it < (reachable ? 3 : 1); it++) {
         solveTwoBone(pose, world, rest, chain, fold(target), pole, h.w);
-        forwardKinematics(world, pose, rest);
+        forwardKinematicsSubtree(world, pose, rest, chain.upper);
         const fp = fistPoint(world, rig, side);
         const err = sub(h.pos, fp);
         if (len(err) < 0.002) break;
@@ -440,7 +460,7 @@ export function solveHand(spec: BodySpec, rig: RigInfo, pose: Pose, world: World
       }
     } else {
       solveTwoBone(pose, world, rest, chain, fold(target), pole, h.w);
-      forwardKinematics(world, pose, rest);
+      forwardKinematicsSubtree(world, pose, rest, chain.upper);
     }
     // Pronate / supinate the forearm so the palm faces `palm`.
     const fore = side === 0 ? B.lForeArm : B.rForeArm;

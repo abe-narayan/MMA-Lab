@@ -23,7 +23,7 @@
  * `mat` relative to the own hips) scales by that body's `s`.
  */
 import {
-  B, BONE_PARENT, forwardKinematics, resetPose,
+  B, BONE_PARENT, forwardKinematics, forwardKinematicsSubtree, resetPose,
   type Pose, type RestSkeleton, type WorldPose,
 } from '../../rig/skeleton';
 import { LIMBS, solveTwoBone, type LimbChain } from '../../rig/ik';
@@ -115,7 +115,7 @@ export function solvePair(spec: PairSpec, buf: SolveBuffers, contacts?: ContactR
   // 2. heads
   for (const i of [0, 1] as const) {
     placeHead(bodies[i], i, st[i], buf);
-    forwardKinematics(worlds[i], poses[i], rests[i]);
+    forwardKinematicsSubtree(worlds[i], poses[i], rests[i], B.neck);
   }
   // 2b. bodies may press but not pass through each other: slide apart any
   // torso/head overlap before the limbs are solved (so grips stay exact).
@@ -137,7 +137,7 @@ export function solvePair(spec: PairSpec, buf: SolveBuffers, contacts?: ContactR
           if (k === 'lArm' || k === 'rArm') solveArm(body[k], k, i, st[i], sP, buf);
           else solveLeg(body[k], k, i, st[i], sP, buf);
         }
-        forwardKinematics(worlds[i], poses[i], rests[i]);
+        fkLimbs(i, buf);
       }
     }
     if (iter === 2) break;
@@ -171,7 +171,7 @@ export function solvePair(spec: PairSpec, buf: SolveBuffers, contacts?: ContactR
       const c = legCache[i][k];
       if (body[k].alt && c && c.short > ALT_SHORT) { solveLeg(body[k], k, i, st[i], sP, buf, true); changed = true; }
     }
-    if (changed) forwardKinematics(worlds[i], poses[i], rests[i]);
+    if (changed) fkLimbs(i, buf);
   }
   // 4c. one more pass for grips on the partner's limbs, which may have moved.
   for (const i of [0, 1] as const) {
@@ -194,7 +194,7 @@ export function solvePair(spec: PairSpec, buf: SolveBuffers, contacts?: ContactR
         }
       } else solveLeg(body[k], k, i, st[i], sP, buf, legCache[i][k]?.alt ?? false);
     }
-    forwardKinematics(worlds[i], poses[i], rests[i]);
+    fkLimbs(i, buf);
   }
   // 4d. grips on the partner's shoulder, then on his limbs, once more, with
   // every clavicle left where it is: the "shoulder" socket rides on the
@@ -216,7 +216,7 @@ export function solvePair(spec: PairSpec, buf: SolveBuffers, contacts?: ContactR
         solveArm(body[k], k, i, st[i], sP, buf, c.alt, keep);
         changed = true;
       }
-      if (changed) forwardKinematics(worlds[i], poses[i], rests[i]);
+      if (changed) fkLimbs(i, buf);
     }
   }
   // 5. hands and feet
@@ -224,7 +224,7 @@ export function solvePair(spec: PairSpec, buf: SolveBuffers, contacts?: ContactR
     const body = bodies[i];
     finishHand(body.lArm, 'lArm', i, st[i], sP, buf);
     finishHand(body.rArm, 'rArm', i, st[i], sP, buf);
-    forwardKinematics(worlds[i], poses[i], rests[i]);
+    forwardKinematicsSubtree(worlds[i], poses[i], rests[i], B.lHand); forwardKinematicsSubtree(worlds[i], poses[i], rests[i], B.rHand);
     if (body.face) {
       for (const [ch, v] of Object.entries(body.face)) {
         const idx = FACE_INDEX[ch];
@@ -241,6 +241,19 @@ const FACE_INDEX = FACE as unknown as Record<string, number>;
 // ---------------------------------------------------------------------------
 // Torso
 // ---------------------------------------------------------------------------
+
+/**
+ * Forward kinematics of what the limb passes change (both clavicles and arms,
+ * both legs): the torso and the head are current. A full pass after every
+ * limb pass was most of the pair solver's cost.
+ */
+function fkLimbs(i: 0 | 1, buf: SolveBuffers): void {
+  const { poses, worlds, rests } = buf;
+  forwardKinematicsSubtree(worlds[i], poses[i], rests[i], B.lShoulder);
+  forwardKinematicsSubtree(worlds[i], poses[i], rests[i], B.rShoulder);
+  forwardKinematicsSubtree(worlds[i], poses[i], rests[i], B.lUpLeg);
+  forwardKinematicsSubtree(worlds[i], poses[i], rests[i], B.rUpLeg);
+}
 
 function placeTorso(body: BodySpec, i: 0 | 1, bs: BodyState, sP: number, buf: SolveBuffers): void {
   const pose = buf.poses[i];
@@ -507,7 +520,7 @@ function solveArm(
   // `keepClavicle` (the last passes): the shoulder stays where the earlier
   // passes put it — the partner may be holding it.
   if (!keepClavicle) setQ(pose.local, clav, localClav);
-  forwardKinematics(world, pose, rest);
+  forwardKinematicsSubtree(world, pose, rest, clav);
   // A grip right beside the own shoulder (the hand cupping the partner's elbow
   // in a collar tie, a cage pin, the locked hands of a rear body lock) would
   // fold the elbow past its range (measured: 160-170°, 4 % of all frames). The
@@ -531,7 +544,7 @@ function solveArm(
       const R = qAxis(norm(axis), a); // turns the shoulder away from the hand
       const wq = getQ(world.quat, clav);
       setQ(pose.local, clav, qMul(qConj(parentQ), qMul(R, wq)));
-      forwardKinematics(world, pose, rest);
+      forwardKinematicsSubtree(world, pose, rest, clav);
     }
   }
 
@@ -601,7 +614,7 @@ function solveLeg(
   spec: LegSpec, k: 'lLeg' | 'rLeg', i: 0 | 1, bs: BodyState, sP: number, buf: SolveBuffers, useAlt = false,
 ): void {
   solveLegCore(spec, k, i, bs, sP, buf, useAlt);
-  forwardKinematics(buf.worlds[i], buf.poses[i], buf.rests[i]);
+  forwardKinematicsSubtree(buf.worlds[i], buf.poses[i], buf.rests[i], k === 'lLeg' ? B.lUpLeg : B.rUpLeg);
   if (k === 'lLeg') finishFoot(spec, B.lLeg, B.lFoot, i, bs, buf);
   else finishFoot(spec, B.rLeg, B.rFoot, i, bs, buf);
 }

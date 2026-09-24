@@ -32,7 +32,7 @@ import {
 } from './math';
 import { ankleOf, worldP, type BodySpec } from './spec';
 import type { Ctx, Delta } from './state';
-import type { GuardPose } from './stance';
+import { footNow, type GuardPose } from './stance';
 import {
   aimPoint, envelope, kickGeometry, lungeFor, strikeHands, type StrikeInfo,
 } from './strikes';
@@ -258,7 +258,7 @@ export function capStrikeBody(cap: CapRig, ctx: Ctx, tm: ActionTiming, info: Str
   // Planted feet: pivot on the ball and lift the heel the way the performer did.
   for (const side of [0, 1] as const) {
     if (kick && side === p.side) continue;
-    const pv = clamp(da(f.fYaw[side], f0.fYaw[side], fE.fYaw[side]), -1.4, 1.4);
+    const pv = pivotRoll(da(f.fYaw[side], f0.fYaw[side], fE.fYaw[side]));
     d.feet[side].pivot += pv * heelK * rotK;
     const hl = dl(f.fPitch[side], f0.fPitch[side], fE.fPitch[side]);
     d.feet[side].liftAdd += clamp(hl, -0.2, 0.9) * heelK;
@@ -410,6 +410,17 @@ export function capStrikeHands(
 function scaleV(v: V3, k: number): V3 { return [v[0] * k, v[1] * k, v[2] * k]; }
 
 /**
+ * A captured foot pivot (the wrapped change of the foot's yaw), limited to
+ * ±1.2 rad and eased back to 0 as it nears ±π — where the wrap makes it
+ * ambiguous (a lifted foot pointing down has no yaw): the old ±1.4 clamp
+ * flipped a planted foot 160° in one frame when the capture's yaw crossed π.
+ */
+function pivotRoll(x: number): number {
+  const a = Math.abs(x), m = 1.2;
+  return a <= m ? x : Math.sign(x) * m * Math.max(0, Math.PI - a) / (Math.PI - m);
+}
+
+/**
  * The kicking leg on the captured path. Pass 1 (`estimate`) writes an ankle
  * override into the delta; pass 2 re-aims on the defender's solved body and
  * re-solves the leg.
@@ -444,13 +455,18 @@ export function capLegPass(
   const hipJ: V3 = estimate
     ? toWorld(fr, [(kf === 0 ? 1 : -1) * 0.1 * s, rig.hipsY - 0.05 * s, (kf === ctx.lead ? 0.12 : -0.12) * s])
     : worldP(w, kf === 0 ? B.lUpLeg : B.rUpLeg);
+  const fn = footNow(st, kf, now);
   const planted = ankleOf(rig, kf, {
-    ball: st.feet[kf].ball, yaw: st.feet[kf].yaw, lift: 0, airPitch: 0, pole: [0, 0, 0], toeFlat: 1, ankle: null,
+    ball: fn.ball, yaw: fn.yaw, lift: 0, airPitch: 0, pole: [0, 0, 0], toeFlat: 1, ankle: null,
   });
   const geo = kickGeometry(ctx, tm, info, hipJ, T);
   const tk = st.tiers.kick;
   const noReset = hash01(st.seed, Math.floor(tm.commit), 5) < tk.kickReturnSkip;
-  const land = noReset ? toWorld(fr, [(kf === 0 ? 1 : -1) * 0.2 * s, 0.07 * s, 0.1 * s]) : planted;
+  // Untrained: down square in front (the ankle where that ball puts it; see `legPass`).
+  const ballL = toWorld(fr, [(kf === 0 ? 1 : -1) * 0.2 * s, 0, 0.1 * s]);
+  const land = noReset
+    ? ankleOf(rig, kf, { ball: [ballL[0], 0, ballL[2]], yaw: fr.yaw, lift: 0, airPitch: 0, pole: [0, 0, 0], toeFlat: 1, ankle: null })
+    : planted;
   const tW = weaponTime(p, now);
   const f = cap.frame(p.h, tW);
   const rel = (x: CapFrame): V3 => rot(sub(x.ank[kf], x.hip[kf]));
@@ -477,8 +493,8 @@ export function capLegPass(
       hipJ[1] + cT[1] + (1 - w2) * (rc[1] - cC[1]) + w2 * (rE[1] - cE[1]),
       hipJ[2] + cT[2] + (1 - w2) * (rc[2] - cC[2]) + w2 * (rE[2] - cE[2]),
     ];
-    if (noReset && e.rec > 0.6) {
-      ctl.land = [land[0], 0, land[2]];
+    if (noReset && e.rec > 0.6 && e.rec < 0.88) {
+      ctl.land = [ballL[0], 0, ballL[2]];
       ctl.landYaw = fr.yaw;
     }
   }

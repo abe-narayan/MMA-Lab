@@ -18,7 +18,7 @@
 import { GRAPPLING_EDGES, POSITIONS, type EngagementSnapshot, type FighterSnapshot, type SimEvent } from '../../../sim';
 import type { GrappleContext, GrappleResult, GrappleSolver } from '../grappleApi';
 import {
-  blendPose, createPose, forwardKinematics, type Pose, type WorldPose, BONE_COUNT,
+  blendPose, createPose, forwardKinematics, translateWorld, type Pose, type WorldPose, BONE_COUNT,
 } from '../../rig/skeleton';
 import { Composer, copy } from './compose';
 import { floorFix } from '../blend';
@@ -461,7 +461,8 @@ function separateOutput(pa: Pose, pb: Pose, wa: WorldPose, wb: WorldPose, ra: Re
         d = h > 1e-3 ? [d[0] / h, 0, d[2] / h] : [0, 0, 0];
       }
       p.rootPos[0] += d[0] * push * k; p.rootPos[1] += d[1] * push * k; p.rootPos[2] += d[2] * push * k;
-      forwardKinematics(w, p, r);
+      // A pure root translation: shift the world pose (no full FK).
+      translateWorld(w, d[0] * push * k, d[1] * push * k, d[2] * push * k);
     }
   }
 }
