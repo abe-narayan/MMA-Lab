@@ -34,3 +34,6 @@ docs/DESIGN_FULL.md
 
 # raw third-party downloads for scripts/assets/* (only converted outputs are committed)
 .cache/
+
+# calibration batch runs (scripts/batch); reports are regenerated from results.jsonl
+runs/

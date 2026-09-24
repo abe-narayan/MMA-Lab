@@ -15,7 +15,9 @@
     "export-bout": "tsx scripts/exportBout.ts",
     "verify": "tsx scripts/verify.ts",
     "consistency": "tsx scripts/consistency.ts",
-    "calibrate": "tsx scripts/calibrate.ts"
+    "calibrate": "tsx scripts/calibrate.ts",
+    "batch": "tsx scripts/batch/run.ts",
+    "calibrate:report": "tsx scripts/calibrate/report.ts"
   },
   "dependencies": {
     "react": "^18.3.1",
