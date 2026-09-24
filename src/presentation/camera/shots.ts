@@ -76,7 +76,7 @@ export const SHOTS: Readonly<Record<ShotKind, ShotSpec>> = {
     aimOmega: 1.2, zoomInOmega: 0.8, zoomOutOmega: 2, handheldDeg: 0.03, dof: 0, shake: 0, minFrameM: 4,
   },
   corner: {
-    label: 'CORNER', wide: false, framing: 'face', safe: 0.55, fovMin: 8, fovMax: 45,
+    label: 'CORNER', wide: false, framing: 'face', safe: 0.55, fovMin: 8, fovMax: 55,
     aimOmega: 2.4, zoomInOmega: 1.2, zoomOutOmega: 4, handheldDeg: 0.45, dof: 0, shake: 0, minFrameM: 0.75,
   },
   finish: {
@@ -102,6 +102,10 @@ export const PLACEMENT = {
   /** Handheld lens distance outside the fence line (through-the-mesh shots). */
   handheldOutsideM: 0.35,
   handheldHeightM: 1.55,
+  /** The handheld steps back along the apron when a fighter is nearer the lens than this (m)... */
+  handheldMinSubjectM: 1.5,
+  /** ...by at most this much (m). */
+  handheldBackOffM: 0.9,
   /** Over-the-top handheld: lens this far above the top rail. */
   overRailM: 0.5,
   /** Low handheld on the apron for ground work. */

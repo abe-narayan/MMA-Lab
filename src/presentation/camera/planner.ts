@@ -22,7 +22,7 @@ import { standInPoints } from './keypoints';
 import { cornerSpots } from '../corner/spots';
 import { atAzimuth, seeded, type V3, wrapAngle } from './math';
 import {
-  type Capsule, fighterCapsules, occlusion, type SamplePoint, standingCapsules, subjectSamples,
+  type Capsule, fighterCapsules, OCCLUSION_LIMIT, occlusion, type SamplePoint, standingCapsules, subjectSamples,
 } from './occlusion';
 import { PLACEMENT, type ShotKind } from './shots';
 
@@ -68,6 +68,8 @@ export const CUT_RULES = {
 } as const;
 
 const MIN_SHOT_TICKS = Math.round(CUT_RULES.minShotS / TICK_S);
+/** A handheld the referee keeps hidden for this long is re-placed (a cut, under the usual rules). */
+const BLOCKED_REPOSITION_TICKS = 12;
 const DEBOUNCE_TICKS = Math.round(CUT_RULES.situationDebounceS / TICK_S);
 const KD_HOLD_TICKS = Math.round(CUT_RULES.kdHoldS / TICK_S);
 
@@ -265,8 +267,9 @@ export function chooseOperator(
   const live = fs.length > 0 ? fs : frame.fighters;
   const mx = live.reduce((s, f) => s + f.x, 0) / Math.max(1, live.length);
   const mz = live.reduce((s, f) => s + f.z, 0) / Math.max(1, live.length);
-  const a = frame.fighters[0];
-  const b = frame.fighters[1];
+  // The fighters' line: the subjects' own when there are two (a 2v2's focus pair).
+  const a = fs.length >= 2 ? fs[0] : frame.fighters[0];
+  const b = fs.length >= 2 ? fs[1] : frame.fighters[1];
   let lx = 0;
   let lz = 0;
   let hasLine = false;
@@ -317,7 +320,10 @@ export function chooseOperator(
       const cam: V3 = [p[0], PLACEMENT.handheldHeightM, p[2]];
       hidden = occlusion(cam, lines.samples, lines.occluders);
     }
-    const score = d + along * 2.4 + (wrongSide ? 40 : 0) + postPenalty + behindPost + same
+    // Too close is as bad as too far: a fighter against the fence right at
+    // the lens cannot be framed, even at the widest (camera polish pass).
+    const tooClose = Math.max(0, PLACEMENT.handheldMinSubjectM + 0.6 - d) * 3;
+    const score = d + tooClose + along * 2.4 + (wrongSide ? 40 : 0) + postPenalty + behindPost + same
       + hidden * OCCLUSION_WEIGHT + seeded(seed, `${salt}:${i}`) * 0.5;
     if (score < bestScore) {
       bestScore = score;
@@ -325,6 +331,56 @@ export function chooseOperator(
     }
   });
   return best;
+}
+
+/**
+ * Multi-fighter bouts (camera polish pass): whom the lens should frame (null =
+ * everyone). The pair with the most going on — engaged now, strikes,
+ * takedowns and knockdowns between them over the last 4 s (and, when
+ * `lookahead`, the next 2 s of a recording) — plus anyone within 1.8 m of
+ * them. A pure function of the tick and the (tick-sorted) events, so the edit,
+ * the operators and a seek all agree.
+ */
+export function focusGroup(frame: TickSnapshot, events: readonly SimEvent[], lookahead: boolean): number[] | null {
+  const fs = frame.fighters;
+  if (fs.length <= 2) return null;
+  const from = frame.tick - 40;
+  const to = lookahead ? frame.tick + 20 : frame.tick;
+  let lo = 0;
+  let hi = events.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (events[m]!.tick < from) lo = m + 1; else hi = m; }
+  let best = -Infinity;
+  let ba = -1;
+  let bb = -1;
+  for (let i = 0; i < fs.length; i++) {
+    const a = fs[i]!;
+    if (a.posture === 'out') continue;
+    for (let j = i + 1; j < fs.length; j++) {
+      const b = fs[j]!;
+      if (b.posture === 'out') continue;
+      let sc = -0.5 * Math.hypot(a.x - b.x, a.z - b.z);
+      for (const g of frame.engagements) {
+        if ((g.a === a.id && g.b === b.id) || (g.a === b.id && g.b === a.id)) sc += 4;
+      }
+      for (let k = lo; k < events.length && events[k]!.tick <= to; k++) {
+        const e = events[k]!;
+        if (e.kind !== 'strike' && e.kind !== 'takedown' && e.kind !== 'knockdown') continue;
+        if ((e.actor === a.id && e.target === b.id) || (e.actor === b.id && e.target === a.id)) sc += 1;
+      }
+      if (sc > best + 1e-9) { best = sc; ba = i; bb = j; }
+    }
+  }
+  if (ba < 0) return null;
+  const A = fs[ba]!;
+  const Bf = fs[bb]!;
+  const cx = (A.x + Bf.x) / 2;
+  const cz = (A.z + Bf.z) / 2;
+  const ids: number[] = [];
+  for (const f of fs) {
+    if (f.posture === 'out') continue;
+    if (f === A || f === Bf || Math.hypot(f.x - cx, f.z - cz) < 1.8) ids.push(f.id);
+  }
+  return ids;
 }
 
 /**
@@ -424,6 +480,8 @@ export interface PlannerOptions {
    */
   roundStarts?: readonly number[];
   breakSeconds?: number;
+  /** The whole event stream (offline): multi-fighter focus with look-ahead. */
+  events?: readonly SimEvent[];
 }
 
 export class ShotPlanner {
@@ -461,6 +519,7 @@ export class ShotPlanner {
     this.seed = opts.seed;
     this.ca = opts.arena;
     this.roundStarts = opts.roundStarts ?? [];
+    this.allEvents = opts.events ?? null;
     this.breakTicks = Math.round((opts.breakSeconds ?? 60) / TICK_S);
   }
 
@@ -498,7 +557,13 @@ export class ShotPlanner {
       }, frame, tick);
     }
 
-    for (const e of events) this.onEvent(e, frame);
+    for (const e of events) {
+      this.onEvent(e, frame);
+      if (!this.allEvents && (e.kind === 'strike' || e.kind === 'takedown' || e.kind === 'knockdown')) {
+        this.seenEvents.push(e);
+        if (this.seenEvents.length > 400) this.seenEvents.splice(0, 200);
+      }
+    }
 
     // Situation, debounced: a clinch that lasts 0.3 s is not worth a cut.
     const raw = classify(frame);
@@ -632,8 +697,11 @@ export class ShotPlanner {
     };
     const operatorDrifted = (): boolean => {
       // Re-place a handheld only when another spot on the apron is clearly
-      // better than the one on air (the action walked away from it).
+      // better than the one on air (the action walked away from it), or the
+      // referee has stood in front of it for a while and the operator cannot
+      // walk round him on his stretch of apron (camera polish pass).
       if (cur.kind !== 'cageside' && cur.kind !== 'ground') return false;
+      if (this.handheldBlocked(frame, cur, tick)) return true;
       if (tick % 5 !== 0) return false;
       const fs = frame.fighters;
       const mx = fs.reduce((s, f) => s + f.x, 0) / fs.length;
@@ -750,6 +818,43 @@ export class ShotPlanner {
     }
   }
 
+  /**
+   * True once the referee (the tracker's placement) has hidden more than
+   * `OCCLUSION_LIMIT` of the on-air handheld's subjects from its spot and from
+   * the dodge offsets the director can reach on that panel, for
+   * `BLOCKED_REPOSITION_TICKS` in a row.
+   */
+  private handheldBlocked(frame: TickSnapshot, cur: ShotPlanEntry, tick: number): boolean {
+    const ca = this.ca;
+    if (!this.refNow || ca.shape === 'unbounded' || cur.startTick !== this.blockedEntryTick) {
+      this.blockedEntryTick = cur.startTick;
+      this.blockedSince = -1;
+      if (!this.refNow || ca.shape === 'unbounded') return false;
+    }
+    const lines = sightLines(frame, cur.subjects.length ? cur.subjects : this.focusOf(frame), { referee: this.refNow });
+    if (lines.samples.length === 0) return false;
+    const h = cur.kind === 'ground' ? PLACEMENT.groundHeightM : PLACEMENT.handheldHeightM;
+    let clear = false;
+    for (const o of [0, 0.14, -0.14, 0.26, -0.26]) {
+      const az = cur.azimuth + o;
+      const p = atAzimuth(az, wallDistanceAt(ca, az) + PLACEMENT.handheldOutsideM, h);
+      if (occlusion(p, lines.samples, lines.occluders) <= OCCLUSION_LIMIT) { clear = true; break; }
+    }
+    if (clear) { this.blockedSince = -1; return false; }
+    if (this.blockedSince < 0) this.blockedSince = tick;
+    return tick - this.blockedSince >= BLOCKED_REPOSITION_TICKS;
+  }
+  private blockedSince = -1;
+  private readonly allEvents: readonly SimEvent[] | null;
+  private readonly seenEvents: SimEvent[] = [];
+
+  /** Whom the shots of a multi-fighter bout are about at this frame ([] = everyone). */
+  private focusOf(frame: TickSnapshot): number[] {
+    if (frame.fighters.length <= 2) return [];
+    return focusGroup(frame, this.allEvents ?? this.seenEvents, this.allEvents !== null) ?? [];
+  }
+  private blockedEntryTick = -1;
+
   private tryCommit(frame: TickSnapshot, tick: number): void {
     const p = this.pending;
     if (!p) return;
@@ -794,7 +899,7 @@ export class ShotPlanner {
       case 'ground': {
         const prev = this.cur && (this.cur.kind === 'cageside' || this.cur.kind === 'ground' || this.cur.kind === 'finish')
           ? this.cur.azimuth : undefined;
-        azimuth = chooseOperator(this.ca, frame, subjects, this.seed, `op:${n}`, prev, sight);
+        azimuth = chooseOperator(this.ca, frame, subjects.length ? subjects : this.focusOf(frame), this.seed, `op:${n}`, prev, sight);
         break;
       }
       case 'corner':
@@ -907,7 +1012,7 @@ export function planShots(
 ): ShotPlan {
   const strikes = new StrikeIndex(events);
   const roundStarts = opts.roundStarts ?? events.filter((e) => e.kind === 'roundStart').map((e) => e.tick);
-  const planner = new ShotPlanner({ ...opts, roundStarts }, strikes);
+  const planner = new ShotPlanner({ ...opts, roundStarts, events: opts.events ?? events }, strikes);
   // Where the referee is at every tick: the arena's own placement logic run
   // over the recording (the picture's referee follows the same targets).
   const arena = opts.arena.arena;

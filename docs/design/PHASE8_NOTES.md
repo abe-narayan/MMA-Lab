@@ -835,6 +835,141 @@ on stools (the sim leaves them where the round ended, so the stand-in corner sho
 through-the-mesh shots need the stage's DoF to soften the foreground mesh; ground low handheld is tight when the
 pair is mid-cage (the apron is ≥ 4.6 m away).
 
+### Camera polish pass
+
+Goal: a broadcast, not a game trailer — the lens holds still until the action moves, arrives with it instead
+of behind it, never clips, and the edit breathes like live MMA. Code: `camera/director.ts`, `planner.ts`,
+`occlusion.ts`, `framing.ts`, `keypoints.ts`, `shots.ts`. No change to `presenter.ts` or `app/replay/broadcast.ts`
+was needed. Tools: `scripts/dev/cam-audit-lib.ts` + `cam-audit.ts` (the audit), `cam-bench.ts` (director cost),
+`cam-shots.mjs` (small captures). Tests: `tests/presentation.cam-quality.test.ts` (20), and
+`presentation.camera.test.ts` updated for the hard-camera zoom (below).
+
+**The audit.** `cam-audit.ts` drives the director headless over recorded bouts the way the presenter does
+(animator, corner staging, post-fight staging, forward kinematics; the referee from the arena's tracker and his
+animator; the cornermen), at 30 fps with a pre-roll and post-roll, and plays every planned replay angle at its
+slow-motion rate. Bouts (`CAM_BOUTS`, seeds chosen by content, recordings cached so before and after replay the
+same frames while the sim is tuned): MMA in the 30 ft octagon (with a break), a ground-heavy MMA bout (66 % of
+round time on the canvas), a KO in the 25 ft octagon, pro boxing in a 20 ft ring, K-1 in a 16 ft ring, ADCC on
+a mat, a street fight (unbounded), and a 2v2. Default windows: first 150 s, the first break, the last 60 s.
+Measured per frame on the shot on air: subjects' heads/chests inside the action-safe frame (90 %) and fully
+off-screen; share of the subjects (head 2, chest 1.5, hips 1) hidden by the referee, the cage (posts and top
+rail as capsules; the mesh is see-through) and the cornermen (other fighters reported apart); fill vs the shot's
+intended fill, headroom, lead room when the subjects cross the frame, roll; motion of the **operator's** aim
+(before the deliberate handheld float and strike shake): speed and jerk in screen heights, pan reversals within
+0.6 s ("hunting"), sudden reframes (onsets of > 3 screens/s²); cuts per minute and planned shot lengths, rendered
+cuts within ±0.4 s of a strike; clipping (in the fence volume where the shot does not allow it, in the mesh, in
+a post or rail, inside or within 0.4 m of a body, below the floor, in the rig, outside the building, non-finite);
+replay framing (the event's subjects visible and their centre's distance from frame centre at the key instant,
+real-time aim speed during the angle, cuts inside an angle); `director.update` time. `--locks` repeats it for
+every manual camera over the first 120 s of each bout.
+
+**Before / after** (8 bouts, 64 915 frames, animated bodies; "before" = the camera module as committed, same
+recordings, same harness):
+
+| Metric | Before | After |
+|---|---|---|
+| Subject head outside safe frame / off-screen | 0.00 % / 0.00 % | 0.00 % / 0.00 % |
+| Frames > 30 % hidden (referee + cage + crew) | 0.38 % | 0.18 % |
+| Fill / intended, median (p10–p90) | 0.90 (0.62–1.01) | 0.89 (0.76–0.99) |
+| Ground-work fill p50: main / overhead | 0.39 / 0.30 | 0.53 / 0.41 |
+| Too loose (fill < 0.3) | 2.17 % | 1.33 % |
+| Lead room the wrong way (subjects crossing the frame) | 16.5 % | 7.5 % |
+| Aim speed p50 / p95 / max (screens/s) | 0.02 / 0.20 / 5.51 | 0.02 / 0.19 / 1.75 |
+| Aim jerk p50 / p95 (screens/s³) | 0.25 / 3.75 | 0.07 / 2.13 |
+| Pan reversals ("hunting") per minute | 5.9 | 2.5 |
+| Sudden reframes per minute | 0.33 | 0.06 |
+| Cuts per minute (live) | 4.3 | 1.9 (MAIN↔TIGHT now zooms) |
+| Planned shot length median / p10 / min | 9.7 / 6.2 / 2.0 s | unchanged |
+| Rendered cuts within ±6 ticks of a strike | 0 | 0 |
+| Clipping frames (all kinds) | 156 (post-fight handheld in the mesh) | 0 |
+| Replays: key subjects visible | 39/39 | 39/39 |
+| Replays: real-time aim speed p95 / max | 0.08 / 11.3 | 0.08 / 0.64 |
+| `director.update` (cam-bench, bodies pre-posed, 54 000 updates) | 0.0179 ms mean, 0.058 p99 | 0.0166 ms, 0.055 p99 |
+| GC during the timed passes (allocation proxy) | 43 collections, 19.2 ms | 14 collections, 6.9 ms |
+
+Manual cameras (first 120 s of each bout; before → after):
+
+| Camera | Head outside safe | > 30 % hidden | Jerk p95 | Reversals/min | Clip frames |
+|---|---|---|---|---|---|
+| main | 0 → 0 % | 0.02 → 0.06 % | 2.69 → 1.58 | 3.1 → 1.6 | 0 → 0 |
+| close (main tight) | 0 → 0 % | 0.02 → 0.06 % | 5.63 → 3.34 | 12.3 → 6.4 | 0 → 0 |
+| side (cageside) | 0.01 → 0 % | 1.36 → 0.50 % | 9.22 → 4.66 | 28.1 → 11.2 | 4 → 0 |
+| low (cageside low) | NaN camera in rings (7 287 frames) → 0 % | 1.66 → 0.82 % | – → 3.02 | – → 6.1 | 7 296 → 0 |
+| overhead | 0 → 0 % | 0 → 0 % | 1.42 → 1.04 | 0.6 → 0.1 | 0 → 0 |
+| reverse | 0 → 0 % | 4.73 → 3.99 % | 3.23 → 2.17 | 5.4 → 4.1 | 0 → 0 |
+| wide (jib) | – | 0 → 0 % | 0.03 → 0.03 | 0.1 → 0.1 | 0 → 0 |
+| corner (pinned during rounds) | 17.6 → 0 % | 0.34 → 1.19 % | 9.58 → 4.99 | 18.7 → 11.2 | 0 → 0 |
+| follow | 0 → 0.12 % | 4.86 → 1.16 % | 13.3 → 10.9 | 18.1 → 20.2 | 103 (posts, bodies) → 0 |
+| orbit / free | 0 → 0 % | ≈ 0 | 1.9 → 1.7 / 0 | 1.1 → 1.3 / 0 | 0 → 0 |
+
+Broadcast norms used: live MMA holds shots for several seconds (the edit's median is 9.7 s, p10 6.2 s; the only
+sub-4 s shots are the documented knockdown / finish cuts); never cut on a punch (0 rendered cuts within ±6 ticks;
+the knockdown exception is counted apart and did not occur in these bouts).
+
+**What changed.**
+1. *Predictive framing.* With a recording the director knows the future. Each fighter's framing points are
+   shifted by (centred average of his recorded mass centre over ±0.5 s around `now + lead`) − (his position now),
+   capped at 1.6 m. The average removes the per-tick sim wobble without lag; the lead (0.8 × the aim spring's ramp
+   lag 2/ω, ≤ 0.8 s) makes the lens arrive with the action. Only framing goals move; the safety clamp still keeps
+   the bodies as they are now. Live (no recording) keeps the old velocity lead. Replays use the same recorded
+   future, integrated in simulated time, so slow motion is steady.
+2. *Dead zones* (`OPERATOR`): the springs chase a held aim that moves only when the framing goal leaves a zone of
+   5 % of the half frame (9 % on tight and handheld shots), and a held zoom that changes only outside a band
+   (2.5 % opening, 8 % closing). Limb motion no longer steers the lens.
+3. *Smoother safety.* When the lens must open to keep someone in, it keeps the opening zoom's momentum instead of
+   zeroing it; when even the widest lens cannot hold the points, the aim whips toward the goal continuously
+   (1 − e^(−12 dt) a frame) instead of snapping (the source of most "sudden reframes").
+4. *Hard-camera zooms.* MAIN ↔ MAIN TIGHT on the edit is one operator: a 1.1 s zoom and re-aim, not a cut
+   (`CameraState.cut` stays false; the dodge state carries over). Every other change of shot is still a hard cut.
+5. *Ground work tighter.* The minimum frame height at the subject drops to 1.9 m on MAIN/REVERSE and 2.2 m on the
+   OVERHEAD when every subject is on the canvas (fill 0.39 → 0.53, 0.30 → 0.41).
+6. *Cage-side occlusion.* The posts and the top rail are occluders in every operator's dodge (the planner's spot choice
+   already kept posts out of the way);
+   a handheld's walk is limited to its own stretch of apron between two posts (crossing one put it dead in front of
+   the lens) and a lens is kept 0.55 m from every post centre, also along the spring's straight line between spots.
+   When the referee has hidden the handheld's subjects from its spot and every reachable dodge for 1.2 s the
+   planner re-places the operator (an ordinary cut under the strike and minimum-length rules).
+7. *Too close.* A handheld whose subject is within 1.5 m (2.2 m for the low one) steps back along the apron
+   (≤ 0.9 m); the planner's spot choice penalises spots closer than 2.1 m. This fixed the pinned low camera in
+   rings, which produced NaN states when a fighter at the ropes ended up behind the lens.
+8. *Multi-fighter focus* (`focusGroup`, planner and director share it): in a 2v2 the lens frames the pair with the
+   most going on (engaged now, strikes/takedowns between them over the last 4 s and the next 2 s) plus anyone
+   within 1.8 m, instead of all four; the others remain occluders. Pure function of the tick.
+9. *In-cage lenses never in a body.* Post-fight handheld: in-cage points now really are inside the wall (the old
+   margin was outward, so the lens could stand in the mesh), directions scored for room and for nobody within
+   arm's reach, and the raised-hand extras dropped when they would push the winner out of even the widest lens.
+   A hard guard keeps every in-cage lens 0.55 m from fighters', referee's and cornermen's bodies.
+10. *Manual cameras.* Corner pinned during a round: one fighter, head to waist, from the apron spot that shows
+    him best (was: face-tight on whoever was first, heads out of frame 18 % of the time). Low handheld on
+    standing fighters: head to waist, aimed a little low. Follow: 3.4 m over the shoulder at 2.4 m, the "away
+    from the opponent" direction trusted only with some separation and swung on a spring, swung toward the
+    cage centre when the spot would be in the fence (was: 100 frames inside posts). Handing an override back
+    (`lockShot(null)`, free/orbit → broadcast) cuts cleanly to the shot the plan has at that moment (tested).
+11. *Allocations.* The framing points are pooled (`fighterPointsInto`); the framing solver works on scalars and
+    one scratch basis (`framing.ts`); occlusion's segment test is allocation-free with a bounding-box reject;
+    sight lines, the live plan view and the event window are reused; the held-back-cut lookup is a binary search
+    (it was a filter over every blocked cut each frame); the referee's/cornermen's capsules are built once per
+    frame; the debug record is updated in place.
+
+**Still weak.**
+- Follow camera still hunts (20 reversals/min, jerk p95 10.9): the lens itself moves with the fighter, so the aim
+  keeps correcting. It needs a proper "chase" rig (position led by the same predictive average, aim locked to it).
+- REVERSE is hidden by the referee 4 % of the time: the referee keeps to the far side from the hard camera, which
+  is exactly where the reverse platform is. It airs only in replays, where the replay angle choice could avoid it.
+- CAGESIDE LOW over ground work can still lose the pair behind a crouched referee for a second or two before the
+  planner's re-placement (the example in the audit: 0.8 hidden for ~1 s); the low lens cannot boom over him.
+- At the opening bell the referee often stands between the pair and MAIN (0.5 hidden for 1–2 s) while the dodge
+  slides the platform camera.
+- Replay key-instant centring: median 0.29 of the half frame from centre, worst 0.69 (still inside the safe
+  frame): the replay angles frame the pair, not the landing punch.
+- The harness measures composition on joints, not rendered silhouettes; the fence mesh's sharpness through the
+  handheld (DoF) is judged only by eye.
+
+**Captures** (`docs/screenshots/cam-*.png`, 800×450, colour-quantised to stay under 300 KB; demo
+`watch-demo-4:1:3`): `main` (auto), `main-locked`, `close`, `side`, `low-ground` (low handheld pinned on a clinch),
+`overhead-ground`, `follow`, `replay` (last 8 s after the knockdown, angle 1), `finish` (post-fight handheld on the
+winner), `finish-late` (the announcement).
+
 ## Assets & motion capture
 
 ## Integration (lead)

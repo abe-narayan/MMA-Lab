@@ -50,14 +50,13 @@ function bout(seed: string, a: number, b: number): Bout {
 }
 
 // A decision, a TKO after two knockdowns, a KO. Seeds re-picked for the
-// Phase 9 calibrated sim (engine 5.0.0): the old ones now produce other
-// endings; each seed below was searched for its ending (cam-0..cam-159;
-// cam-41, the first TKO after two knockdowns, drops the second knockdown
-// 0.3 s before the bell, which the replay planner cannot air before the
-// round-end replay; cam-7, the first KO, has a knockdown the planner folds
-// into the finish without covering it — both planner edge cases, reported to
-// presentation).
-const BOUTS = [bout('cam-20', 0, 1), bout('cam-82', 0, 1), bout('cam-51', 0, 1)];
+// final Phase 9 calibrated sim (engine 5.0.0) by searching cam-0..cam-399 in
+// order for the first bout of each ending whose replays the planner can air
+// (runs/_dbg/camseeds4.ts): cam-12 and cam-90, the first TKOs after two
+// knockdowns, each have a knockdown the planner cannot air or cover (planner
+// edge cases, reported to presentation); the decision must also use every
+// shot kind.
+const BOUTS = [bout('cam-1', 0, 1), bout('cam-91', 0, 1), bout('cam-40', 0, 1)];
 const DECISION = BOUTS[0];
 const TKO = BOUTS[1];
 
@@ -215,10 +214,18 @@ describe('camera director: the edit', () => {
 
   it('flags every hard cut so temporal effects drop their history', () => {
     const run = runOf(TKO);
+    const hard = (k: ShotKind): boolean => k === 'main' || k === 'mainTight';
+    let zooms = 0;
     for (let i = 1; i < run.length; i++) {
-      if (run[i].entry !== run[i - 1].entry) expect(run[i].state.cut).toBe(true);
-      else if (!run[i].holding) expect(run[i].state.cut).toBe(false);
+      if (run[i].entry !== run[i - 1].entry) {
+        // MAIN <-> MAIN TIGHT is one operator zooming (camera polish pass), not a cut.
+        if (hard(run[i].kind) && hard(run[i - 1].kind) && run[i].kind !== run[i - 1].kind && !run[i].holding && !run[i - 1].holding) {
+          expect(run[i].state.cut).toBe(false);
+          zooms++;
+        } else expect(run[i].state.cut).toBe(true);
+      } else if (!run[i].holding) expect(run[i].state.cut).toBe(false);
     }
+    void zooms;
   });
 });
 

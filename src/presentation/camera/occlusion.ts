@@ -91,14 +91,17 @@ export function subjectSamples(p: FighterPoints): SamplePoint[] {
   ];
 }
 
-/** Closest distance between segments p1-q1 and p2-q2; also the parameter along the first. */
-function segSeg(p1: V3, q1: V3, p2: V3, q2: V3): { d: number; s: number } {
-  const d1: V3 = [q1[0] - p1[0], q1[1] - p1[1], q1[2] - p1[2]];
-  const d2: V3 = [q2[0] - p2[0], q2[1] - p2[1], q2[2] - p2[2]];
-  const r: V3 = [p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]];
-  const a = d1[0] * d1[0] + d1[1] * d1[1] + d1[2] * d1[2];
-  const e = d2[0] * d2[0] + d2[1] * d2[1] + d2[2] * d2[2];
-  const f = d2[0] * r[0] + d2[1] * r[1] + d2[2] * r[2];
+/** `segSeg`'s parameter along the first segment (module scratch: no allocation per call). */
+let segS = 0;
+
+/** Closest distance between segments p1-q1 and p2-q2; the parameter along the first is left in `segS`. */
+function segSeg(p1: V3, q1: V3, p2: V3, q2: V3): number {
+  const d1x = q1[0] - p1[0], d1y = q1[1] - p1[1], d1z = q1[2] - p1[2];
+  const d2x = q2[0] - p2[0], d2y = q2[1] - p2[1], d2z = q2[2] - p2[2];
+  const rx = p1[0] - p2[0], ry = p1[1] - p2[1], rz = p1[2] - p2[2];
+  const a = d1x * d1x + d1y * d1y + d1z * d1z;
+  const e = d2x * d2x + d2y * d2y + d2z * d2z;
+  const f = d2x * rx + d2y * ry + d2z * rz;
   let s = 0;
   let t = 0;
   const EPS = 1e-9;
@@ -107,11 +110,11 @@ function segSeg(p1: V3, q1: V3, p2: V3, q2: V3): { d: number; s: number } {
   } else if (a <= EPS) {
     s = 0; t = Math.min(1, Math.max(0, f / e));
   } else {
-    const c = d1[0] * r[0] + d1[1] * r[1] + d1[2] * r[2];
+    const c = d1x * rx + d1y * ry + d1z * rz;
     if (e <= EPS) {
       t = 0; s = Math.min(1, Math.max(0, -c / a));
     } else {
-      const b = d1[0] * d2[0] + d1[1] * d2[1] + d1[2] * d2[2];
+      const b = d1x * d2x + d1y * d2y + d1z * d2z;
       const denom = a * e - b * b;
       s = denom > EPS ? Math.min(1, Math.max(0, (b * f - c * e) / denom)) : 0;
       t = (b * s + f) / e;
@@ -119,9 +122,11 @@ function segSeg(p1: V3, q1: V3, p2: V3, q2: V3): { d: number; s: number } {
       else if (t > 1) { t = 1; s = Math.min(1, Math.max(0, (b - c) / a)); }
     }
   }
-  const c1: V3 = [p1[0] + d1[0] * s, p1[1] + d1[1] * s, p1[2] + d1[2] * s];
-  const c2: V3 = [p2[0] + d2[0] * t, p2[1] + d2[1] * t, p2[2] + d2[2] * t];
-  return { d: Math.hypot(c1[0] - c2[0], c1[1] - c2[1], c1[2] - c2[2]), s };
+  segS = s;
+  const dx = p1[0] + d1x * s - (p2[0] + d2x * t);
+  const dy = p1[1] + d1y * s - (p2[1] + d2y * t);
+  const dz = p1[2] + d1z * s - (p2[2] + d2z * t);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 /**
@@ -138,10 +143,44 @@ export function occlusion(cam: V3, samples: readonly SamplePoint[], occluders: r
     if (len < 1e-6) continue;
     // Ignore the last 0.3 m before the sample: that is the subject's own body.
     const stop = Math.max(0, 1 - 0.3 / len);
+    // Bounding box of the sight line, for a cheap reject of far occluders.
+    const x0 = Math.min(cam[0], sp.p[0]), x1 = Math.max(cam[0], sp.p[0]);
+    const y0 = Math.min(cam[1], sp.p[1]), y1 = Math.max(cam[1], sp.p[1]);
+    const z0 = Math.min(cam[2], sp.p[2]), z1 = Math.max(cam[2], sp.p[2]);
     for (const c of occluders) {
-      const { d, s } = segSeg(cam, sp.p, c.a, c.b);
-      if (d < c.r && s < stop) { hidden += sp.w; break; }
+      const r = c.r;
+      if (Math.min(c.a[0], c.b[0]) - r > x1 || Math.max(c.a[0], c.b[0]) + r < x0
+        || Math.min(c.a[1], c.b[1]) - r > y1 || Math.max(c.a[1], c.b[1]) + r < y0
+        || Math.min(c.a[2], c.b[2]) - r > z1 || Math.max(c.a[2], c.b[2]) + r < z0) continue;
+      const d = segSeg(cam, sp.p, c.a, c.b);
+      if (d < c.r && segS < stop) { hidden += sp.w; break; }
     }
   }
   return total > 0 ? hidden / total : 0;
+}
+
+/**
+ * The cage itself as occluders (camera polish pass): the padded posts and the
+ * top rail (fence) or top rope (ring) between them. The mesh is see-through and
+ * is not counted; a post or the rail across a fighter's face is.
+ */
+export function cageCapsules(ca: {
+  shape: string; wall: string; wallHeight: number; circumradius: number; sides: number;
+}, postAz: readonly number[]): Capsule[] {
+  if (ca.shape === 'unbounded' || ca.wall === 'none' || ca.wallHeight <= 0 || postAz.length === 0) return [];
+  const out: Capsule[] = [];
+  const r = ca.circumradius + 0.05;
+  const h = ca.wallHeight + 0.1;
+  for (const a of postAz) {
+    out.push({ a: [Math.sin(a) * r, 0.05, Math.cos(a) * r], b: [Math.sin(a) * r, h, Math.cos(a) * r], r: 0.15 });
+  }
+  for (let k = 0; k < postAz.length; k++) {
+    const a0 = postAz[k]!;
+    const a1 = postAz[(k + 1) % postAz.length]!;
+    out.push({
+      a: [Math.sin(a0) * r, ca.wallHeight, Math.cos(a0) * r], b: [Math.sin(a1) * r, ca.wallHeight, Math.cos(a1) * r],
+      r: ca.wall === 'fence' ? 0.06 : 0.03,
+    });
+  }
+  return out;
 }

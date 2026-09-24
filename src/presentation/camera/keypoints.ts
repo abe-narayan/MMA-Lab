@@ -176,6 +176,62 @@ export function fighterPoints(
   return out;
 }
 
+const blankPoints = (): FighterPoints => ({
+  id: 0, posture: 'standing', crown: [0, 0, 0], head: [0, 0, 0], neck: [0, 0, 0], chest: [0, 0, 0], hips: [0, 0, 0],
+  handL: [0, 0, 0], handR: [0, 0, 0], footL: [0, 0, 0], footR: [0, 0, 0], ground: [0, 0, 0], facing: 0, velocity: [0, 0],
+});
+
+const setP = (o: V3, arr: Float32Array, i: number): void => {
+  o[0] = arr[i * 3]!; o[1] = arr[i * 3 + 1]!; o[2] = arr[i * 3 + 2]!;
+};
+
+function copyPoints(dst: FighterPoints, src: FighterPoints): void {
+  dst.id = src.id; dst.posture = src.posture; dst.facing = src.facing;
+  dst.velocity[0] = src.velocity[0]; dst.velocity[1] = src.velocity[1];
+  for (const k of ['crown', 'head', 'neck', 'chest', 'hips', 'handL', 'handR', 'footL', 'footR', 'ground'] as const) {
+    dst[k][0] = src[k][0]; dst[k][1] = src[k][1]; dst[k][2] = src[k][2];
+  }
+}
+
+/**
+ * `fighterPoints` into a reused pool (camera polish pass: the director calls it
+ * every frame). `out` is cleared and refilled with objects from `pool`.
+ */
+export function fighterPointsInto(
+  frame: TickSnapshot, next: TickSnapshot | null, alpha: number,
+  poses: readonly WorldPose[], statures: readonly number[], pool: FighterPoints[], out: FighterPoints[],
+): FighterPoints[] {
+  out.length = 0;
+  for (let i = 0; i < frame.fighters.length; i++) {
+    const f = frame.fighters[i]!;
+    if (f.posture === 'out' && frame.fighters.length > 2) continue;
+    const dst = pool[i] ?? (pool[i] = blankPoints());
+    const w = poses[i];
+    if (poseLooksValid(w)) {
+      dst.id = f.id;
+      dst.posture = f.posture;
+      setP(dst.crown, w.tip, B.head);
+      for (let k = 0; k < 3; k++) dst.head[k] = (w.pos[B.head * 3 + k]! + w.tip[B.head * 3 + k]!) / 2;
+      setP(dst.neck, w.pos, B.neck);
+      setP(dst.chest, w.pos, B.spine2);
+      setP(dst.hips, w.pos, B.hips);
+      setP(dst.handL, w.tip, B.lHand);
+      setP(dst.handR, w.tip, B.rHand);
+      setP(dst.footL, w.pos, B.lFoot);
+      dst.footL[1] = Math.max(0, dst.footL[1] - 0.09);
+      setP(dst.footR, w.pos, B.rFoot);
+      dst.footR[1] = Math.max(0, dst.footR[1] - 0.09);
+      dst.ground[0] = dst.hips[0]; dst.ground[1] = 0; dst.ground[2] = dst.hips[2];
+      dst.facing = f.facing ?? 0;
+      dst.velocity[0] = f.vx ?? 0; dst.velocity[1] = f.vz ?? 0;
+    } else {
+      copyPoints(dst, standInPoints(frame, next, alpha, i, statures[i] ?? 1.8));
+    }
+    out.push(dst);
+  }
+  return out;
+}
+
 /**
  * Write a stand-in body into a `WorldPose` (key joints only), for the dev
  * page's capsule fighters and for tests that exercise the WorldPose path.

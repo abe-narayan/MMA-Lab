@@ -25,20 +25,21 @@ import type {
   ArenaSet, BoutPresentation, CameraDirector, CameraRequest, CameraState, FrameInput,
 } from '../contract';
 import { B, type WorldPose } from '../rig/skeleton';
-import { type CameraArena, clampToBounds, insideWall, makeCameraArena, wallDistanceAt } from './geometry';
+import { type CameraArena, clampToBounds, insideWall, makeCameraArena, postAzimuths, wallDistanceAt } from './geometry';
 import {
-  AVOID, bodyCapsules, type Capsule, fighterCapsules, OCCLUSION_LIMIT, occlusion, type SamplePoint, subjectSamples,
+  AVOID, bodyCapsules, cageCapsules, type Capsule, fighterCapsules, OCCLUSION_LIMIT, occlusion, type SamplePoint,
+  subjectSamples,
 } from './occlusion';
-import { fovToTanHalf, lookBasis, requiredTanHalf, solveFraming, tanHalfToFov } from './framing';
+import { type FramingGoal, fovToTanHalf, lookBasis, requiredTanHalf, solveFraming, tanHalfToFov } from './framing';
 import {
-  type FighterPoints, type FramingSet, fighterPoints, framingPoints, pairMid,
+  type FighterPoints, type FramingSet, fighterPointsInto, framingPoints, pairMid,
 } from './keypoints';
 import {
-  add, atAzimuth, clamp, dist, easeInOut, hashString, lerp, norm, scale, smoothNoise,
+  add, atAzimuth, clamp, dist, distXZ, easeInOut, hashString, lerp, lerpV, norm, scale, smoothNoise, wrapAngle,
   Spring1, Spring3, sub, type V3,
 } from './math';
 import {
-  chooseOperator, entryAt, planShots, type ShotPlan, type ShotPlanEntry, ShotPlanner, StrikeIndex, TICK_S,
+  type BlockedCut, chooseOperator, cornerAzimuth, entryAt, focusGroup, planShots, type ShotPlan, type ShotPlanEntry, ShotPlanner, StrikeIndex, TICK_S,
 } from './planner';
 import type { ReplayState } from './replay';
 import { PLACEMENT, SHOTS, type ShotKind, shotLabel } from './shots';
@@ -79,9 +80,85 @@ export interface DirectorDebug {
   occlusion: number;
   /** The operator's current dodge: handheld azimuth offset (rad) or hard-camera slide/boom (m). */
   avoid: [number, number];
+  /** Fighters the shot on air is about (empty = everyone), for QA tools. */
+  subjects: readonly number[];
+  /** Strike shake applied this frame (fraction of the half height; 0 = none). */
+  shake: number;
+  /** The operator's aim before the handheld float and the shake (QA: motion is judged on it). */
+  aim: V3;
 }
 
 const DEFAULT_ASPECT = 16 / 9;
+const NO_POINTS: V3[] = [];
+const NO_FIGHTERS: FighterPoints[] = [];
+/** Closest an in-cage lens comes to a body's surface (m). */
+const BODY_CLEAR_M = 0.55;
+/** Closest a lens outside the cage comes to a post's centre (m): pad half width + lens + margin. */
+const POST_CLEAR_M = 0.55;
+/** Tightest frame height (m) at the subject for ground work, per shot (camera polish pass). */
+const GROUND_MIN_FRAME_M: Partial<Record<ShotKind, number>> = { main: 1.9, reverse: 1.9, overhead: 2.2 };
+/** Post-fight handheld: directions (rad) tried round the winner's facing, nearest first. */
+const FINISH_TURNS = [0.45, -0.45, 0.8, -0.8, 0, 1.2, -1.2, 1.6, -1.6, 2.1, -2.1, 2.6, -2.6];
+/** Follow camera: swings (rad) tried round the fighter to keep the lens inside the cage. */
+const FOLLOW_TURNS = [0, 0.45, -0.45, 0.9, -0.9, 1.35, -1.35, 1.8, -1.8, 2.4, -2.4, Math.PI];
+const NO_BIAS: [number, number] = [0, 0];
+/** Dodge-key family of a hard-camera goal: live edit vs replay. */
+const source = (e: ShotPlanEntry, seg: unknown): string => (seg ? `replay:${e.startTick}` : 'live');
+
+/** The last held-back cut at or before `tick` (within 12 ticks), by binary search. */
+function lastBlockedBefore(bl: readonly BlockedCut[], tick: number): BlockedCut | null {
+  let lo = 0;
+  let hi = bl.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (bl[m]!.tick <= tick) lo = m + 1;
+    else hi = m;
+  }
+  const x = lo > 0 ? bl[lo - 1]! : null;
+  return x && x.tick > tick - 12 ? x : null;
+}
+
+/**
+ * Operator behaviour added in the camera polish pass (docs/design/PHASE8_NOTES.md,
+ * "Camera polish pass").
+ *
+ *  - *Predictive framing.* With the recording the director knows where the
+ *    fighters will be. Each fighter's framing points are shifted by the
+ *    difference between a centred average of his recorded position around
+ *    `now + lead` and his position now: the average removes the per-tick sim
+ *    wobble without lag, and the lead (a share of the aim spring's own lag,
+ *    2/ω) makes the lens arrive with the action instead of behind it.
+ *  - *Dead zones.* The spring goal only moves when the subjects' framing leaves
+ *    a small zone around the held aim (a fraction of the frame half height) or
+ *    the needed zoom leaves a band around the held zoom (log units; tighter for
+ *    zooming out than in). Small limb motion no longer steers the lens.
+ *  - *Hard-camera zooms.* MAIN ↔ MAIN TIGHT is the same operator on the same
+ *    platform: it is played as a ~1 s zoom and re-aim, not a cut.
+ */
+export const OPERATOR = {
+  /** Lead as a share of the aim spring's ramp lag (2/ω), capped (s). */
+  leadShare: 0.8,
+  leadMaxS: 0.8,
+  /** Half width of the centred average (s) and its sample count. */
+  smoothHalfS: 0.5,
+  smoothSamples: 5,
+  /** Largest predictive shift of a fighter's points (m). */
+  maxShiftM: 1.6,
+  /** Aim dead zone, fraction of the frame half height (wide shots / tight and handheld shots). */
+  aimDeadZone: 0.05,
+  aimDeadZoneTight: 0.09,
+  /** Zoom dead band (ln tan): opening up / closing in. */
+  zoomDeadOut: 0.025,
+  zoomDeadIn: 0.08,
+  /** Hard-camera zoom between MAIN and MAIN TIGHT: duration (s) and springs (rad/s). */
+  zoomTransitionS: 1.1,
+  zoomTransitionAim: 3.4,
+  zoomTransitionZoom: 3.0,
+} as const;
+
+/** Rough height (m) of a fighter's mass for the prediction, by posture. */
+const postureY = (p: string, role?: string): number =>
+  p === 'standing' || p === 'clinch' ? 1.15 : p === 'ground' ? (role === 'bottom' ? 0.2 : 0.55) : 0.2;
 /** A heavy landed shot shakes the frame by at most this fraction of its half height. */
 const SHAKE_MAX_NDC = 0.022;
 
@@ -104,7 +181,7 @@ export class BroadcastCameraDirector implements CameraDirector {
   private events: readonly SimEvent[] = [];
   private strikeEvents: SimEvent[] = [];
   private shotPlan: ShotPlan | null = null;
-  private online: { planner: ShotPlanner; strikes: StrikeIndex; lastTick: number } | null = null;
+  private online: { planner: ShotPlanner; strikes: StrikeIndex; lastTick: number; view: ShotPlan } | null = null;
 
   // Replay
   private replay: ReplayState | null = null;
@@ -124,7 +201,7 @@ export class BroadcastCameraDirector implements CameraDirector {
   private lastState: CameraState | null = null;
   private dbg: DirectorDebug = {
     shot: 'main', label: 'MAIN', source: 'plan', entryIndex: -1, reason: '', shotSeconds: 0, timeline: 0, blocked: null,
-    occlusion: 0, avoid: [0, 0],
+    occlusion: 0, avoid: [0, 0], subjects: [], shake: 0, aim: [0, 0, 0],
   };
 
   // The referee (an occluder the operators work around) and the dodge state.
@@ -138,6 +215,98 @@ export class BroadcastCameraDirector implements CameraDirector {
   private finishDir = 0;
   private finishKey = '';
 
+  // Camera polish pass: cage occluders, held (dead-zoned) goals, the hard-camera
+  // zoom transition, the multi-fighter focus, and per-frame scratch.
+  private cageCaps: Capsule[] = [];
+  /** Post centres (x, z) the apron operators walk round, and their azimuths. */
+  private posts: [number, number][] = [];
+  private postAz: number[] = [];
+
+  /**
+   * Push `q` (in place, horizontally) until it is `BODY_CLEAR_M` from every
+   * fighter's torso and head and from the referee's and cornermen's bodies.
+   */
+  private clearOfBodies(q: V3, fighters: readonly FighterPoints[]): void {
+    const push = (a: V3, b: V3, r: number): void => {
+      const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+      const l = abx * abx + aby * aby + abz * abz;
+      const t = l > 0 ? clamp(((q[0] - a[0]) * abx + (q[1] - a[1]) * aby + (q[2] - a[2]) * abz) / l, 0, 1) : 0;
+      const cx = a[0] + abx * t, cy = a[1] + aby * t, cz = a[2] + abz * t;
+      const dx = q[0] - cx, dz = q[2] - cz;
+      const need = r + BODY_CLEAR_M;
+      const d3 = Math.hypot(dx, q[1] - cy, dz);
+      if (d3 >= need) return;
+      const dh = Math.hypot(dx, dz);
+      // Straight out horizontally (away from the body's axis; toward the cage centre if on it).
+      const ux = dh > 1e-4 ? dx / dh : -cx / (Math.hypot(cx, cz) || 1);
+      const uz = dh > 1e-4 ? dz / dh : -cz / (Math.hypot(cx, cz) || 1);
+      const dy = q[1] - cy;
+      const h = Math.sqrt(Math.max(0, need * need - dy * dy));
+      q[0] = cx + ux * h;
+      q[2] = cz + uz * h;
+    };
+    for (let pass = 0; pass < 2; pass++) {
+      for (const f of fighters) {
+        push(f.hips, f.neck, 0.2);
+        push(f.head, f.crown, 0.13);
+      }
+      if (this.bodyCapsDirty) this.sight(NO_FIGHTERS, NO_FIGHTERS, false);
+      for (const c of this.bodyCaps) push(c.a, c.b, c.r);
+    }
+  }
+
+  /** `az` limited to the stretch of apron between the two posts either side of `home`. */
+  private withinPanel(home: number, az: number): number {
+    const posts = this.postAz;
+    if (posts.length < 2) return az;
+    const n = posts.length;
+    const step = (2 * Math.PI) / n;
+    // Posts are evenly spaced from posts[0]: the panel `home` lies in.
+    const rel = wrapAngle(home - posts[0]!);
+    const k = Math.floor((rel < 0 ? rel + 2 * Math.PI : rel) / step);
+    const lo = posts[0]! + k * step;
+    const r = this.ca ? this.ca.circumradius + 0.4 : 5;
+    const m = Math.min(step * 0.45, (POST_CLEAR_M + 0.15) / r);
+    const d = wrapAngle(az - lo);
+    const dd = d < 0 ? d + 2 * Math.PI : d;
+    return lo + clamp(dd, m, step - m);
+  }
+
+  /** An apron lens kept `POST_CLEAR_M` from every post (an operator walks round it). */
+  private clearOfPosts(q: V3): V3 {
+    for (const [px, pz] of this.posts) {
+      const dx = q[0] - px;
+      const dz = q[2] - pz;
+      const d = Math.hypot(dx, dz);
+      if (d < POST_CLEAR_M) {
+        // Straight out from the post (radially outward if exactly on it).
+        const r = Math.hypot(px, pz) || 1;
+        const ux = d > 1e-4 ? dx / d : px / r;
+        const uz = d > 1e-4 ? dz / d : pz / r;
+        q[0] = px + ux * POST_CLEAR_M;
+        q[2] = pz + uz * POST_CLEAR_M;
+      }
+    }
+    return q;
+  }
+  private readonly followAz = new Spring1();
+  private followKey = '';
+  private readonly heldAim: V3 = [0, 0, 0];
+  private heldTan = 0;
+  private lastKind: ShotKind | null = null;
+  private lastSource: DirectorDebug['source'] = 'plan';
+  private zoomUntil = -Infinity;
+  private readonly pointPool: FighterPoints[] = [];
+  private readonly ptsBuf: FighterPoints[] = [];
+  private readonly liveBuf: FighterPoints[] = [];
+  private readonly focusBuf: FighterPoints[] = [];
+  /** Per-fighter predictive shift (x, y, z) by index in `frame.fighters`. */
+  private shift = new Float64Array(12);
+  private shiftOn = false;
+  private readonly sightOut: { samples: SamplePoint[]; occluders: Capsule[] } = { samples: [], occluders: [] };
+  private readonly fgoal: FramingGoal = { target: [0, 0, 0], tanHalf: 0 };
+  private focusCache: { tick: number; ids: number[] | null } = { tick: -1, ids: null };
+
   /** User camera (free / orbit), manipulated by `FreeCameraController`. */
   readonly free: FreeCameraState = createFreeCameraState();
 
@@ -150,6 +319,10 @@ export class BroadcastCameraDirector implements CameraDirector {
   setBout(bout: BoutPresentation, arena: ArenaSet | null): void {
     this.bout = bout;
     this.ca = makeCameraArena(bout.arena, arena?.bounds ?? null);
+    this.cageCaps = cageCapsules(this.ca, postAzimuths(this.ca));
+    const pr = this.ca.circumradius + 0.05;
+    this.postAz = this.ca.shape === 'unbounded' || this.ca.wallHeight <= 0 ? [] : postAzimuths(this.ca);
+    this.posts = this.postAz.map((a) => [Math.sin(a) * pr, Math.cos(a) * pr] as [number, number]);
     this.seed = bout.cosmeticSeed;
     this.statures = bout.runtimes.map((r) => r.body?.heightM ?? 1.8);
     try {
@@ -204,6 +377,7 @@ export class BroadcastCameraDirector implements CameraDirector {
    */
   setReferee(pose: WorldPose | null): void {
     this.refereePose = pose;
+    this.bodyCapsDirty = true;
   }
 
   /**
@@ -218,7 +392,11 @@ export class BroadcastCameraDirector implements CameraDirector {
   /** Other people in the cage the operators work around (the cornermen between rounds). */
   setExtraBodies(poses: readonly WorldPose[]): void {
     this.extraBodies = poses;
+    this.bodyCapsDirty = true;
   }
+  /** The referee's and cornermen's capsules, rebuilt once per frame they are set. */
+  private bodyCaps: Capsule[] = [];
+  private bodyCapsDirty = true;
   private extraBodies: readonly WorldPose[] = [];
   private postClock: number | null = null;
 
@@ -229,7 +407,15 @@ export class BroadcastCameraDirector implements CameraDirector {
   }
 
   get plan(): ShotPlan | null {
-    return this.shotPlan ?? (this.online ? { entries: this.online.planner.entries, lastTick: this.online.lastTick, blocked: this.online.planner.blocked } : null);
+    return this.shotPlan ?? this.onlinePlan;
+  }
+
+  /** The live plan's view (one object, updated in place). */
+  private get onlinePlan(): ShotPlan | null {
+    const on = this.online;
+    if (!on) return null;
+    on.view.lastTick = on.lastTick;
+    return on.view;
   }
 
   debug(): DirectorDebug {
@@ -244,6 +430,9 @@ export class BroadcastCameraDirector implements CameraDirector {
     this.holdClock = 0;
     this.manual = null;
     this.replayEntry = null;
+    this.lastKind = null;
+    this.zoomUntil = -Infinity;
+    this.focusCache.tick = -1;
   }
 
   private buildPlan(): void {
@@ -259,6 +448,8 @@ export class BroadcastCameraDirector implements CameraDirector {
       surface: 'canvas', surfaceHardness: 1, outOfBounds: 'clamp',
     }));
     const frame = input.frame;
+    // The referee's and cornermen's poses are live objects: re-read them once this frame.
+    this.bodyCapsDirty = true;
     let snap = input.discontinuity || !Number.isFinite(this.lastSimTime);
     if (input.discontinuity) this.holdClock = 0;
 
@@ -280,11 +471,18 @@ export class BroadcastCameraDirector implements CameraDirector {
     const timeline = atLast ? input.simTime + post : atFirst ? this.holdClock : input.simTime;
     const dt = holding ? clamp(realDt, 0, 0.25) : clamp(simDt, 0, 0.25);
 
-    // Bodies.
-    const pts = fighterPoints(frame, input.next, input.alpha, poses, this.statures);
-    const mid = pairMid(pts.filter((p) => p.posture !== 'out').length ? pts.filter((p) => p.posture !== 'out') : pts);
-    if (snap) this.midS.reset(mid);
-    const midSm = this.midS.step(mid, 3, dt);
+    // Bodies (pooled: no per-frame allocation of the framing points).
+    const pts = fighterPointsInto(frame, input.next, input.alpha, poses, this.statures, this.pointPool, this.ptsBuf);
+    const liveAll = this.liveBuf;
+    liveAll.length = 0;
+    for (const p of pts) if (p.posture !== 'out') liveAll.push(p);
+    // Multi-fighter bouts: the lens frames the fight that matters (the primary
+    // engaged pair and anyone close to it), not all four corners of the cage.
+    const focusIds = this.focusGroup(frame, input);
+    const framedAll = this.focusBuf;
+    framedAll.length = 0;
+    for (const p of liveAll.length ? liveAll : pts) if (!focusIds || focusIds.includes(p.id)) framedAll.push(p);
+    const mid = pairMid(framedAll.length ? framedAll : pts);
 
     // Which camera is on air.
     const mode = this.request.mode;
@@ -313,7 +511,7 @@ export class BroadcastCameraDirector implements CameraDirector {
       shotT = input.simTime - r.segment.fromTick * TICK_S;
     } else if (mode === 'cageside' || mode === 'overhead' || this.locked) {
       const kind: ShotKind = this.locked ?? (mode === 'overhead' ? 'overhead' : 'cageside');
-      if (!this.manual || this.manual.kind !== kind || this.needsReposition(this.manual, midSm, input)) {
+      if (!this.manual || this.manual.kind !== kind || this.needsReposition(this.manual, this.midS.x, input)) {
         this.manual = this.makeEntry(kind, frame, input.simTime, this.manual ? 'reposition' : 'situation');
       }
       entry = this.manual;
@@ -329,45 +527,122 @@ export class BroadcastCameraDirector implements CameraDirector {
       shotT = entry.reason === 'intro' && atFirst ? this.holdClock : timeline - entry.startT;
     }
 
-    const cut = snap || key !== this.lastKey;
-    if (cut) {
-      snap = true;
-      this.shotStartTimeline = timeline;
-      this.handheldH = null;
-    }
-    this.lastKey = key;
-
     const kind = entry.kind;
     const spec = SHOTS[kind];
-    const goal = this.goal(kind, entry, ca, pts, midSm, shotT, replaySeg, input, dt, snap, key, poses);
+    let cut = snap || key !== this.lastKey;
+    // MAIN <-> MAIN TIGHT on the edit: the same operator zooms and re-aims.
+    const hard = (k: ShotKind | null): boolean => k === 'main' || k === 'mainTight';
+    if (cut && !snap && !holding && source === 'plan' && this.lastSource === 'plan' && hard(kind) && hard(this.lastKind) && kind !== this.lastKind) {
+      cut = false;
+      this.zoomUntil = timeline + OPERATOR.zoomTransitionS;
+    }
+    if (cut) {
+      snap = true;
+      this.zoomUntil = -Infinity;
+      this.handheldH = null;
+    }
+    if (key !== this.lastKey) this.shotStartTimeline = timeline;
+    this.lastKey = key;
+    this.lastKind = kind;
+    this.lastSource = source;
+
+    // Where the fighters are about to be (recorded bouts and replays).
+    const predict = !holding && this.frames !== null && kind !== 'jib' && kind !== 'free' && kind !== 'orbit';
+    this.shiftOn = predict && this.predictShift(frame, input.simTime, spec.aimOmega);
+    let mx = mid[0];
+    let mz = mid[2];
+    if (this.shiftOn) {
+      let sx = 0;
+      let sz = 0;
+      let n = 0;
+      for (const p of framedAll) {
+        const i = this.indexOf(frame, p.id);
+        if (i < 0) continue;
+        sx += this.shift[i * 3]!; sz += this.shift[i * 3 + 2]!; n++;
+      }
+      if (n) { mx += sx / n; mz += sz / n; }
+    }
+    const midGoal: V3 = [mx, 0, mz];
+    if (snap) this.midS.reset(midGoal);
+    const midSm = this.midS.step(midGoal, 3, dt);
+
+    const goal = this.goal(kind, entry, ca, pts, framedAll, midSm, shotT, replaySeg, input, dt, snap, key, poses);
+
+    // Dead zones: the goal the springs chase moves only when the framing
+    // leaves a small zone around what the operator is already holding.
+    // A fighter right against the lens (a point behind it) must not poison the springs.
+    const tanCap = fovToTanHalf(spec.fovMax);
+    const goalTan = Number.isFinite(goal.tanHalf * goal.zoomMul) ? goal.tanHalf * goal.zoomMul : tanCap;
+    const deadZoned = kind !== 'jib' && kind !== 'free' && kind !== 'orbit';
+    if (snap || !deadZoned || this.heldTan <= 0) {
+      this.heldAim[0] = goal.target[0]; this.heldAim[1] = goal.target[1]; this.heldAim[2] = goal.target[2];
+      this.heldTan = goalTan;
+    } else {
+      const ox = goal.target[0] - this.heldAim[0];
+      const oy = goal.target[1] - this.heldAim[1];
+      const oz = goal.target[2] - this.heldAim[2];
+      const ol = Math.sqrt(ox * ox + oy * oy + oz * oz);
+      const depth = Math.max(0.5, dist(goal.pos, goal.target));
+      const r = (spec.handheldDeg > 0.1 || kind === 'mainTight' || kind === 'follow' ? OPERATOR.aimDeadZoneTight : OPERATOR.aimDeadZone)
+        * this.tanS.x * depth;
+      if (ol > r) {
+        const k = 1 - r / ol;
+        this.heldAim[0] += ox * k; this.heldAim[1] += oy * k; this.heldAim[2] += oz * k;
+      }
+      const lr = Math.log(goalTan / this.heldTan);
+      if (lr > OPERATOR.zoomDeadOut) this.heldTan *= Math.exp(lr - OPERATOR.zoomDeadOut);
+      else if (lr < -OPERATOR.zoomDeadIn) this.heldTan *= Math.exp(lr + OPERATOR.zoomDeadIn);
+    }
 
     // Smooth like an operator.
     if (snap) {
       this.posS.reset(goal.pos);
-      this.aimS.reset(goal.target);
-      this.tanS.reset(goal.tanHalf * goal.zoomMul);
+      this.aimS.reset(this.heldAim);
+      this.tanS.reset(this.heldTan);
     }
-    const pos: V3 = [...(goal.posOmega === Infinity ? (this.posS.reset(goal.pos), goal.pos) : this.posS.step(goal.pos, goal.posOmega, dt))] as V3;
-    let aim: V3 = [...this.aimS.step(goal.target, spec.aimOmega, dt)] as V3;
-    const goalTan = goal.tanHalf * goal.zoomMul;
-    let tanHalf = this.tanS.step(goalTan, goalTan > this.tanS.x ? spec.zoomOutOmega : goal.zoomIn ?? spec.zoomInOmega, dt);
+    const easing = timeline < this.zoomUntil;
+    const aimOmega = easing ? Math.max(spec.aimOmega, OPERATOR.zoomTransitionAim) : spec.aimOmega;
+    const pos: V3 = [0, 0, 0];
+    if (goal.posOmega === Infinity) this.posS.reset(goal.pos);
+    else this.posS.step(goal.pos, goal.posOmega, dt);
+    pos[0] = this.posS.x[0]; pos[1] = this.posS.x[1]; pos[2] = this.posS.x[2];
+    // A lens walking the apron goes round a post, not through it (the
+    // spring's straight line between two spots can cut the corner).
+    if (!goal.allowInside && pos[1] < ca.wallHeight + 0.4) this.clearOfPosts(pos);
+    // A lens that works among the people in the cage (post-fight, corner,
+    // follow) never ends up in someone's head or back.
+    if (goal.allowInside && kind !== 'overhead' && kind !== 'free' && kind !== 'orbit') this.clearOfBodies(pos, liveAll);
+    const aimSm = this.aimS.step(this.heldAim, aimOmega, dt);
+    let aim: V3 = [aimSm[0], aimSm[1], aimSm[2]];
+    const zoomOmega = easing ? OPERATOR.zoomTransitionZoom
+      : this.heldTan > this.tanS.x ? spec.zoomOutOmega : goal.zoomIn ?? spec.zoomInOmega;
+    let tanHalf = this.tanS.step(this.heldTan, zoomOmega, dt);
 
     // Safety: whatever the springs are doing, the framed bodies stay in the frame.
     if (goal.keep.length > 0) {
       const tanMax = fovToTanHalf(spec.fovMax);
       let need = requiredTanHalf(pos, aim, goal.keep, this.aspect) / goal.keepSafe;
+      // Even the widest lens cannot hold them from where the operator is
+      // aiming: a quick but continuous whip toward the framing goal (a
+      // snap would read as a cut); the spring keeps its momentum.
       if (need > tanMax) {
-        aim = [...goal.target] as V3;
-        this.aimS.reset(aim);
+        aim = lerpV(aim, goal.target, 1 - Math.exp(-12 * Math.max(dt, 1 / 120)));
+        this.aimS.set(aim);
         need = requiredTanHalf(pos, aim, goal.keep, this.aspect) / goal.keepSafe;
       }
+      if (!Number.isFinite(need)) need = tanMax;
       if (tanHalf < need) {
+        // Open the lens exactly as far as needed; keep an opening zoom's
+        // momentum (no velocity reset) so the move stays smooth.
         tanHalf = need;
-        this.tanS.reset(need);
+        this.tanS.x = need;
+        if (this.tanS.v < 0) this.tanS.v = 0;
+        if (this.heldTan < need) this.heldTan = need;
       }
     }
     tanHalf = clamp(tanHalf, fovToTanHalf(spec.fovMin), fovToTanHalf(spec.fovMax));
 
+    this.dbg.aim[0] = aim[0]; this.dbg.aim[1] = aim[1]; this.dbg.aim[2] = aim[2];
     // Handheld float and strike shake: pure functions of timeline time.
     const b = lookBasis(pos, aim);
     const depth = Math.max(0.5, dist(pos, aim));
@@ -380,7 +655,11 @@ export class BroadcastCameraDirector implements CameraDirector {
     yaw += shake * tanHalf * 0.6;
     pitch += shake * tanHalf;
     roll += shake * 0.004;
-    aim = add(aim, add(scale(b.right, Math.tan(yaw) * depth), scale(b.up, Math.tan(pitch) * depth)));
+    const ty = Math.tan(yaw) * depth;
+    const tp = Math.tan(pitch) * depth;
+    aim[0] += b.right[0] * ty + b.up[0] * tp;
+    aim[1] += b.right[1] * ty + b.up[1] * tp;
+    aim[2] += b.right[2] * ty + b.up[2] * tp;
 
     // Where a lens may physically be.
     const anchor = ca.shape === 'unbounded' ? midSm : undefined;
@@ -403,20 +682,90 @@ export class BroadcastCameraDirector implements CameraDirector {
     };
     this.lastState = state;
 
-    const plan = this.plan;
     let blocked: string | null = null;
-    if (plan && source === 'plan') {
-      const tick = Math.round(timeline / TICK_S);
-      const bl = plan.blocked.filter((x) => x.tick <= tick && x.tick > tick - 12).pop();
+    if (source === 'plan') {
+      const plan = this.shotPlan ?? this.onlinePlan;
+      const bl = plan ? lastBlockedBefore(plan.blocked, Math.round(timeline / TICK_S)) : null;
       if (bl) blocked = `${bl.wanted} held: ${bl.reason === 'strike' ? '±0.4 s strike window' : bl.reason === 'minShot' ? 'minimum shot length' : 'knockdown hold'}`;
     }
-    this.dbg = {
-      shot: kind, label: state.shotName, source, entryIndex, reason: entry.reason,
-      shotSeconds: timeline - this.shotStartTimeline, timeline, blocked,
-      occlusion: Math.round(this.lastOcclusion * 100) / 100,
-      avoid: [Math.round(this.avoidA.x * 100) / 100, Math.round(this.avoidB.x * 100) / 100],
-    };
+    const dbg = this.dbg;
+    dbg.shot = kind; dbg.label = state.shotName; dbg.source = source; dbg.entryIndex = entryIndex; dbg.reason = entry.reason;
+    dbg.shotSeconds = timeline - this.shotStartTimeline; dbg.timeline = timeline; dbg.blocked = blocked;
+    dbg.occlusion = Math.round(this.lastOcclusion * 100) / 100;
+    dbg.avoid[0] = Math.round(this.avoidA.x * 100) / 100;
+    dbg.avoid[1] = Math.round(this.avoidB.x * 100) / 100;
+    dbg.subjects = entry.subjects.length ? entry.subjects : focusIds ?? entry.subjects;
+    dbg.shake = shake;
     return state;
+  }
+
+  // ---- prediction and focus (camera polish pass) ------------------------------
+
+  private indexOf(frame: TickSnapshot, id: number): number {
+    const fs = frame.fighters;
+    if (fs[id]?.id === id) return id;
+    for (let i = 0; i < fs.length; i++) if (fs[i]!.id === id) return i;
+    return -1;
+  }
+
+  /** Fighter `i`'s rough mass centre at recorded time `t` into `out` (false: another phase or round). */
+  private massAt(i: number, t: number, phase: string, round: number, out: V3): boolean {
+    const tick = Math.floor(t / TICK_S + 1e-9);
+    const f0 = this.frameAt(tick);
+    if (!f0 || f0.phase !== phase || f0.round !== round) return false;
+    const a = f0.fighters[i];
+    if (!a) return false;
+    const f1 = this.frameAt(tick + 1);
+    const b = f1 && f1.tick === f0.tick + 1 && f1.phase === phase ? f1.fighters[i] ?? a : a;
+    const al = clamp(t / TICK_S - f0.tick, 0, 1);
+    out[0] = lerp(a.x, b.x, al);
+    out[1] = lerp(postureY(a.posture, a.role), postureY(b.posture, b.role), al);
+    out[2] = lerp(a.z, b.z, al);
+    return true;
+  }
+
+  /**
+   * Per-fighter predictive shift into `this.shift`: a centred average of the
+   * recorded mass centre around `now + lead`, minus the centre now.
+   */
+  private predictShift(frame: TickSnapshot, now: number, aimOmega: number): boolean {
+    const n = frame.fighters.length;
+    if (this.shift.length < n * 3) this.shift = new Float64Array(n * 3);
+    const lead = Math.min(OPERATOR.leadMaxS, (OPERATOR.leadShare * 2) / Math.max(0.5, aimOmega));
+    const cur = this.scratchA;
+    const smp = this.scratchB;
+    const N = OPERATOR.smoothSamples;
+    const W = OPERATOR.smoothHalfS;
+    let any = false;
+    for (let i = 0; i < n; i++) {
+      let sx = 0, sy = 0, sz = 0;
+      if (this.massAt(i, now, frame.phase, frame.round, cur)) {
+        for (let k = 0; k < N; k++) {
+          const t = now + lead + W * ((2 * k) / (N - 1) - 1);
+          // Past the recording's end, or into another phase: the fighter is where he is now.
+          if (!this.massAt(i, t, frame.phase, frame.round, smp)) { smp[0] = cur[0]; smp[1] = cur[1]; smp[2] = cur[2]; }
+          sx += smp[0]; sy += smp[1]; sz += smp[2];
+        }
+        sx = sx / N - cur[0]; sy = sy / N - cur[1]; sz = sz / N - cur[2];
+        const l = Math.hypot(sx, sz);
+        if (l > OPERATOR.maxShiftM) { sx *= OPERATOR.maxShiftM / l; sz *= OPERATOR.maxShiftM / l; }
+        any = true;
+      }
+      this.shift[i * 3] = sx; this.shift[i * 3 + 1] = sy; this.shift[i * 3 + 2] = sz;
+    }
+    return any;
+  }
+
+  private readonly scratchA: V3 = [0, 0, 0];
+  private readonly scratchB: V3 = [0, 0, 0];
+
+  /** Multi-fighter bouts: whom the lens frames (`focusGroup`), cached per tick. */
+  private focusGroup(frame: TickSnapshot, input: FrameInput): number[] | null {
+    if (frame.fighters.length <= 2) return null;
+    if (this.focusCache.tick === frame.tick) return this.focusCache.ids;
+    const ids = focusGroup(frame, this.frames ? this.events : input.events, this.frames !== null);
+    this.focusCache = { tick: frame.tick, ids };
+    return ids;
   }
 
   // ---- plan access ---------------------------------------------------------
@@ -428,14 +777,17 @@ export class BroadcastCameraDirector implements CameraDirector {
     const frame = input.frame;
     if (!this.online || frame.tick < this.online.lastTick) {
       const strikes = new StrikeIndex();
+      const planner = new ShotPlanner({ arena: this.ca!, seed: this.seed, breakSeconds: this.breakSeconds }, strikes);
       this.online = {
-        planner: new ShotPlanner({ arena: this.ca!, seed: this.seed, breakSeconds: this.breakSeconds }, strikes),
-        strikes, lastTick: frame.tick - 1,
+        planner, strikes, lastTick: frame.tick - 1,
+        view: { entries: planner.entries, lastTick: frame.tick - 1, blocked: planner.blocked },
       };
     }
     const on = this.online;
     if (frame.tick > on.lastTick) {
-      const evs = input.events.filter((e) => e.tick > on.lastTick && e.tick <= frame.tick);
+      const evs = this.liveEvents;
+      evs.length = 0;
+      for (const e of input.events) if (e.tick > on.lastTick && e.tick <= frame.tick) evs.push(e);
       for (const e of evs) if (e.kind === 'strike') on.strikes.add(e.tick);
       for (const f of frame.fighters) {
         if (f.actionStage === 'startup' || f.actionStage === 'contact') on.strikes.add(f.actionDetail.contactTick);
@@ -443,8 +795,10 @@ export class BroadcastCameraDirector implements CameraDirector {
       on.planner.step(frame, evs);
       on.lastTick = frame.tick;
     }
-    return { entries: on.planner.entries, lastTick: on.lastTick, blocked: on.planner.blocked };
+    on.view.lastTick = on.lastTick;
+    return on.view;
   }
+  private readonly liveEvents: SimEvent[] = [];
 
   private frameAt(tick: number): TickSnapshot | null {
     const fs = this.frames;
@@ -461,11 +815,14 @@ export class BroadcastCameraDirector implements CameraDirector {
 
   private makeEntry(kind: ShotKind, frame: TickSnapshot, t: number, reason: ShotPlanEntry['reason']): ShotPlanEntry {
     const ca = this.ca!;
-    const azimuth = kind === 'cageside' || kind === 'ground' || kind === 'finish'
-      ? chooseOperator(ca, frame, [], this.seed, `manual:${frame.tick}`)
-      : ca.mainAzimuth;
+    // A pinned corner camera during a round stays on one fighter (the red
+    // corner's) from the apron spot that shows him best.
+    const subjects = kind === 'corner' && frame.fighters[0] ? [frame.fighters[0].id] : [];
+    const azimuth = kind === 'cageside' || kind === 'ground' || kind === 'finish' || (kind === 'corner' && frame.phase !== 'break')
+      ? chooseOperator(ca, frame, subjects, this.seed, `manual:${frame.tick}`)
+      : kind === 'corner' ? cornerAzimuth(ca, frame, subjects[0] ?? 0, this.seed) : ca.mainAzimuth;
     return {
-      kind, startTick: Math.round(t / TICK_S), startT: t, reason, forced: false, subjects: [], azimuth,
+      kind, startTick: Math.round(t / TICK_S), startT: t, reason, forced: false, subjects, azimuth,
       sweep: kind === 'jib' ? 0.8 : 0, heights: [3.2, 5.2], durationS: 20, seed: hashString(`${this.seed}:${kind}:${frame.tick}`),
     };
   }
@@ -479,7 +836,8 @@ export class BroadcastCameraDirector implements CameraDirector {
   }
 
   private needsReposition(e: ShotPlanEntry, mid: V3, input: FrameInput): boolean {
-    if (e.kind !== 'cageside' && e.kind !== 'ground') return false;
+    if (e.kind !== 'cageside' && e.kind !== 'ground' && e.kind !== 'corner') return false;
+    if (e.kind === 'corner' && input.frame.phase === 'break') return false;
     const ca = this.ca!;
     const wd = wallDistanceAt(ca, e.azimuth);
     if (!Number.isFinite(wd)) return false;
@@ -547,17 +905,27 @@ export class BroadcastCameraDirector implements CameraDirector {
    * hips) and what may block it (the referee; the other fighters when the
    * shot is about one of them).
    */
-  private sight(subjects: FighterPoints[], all: FighterPoints[]): { samples: SamplePoint[]; occluders: Capsule[] } {
-    const samples: SamplePoint[] = [];
-    const occluders: Capsule[] = [];
-    const ids = new Set(subjects.map((p) => p.id));
+  private sight(subjects: readonly FighterPoints[], all: readonly FighterPoints[], cage = true): { samples: SamplePoint[]; occluders: Capsule[] } {
+    const out = this.sightOut;
+    const samples = out.samples;
+    const occluders = out.occluders;
+    samples.length = 0;
+    occluders.length = 0;
     for (const p of all) {
-      if (ids.has(p.id)) samples.push(...subjectSamples(p));
-      else occluders.push(...fighterCapsules(p));
+      if (subjects.includes(p)) for (const x of subjectSamples(p)) samples.push(x);
+      else for (const c of fighterCapsules(p)) occluders.push(c);
     }
-    if (this.refereePose) occluders.push(...bodyCapsules(this.refereePose));
-    for (const w of this.extraBodies) occluders.push(...bodyCapsules(w));
-    return { samples, occluders };
+    if (this.bodyCapsDirty) {
+      this.bodyCapsDirty = false;
+      this.bodyCaps.length = 0;
+      if (this.refereePose) for (const c of bodyCapsules(this.refereePose)) this.bodyCaps.push(c);
+      for (const w of this.extraBodies) for (const c of bodyCapsules(w)) this.bodyCaps.push(c);
+    }
+    for (const c of this.bodyCaps) occluders.push(c);
+    // The posts and the top rail (camera polish pass): a lens outside the cage
+    // walks / slides until neither crosses the fighter's face.
+    if (cage) for (const c of this.cageCaps) occluders.push(c);
+    return out;
   }
 
   /**
@@ -660,20 +1028,22 @@ export class BroadcastCameraDirector implements CameraDirector {
   }
 
   private goal(
-    kind: ShotKind, entry: ShotPlanEntry, ca: CameraArena, pts: FighterPoints[], mid: V3, shotT: number,
-    seg: ReplayState['segment'] | null, input: FrameInput, dt: number, snap: boolean, key: string,
+    kind: ShotKind, entry: ShotPlanEntry, ca: CameraArena, pts: FighterPoints[], framedAll: FighterPoints[], mid: V3,
+    shotT: number, seg: ReplayState['segment'] | null, input: FrameInput, dt: number, snap: boolean, key: string,
     poses: readonly WorldPose[] = [],
   ): Goal {
     this.lastOcclusion = 0;
     const spec = SHOTS[kind];
     const aspect = this.aspect;
-    const live = pts.filter((p) => p.posture !== 'out');
-    const all = live.length ? live : pts;
-    const subj = entry.subjects.length ? all.filter((p) => entry.subjects.includes(p.id)) : all;
+    const live = this.liveBuf;
+    const everyone = live.length ? live : pts;
+    // `all`: whom the wide shots frame (multi-fighter: the focus group).
+    const all = framedAll.length ? framedAll : everyone;
+    const subj = entry.subjects.length ? everyone.filter((p) => entry.subjects.includes(p.id)) : all;
     const subjects = subj.length ? subj : all;
     const anyDown = (fs: FighterPoints[]): boolean => fs.some((p) => p.posture === 'ground' || p.posture === 'down' || p.posture === 'out');
     const setFor = (fs: FighterPoints[], base: FramingSet): FramingSet => (base === 'torso' && anyDown(fs) ? 'ground' : base);
-    const headOf = (id: number): V3 | null => all.find((p) => p.id === id)?.head ?? null;
+    const headOf = (id: number): V3 | null => everyone.find((p) => p.id === id)?.head ?? null;
     let focus: V3 | null = null;
     if (seg && this.replay) {
       const r = this.replay.plan;
@@ -682,14 +1052,43 @@ export class BroadcastCameraDirector implements CameraDirector {
     const zoomMul = seg ? 1 - seg.pushIn * easeInOut(shotT / Math.max(0.5, (seg.toTick - seg.fromTick) * TICK_S)) : 1;
     const unbounded = ca.shape === 'unbounded';
 
-    const framed = (pos: V3, fs: FighterPoints[], set: FramingSet, safe: number, extra: V3[] = [], bias: [number, number] = [0, 0]): Goal => {
+    const framed = (pos: V3, fs: FighterPoints[], set: FramingSet, safe: number, extra: V3[] = NO_POINTS, bias: [number, number] = NO_BIAS): Goal => {
       const keep = framingPoints(fs, set);
-      const g = solveFraming(pos, [...keep, ...extra], aspect, safe, bias);
-      // Never tighter than the shot's minimum frame height at the subject.
-      const minTan = spec.minFrameM / 2 / Math.max(0.5, dist(pos, g.target));
-      const chest = fs.length ? fs.reduce<V3>((a, p) => add(a, scale(p.chest, 1 / fs.length)), [0, 0, 0]) : g.target;
+      // Predictive framing: each fighter's points moved to where the recording
+      // says he is heading (the safety clamp keeps the points as they are now).
+      let aimPts: V3[] = keep;
+      if (this.shiftOn && fs.length) {
+        aimPts = [];
+        const per = keep.length / fs.length;
+        for (let k = 0; k < keep.length; k++) {
+          const i = this.indexOf(input.frame, fs[Math.floor(k / per)]!.id);
+          const q = keep[k]!;
+          aimPts.push(i < 0 ? q : [q[0] + this.shift[i * 3]!, q[1] + this.shift[i * 3 + 1]!, q[2] + this.shift[i * 3 + 2]!]);
+        }
+      }
+      const base = aimPts;
+      if (extra.length) {
+        aimPts = aimPts.slice();
+        for (const e of extra) aimPts.push(e);
+      }
+      let g = solveFraming(pos, aimPts, aspect, safe, bias, this.fgoal);
+      // The extras (a raised hand, the referee) are nice to have: when even the
+      // widest lens cannot hold them too, the subject comes first.
+      if (extra.length && g.tanHalf > fovToTanHalf(spec.fovMax)) g = solveFraming(pos, base, aspect, safe, bias, this.fgoal);
+      const target: V3 = [g.target[0], g.target[1], g.target[2]];
+      // Never tighter than the shot's minimum frame height at the subject —
+      // except ground work, which a broadcast shoots tighter (the pair lies
+      // low and long; camera polish pass).
+      const onCanvas = fs.length > 0 && fs.every((p) => p.posture === 'ground');
+      const minFrame = onCanvas ? Math.min(spec.minFrameM, GROUND_MIN_FRAME_M[kind] ?? spec.minFrameM) : spec.minFrameM;
+      const minTan = minFrame / 2 / Math.max(0.5, dist(pos, target));
+      let chest: V3 = target;
+      if (fs.length) {
+        chest = [0, 0, 0];
+        for (const p of fs) { chest[0] += p.chest[0] / fs.length; chest[1] += p.chest[1] / fs.length; chest[2] += p.chest[2] / fs.length; }
+      }
       return {
-        pos, target: g.target, tanHalf: Math.max(g.tanHalf, minTan), keep, keepSafe: Math.min(0.9, safe + 0.14),
+        pos, target, tanHalf: Math.max(g.tanHalf, minTan), keep, keepSafe: Math.min(0.9, safe + 0.14),
         focus: focus ?? chest, posOmega: Infinity, allowInside: false, zoomMul,
       };
     };
@@ -706,8 +1105,9 @@ export class BroadcastCameraDirector implements CameraDirector {
         const tz = -Math.sin(az);
         const kd = kind === 'main' && !seg ? this.knockdownFocus(input) : null;
         const shotSubjects = kd ? all.filter((p) => p.id === kd.downed || p.id === kd.by) : kind === 'main' ? all : subjects;
+        // MAIN and MAIN TIGHT are one operator (the zoom transition keeps his dodge).
         const pos = this.dodge(
-          `${key}:main`, AVOID.mainOffsets,
+          kind === 'reverse' ? `${key}:reverse` : `hard:${source(entry, seg)}`, AVOID.mainOffsets,
           (o) => [home[0] + tx * o[0], Math.min(ca.ceiling - 0.8, home[1] + o[1]), home[2] + tz * o[0]],
           this.sight(kd ? all.filter((p) => p.id === kd.downed) : shotSubjects, all), dt, snap,
         );
@@ -718,9 +1118,13 @@ export class BroadcastCameraDirector implements CameraDirector {
           const g = framed(pos, shotSubjects, 'full', 0.72);
           return { ...g, keepSafe: 0.74, zoomIn: 3.4, posOmega: Infinity };
         }
-        // Lead room: frame a little of where the pair is heading.
-        const vx = all.reduce((s, p) => s + p.velocity[0], 0) / Math.max(1, all.length);
-        const vz = all.reduce((s, p) => s + p.velocity[1], 0) / Math.max(1, all.length);
+        // Lead room: frame a little of where the pair is heading (with a
+        // recording, `mid` already leads; live, the snapshot velocity).
+        let vx = 0;
+        let vz = 0;
+        if (!this.shiftOn) {
+          for (const p of all) { vx += p.velocity[0] / Math.max(1, all.length); vz += p.velocity[1] / Math.max(1, all.length); }
+        }
         const lead: V3 = [mid[0] + clamp(vx * 0.6, -0.6, 0.6), 1.0, mid[2] + clamp(vz * 0.6, -0.6, 0.6)];
         if (kind === 'mainTight' || (seg && kind === 'reverse')) {
           const spread = subjects.length > 1 ? dist(subjects[0].hips, subjects[1].hips) : 0;
@@ -749,11 +1153,11 @@ export class BroadcastCameraDirector implements CameraDirector {
           const at = (dirAz: number): V3 => {
             let r = 2.3;
             let p: V3 = [w.ground[0] + Math.sin(dirAz) * r, 1.62, w.ground[2] + Math.cos(dirAz) * r];
-            while (r > 1.2 && !insideWall(ca, p[0], p[2], 0.4)) {
+            while (r > 1.2 && !insideWall(ca, p[0], p[2], -0.4)) {
               r -= 0.1;
               p = [w.ground[0] + Math.sin(dirAz) * r, 1.62, w.ground[2] + Math.cos(dirAz) * r];
             }
-            return p;
+            return keepInside(ca, p, 0.4);
           };
           if (snap || this.finishKey !== key) {
             this.finishKey = key;
@@ -763,11 +1167,19 @@ export class BroadcastCameraDirector implements CameraDirector {
             const sight = this.sight([w], all);
             let best = base + 0.45;
             let bestScore = Infinity;
-            [0.45, -0.45, 0.8, -0.8, 0, 1.2, -1.2].forEach((o, i) => {
+            // Room matters most: a lens pulled in to 1.3 m cannot hold the
+            // winner and the raised hand even at its widest (camera polish pass).
+            FINISH_TURNS.forEach((o, i) => {
               const p = at(base + o);
-              const inside = insideWall(ca, p[0], p[2], 0.35) ? 0 : 5;
+              const inside = insideWall(ca, p[0], p[2], -0.35) ? 0 : 5;
               const room = Math.hypot(p[0] - w.ground[0], p[2] - w.ground[2]);
-              const score = occlusion(p, sight.samples, sight.occluders) * 4 + inside + (2.3 - room) + i * 0.05;
+              // ...and nobody else within arm's reach of the lens.
+              let crowd = 0;
+              for (const q of everyone) {
+                if (q.id === w.id) continue;
+                crowd += Math.max(0, 1.2 - Math.hypot(p[0] - q.hips[0], p[2] - q.hips[2])) * 4;
+              }
+              const score = occlusion(p, sight.samples, sight.occluders) * 4 + inside + (2.3 - room) * 3 + crowd + i * 0.05;
               if (score < bestScore) { bestScore = score; best = base + o; }
             });
             this.finishDir = best;
@@ -797,14 +1209,30 @@ export class BroadcastCameraDirector implements CameraDirector {
       case 'ground': {
         const low = kind === 'ground';
         const az0 = entry.azimuth;
-        const apron = (az: number): V3 => {
-          if (unbounded) return add(mid, atAzimuth(az, 3.4, 0));
+        const apron = (azIn: number): V3 => {
+          if (unbounded) return add(mid, atAzimuth(azIn, 3.4, 0));
+          // An operator's walk stays on his side of the posts (crossing one
+          // puts it dead in front of the lens).
+          const az = this.withinPanel(az0, azIn);
           const p = atAzimuth(az, wallDistanceAt(ca, az) + PLACEMENT.handheldOutsideM, 0);
           // The operator walks the apron a little toward the action.
           const tx = Math.cos(az);
           const tz = -Math.sin(az);
           const slide = clamp((mid[0] - p[0]) * tx + (mid[2] - p[2]) * tz, -0.9, 0.9) * 0.6;
-          return [p[0] + tx * slide, 0, p[2] + tz * slide];
+          const q: V3 = [p[0] + tx * slide, 0, p[2] + tz * slide];
+          // A fighter pressed against the fence right at the lens: the
+          // operator steps back on the apron (camera polish pass), so the
+          // subject never fills the lens and the framing never runs out of fov.
+          let near = Infinity;
+          for (const f of subjects) near = Math.min(near, Math.hypot(f.hips[0] - q[0], f.hips[2] - q[2]));
+          const minD = low ? PLACEMENT.handheldMinSubjectM + 0.7 : PLACEMENT.handheldMinSubjectM;
+          if (near < minD) {
+            const back = Math.min(PLACEMENT.handheldBackOffM, minD - near);
+            const r = Math.hypot(q[0], q[2]) || 1;
+            q[0] += (q[0] / r) * back;
+            q[2] += (q[2] / r) * back;
+          }
+          return this.clearOfPosts(q);
         };
         let pos: V3 = apron(az0);
         // Standing work is shot through the mesh; a fighter on the canvas is
@@ -825,7 +1253,8 @@ export class BroadcastCameraDirector implements CameraDirector {
           (o) => { const p = apron(az0 + o[0]); return [p[0], hh, p[2]]; },
           this.sight(subjects, all), dt, snap,
         );
-        const set = kind === 'finish' ? 'torso' : low ? 'ground' : setFor(subjects, 'torso');
+        // The low handheld pinned on standing fighters: head to waist from below.
+        const set = kind === 'finish' ? 'torso' : low ? (anyDown(subjects) ? 'ground' : 'torso') : setFor(subjects, 'torso');
         const safe = seg ? 0.74 : spec.safe;
         // The finish: the winner and the referee raising his hand, both in frame.
         const extra: V3[] = [];
@@ -837,7 +1266,9 @@ export class BroadcastCameraDirector implements CameraDirector {
             if (y > w.tip[B.head * 3 + 1]) extra.push([w.tip[hand * 3], y, w.tip[hand * 3 + 2]]);
           }
         }
-        const g = framed(pos, subjects, set, safe, extra, low ? [0, 0.12] : [0, 0.05]);
+        // Low on standing fighters the lens looks up: aim a little lower so the
+        // lights above their heads do not take a third of the picture.
+        const g = framed(pos, subjects, set, safe, extra, low ? (set === 'torso' ? [0, -0.12] : [0, 0.12]) : [0, 0.05]);
         return { ...g, posOmega: 1.4, keepSafe: 0.9 };
       }
 
@@ -886,11 +1317,11 @@ export class BroadcastCameraDirector implements CameraDirector {
             let r = 1.9;
             const a = base + side + o;
             let p: V3 = [f.ground[0] + Math.sin(a) * r, 1.38, f.ground[2] + Math.cos(a) * r];
-            while (r > 1.2 && !insideWall(ca, p[0], p[2], 0.35)) {
+            while (r > 1.2 && !insideWall(ca, p[0], p[2], -0.35)) {
               r -= 0.1;
               p = [f.ground[0] + Math.sin(a) * r, 1.38, f.ground[2] + Math.cos(a) * r];
             }
-            return p;
+            return keepInside(ca, p, 0.35);
           };
           const pos = this.dodge(
             `${key}:cornerIn`, AVOID.handheldAzimuths.map((x) => [x * 0.7, 0] as const), (o) => at(o[0]),
@@ -906,25 +1337,65 @@ export class BroadcastCameraDirector implements CameraDirector {
           const p: V3 = unbounded || !Number.isFinite(wd)
             ? add(f.ground, atAzimuth(az, 2.6, 0))
             : atAzimuth(az, wd + PLACEMENT.cornerOutsideM, 0);
-          return [p[0], ch, p[2]];
+          // Step back along the apron from a fighter right at the lens.
+          const near = Math.hypot(f.hips[0] - p[0], f.hips[2] - p[2]);
+          if (!unbounded && near < 2) {
+            const r = Math.hypot(p[0], p[2]) || 1;
+            const back = Math.min(PLACEMENT.handheldBackOffM, 2 - near);
+            p[0] += (p[0] / r) * back;
+            p[2] += (p[2] / r) * back;
+          }
+          return this.clearOfPosts([p[0], ch, p[2]]);
         };
         const pos = this.dodge(
           `${key}:corner`, AVOID.handheldAzimuths.map((a) => [a * 0.6, 0] as const), (o) => at(az0 + o[0]),
           this.sight([f], all), dt, snap,
         );
-        const g = framed(pos, [f], f.posture === 'standing' || f.posture === 'clinch' ? 'face' : 'ground', spec.safe);
+        // Live action (a pinned corner camera during a round): head to waist,
+        // a face-tight lens cannot hold a moving fighter.
+        const standingF = f.posture === 'standing' || f.posture === 'clinch';
+        const set: FramingSet = !standingF ? 'ground' : input.frame.phase === 'round' ? 'torso' : 'face';
+        const g = framed(pos, [f], set, set === 'torso' ? 0.62 : spec.safe);
         return { ...g, posOmega: 1.4, keepSafe: 0.92, focus: f.head };
       }
 
       case 'follow': {
         const id = entry.subjects[0] ?? 0;
-        const f = all.find((p) => p.id === id) ?? all[0];
-        const o = all.find((p) => p.id !== f.id);
-        const away = o ? norm(sub([f.hips[0], 0, f.hips[2]], [o.hips[0], 0, o.hips[2]])) : norm(atAzimuth(f.facing + Math.PI, 1));
-        const side: V3 = [away[2], 0, -away[0]];
-        const pos: V3 = [f.hips[0] + away[0] * 2.9 + side[0] * 0.7, 2.2, f.hips[2] + away[2] * 2.9 + side[2] * 0.7];
-        const g = framed(pos, all, 'full', spec.safe);
-        return { ...g, posOmega: 2.2, keepSafe: 0.92, allowInside: true };
+        const f = everyone.find((p) => p.id === id) ?? everyone[0]!;
+        // His opponent: the nearest other fighter.
+        let o: FighterPoints | null = null;
+        for (const p of everyone) {
+          if (p.id !== f.id && (!o || distXZ(p.hips, f.hips) < distXZ(o.hips, f.hips))) o = p;
+        }
+        // Away from the opponent — a direction that is only trusted with some
+        // distance between them (in a clinch it spins) and swung smoothly.
+        const sep = o ? distXZ(f.hips, o.hips) : 0;
+        const rawAz = o && sep > 0.45 ? Math.atan2(f.hips[0] - o.hips[0], f.hips[2] - o.hips[2]) : f.facing + Math.PI;
+        if (snap || this.followKey !== key) {
+          this.followKey = key;
+          this.followAz.reset(rawAz);
+        } else {
+          const target = this.followAz.x + wrapAngle(rawAz - this.followAz.x);
+          // Weight the pull by how much the direction can be trusted.
+          const w = o ? clamp((sep - 0.45) / 0.8, 0, 1) : 0.3;
+          this.followAz.step(this.followAz.x + (target - this.followAz.x) * w, 1.2, dt);
+        }
+        const away: V3 = [Math.sin(this.followAz.x), 0, Math.cos(this.followAz.x)];
+        // Behind and beside him, over his shoulder; swung round toward the
+        // middle of the cage when that spot would be in (or behind) the fence.
+        let pos: V3 | null = null;
+        for (const turn of FOLLOW_TURNS) {
+          const c = Math.cos(turn);
+          const sn = Math.sin(turn);
+          const ax = away[0] * c + away[2] * sn;
+          const az = -away[0] * sn + away[2] * c;
+          const p: V3 = [f.hips[0] + ax * 3.4 + az * 0.7, 2.4, f.hips[2] + az * 3.4 - ax * 0.7];
+          if (unbounded || insideWall(ca, p[0], p[2], -0.5)) { pos = p; break; }
+        }
+        if (!pos) pos = keepInside(ca, [f.hips[0] + away[0] * 3.4, 2.4, f.hips[2] + away[2] * 3.4], 0.5);
+        // Him head to toe, his opponent's head (over the shoulder).
+        const g = framed(pos, [f], 'full', spec.safe, o ? [o.crown, o.head] : NO_POINTS);
+        return { ...g, posOmega: 1.3, keepSafe: 0.92, allowInside: true };
       }
 
       case 'orbit':
@@ -937,6 +1408,16 @@ export class BroadcastCameraDirector implements CameraDirector {
       }
     }
   }
+}
+
+/** An in-cage lens at least `m` inside the wall (pulled in radially), never in the mesh. */
+function keepInside(ca: CameraArena, p: V3, m: number): V3 {
+  if (ca.shape === 'unbounded') return p;
+  const r = Math.hypot(p[0], p[2]);
+  const wd = wallDistanceAt(ca, Math.atan2(p[0], p[2]));
+  if (!Number.isFinite(wd) || r <= wd - m || r < 1e-6) return p;
+  const k = Math.max(0, wd - m) / r;
+  return [p[0] * k, p[1], p[2] * k];
 }
 
 /** Azimuth (sim convention) a posed body's chest faces: the rest pose faces +Z. */
