@@ -118,6 +118,16 @@ const DISCIPLINE_KEYS: Readonly<Record<string, CoreDisciplineId>> = {
   mma: 'mmaIntegration',
 };
 
+/**
+ * Look a user-supplied key up in a plain table. Imported files choose the
+ * keys, so a bare `table[key]` would resolve `toString`, `constructor` or
+ * `__proto__` to something off Object.prototype and crash (or poison) the
+ * code after it. Only the table's own entries count.
+ */
+function own<V>(table: Readonly<Record<string, V>>, key: unknown): V | undefined {
+  return typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
 // --------------------------------------------------------------------------
 // Plausible-but-not-mandatory ranges (01 §2.1 population priors)
 // --------------------------------------------------------------------------
@@ -257,6 +267,11 @@ export function validateFighter(def: unknown): ValidationResult {
   return { ok: !iss.list.some((i) => i.severity === 'error'), issues: iss.list };
 }
 
+/** Longest fighter name the editor, the HUD and every dialog are laid out for. */
+export const NAME_MAX = 60;
+/** Ids are slugs of names plus a suffix; anything longer is not one we wrote. */
+export const ID_MAX = 160;
+
 function validateIdentity(def: Record<string, unknown>, iss: Issues): void {
   // A missing `schema` is an older hand-written file, which is fine; a schema
   // this build has no migration for is not (09 §3.6).
@@ -266,6 +281,12 @@ function validateIdentity(def: Record<string, unknown>, iss: Issues): void {
   for (const key of ['id', 'name', 'short'] as const) {
     const v = def[key];
     if (typeof v !== 'string' || v.trim() === '') iss.error(key, `${key} must be a non-empty string`);
+  }
+  if (typeof def.name === 'string' && def.name.length > NAME_MAX) {
+    iss.error('name', `a name can be at most ${NAME_MAX} characters (this one has ${def.name.length}); shorten it`);
+  }
+  if (typeof def.id === 'string' && def.id.length > ID_MAX) {
+    iss.error('id', `an id can be at most ${ID_MAX} characters (this one has ${def.id.length})`);
   }
   if (typeof def.short === 'string' && def.short.length > 6) {
     iss.warn('short', 'the HUD truncates a short name past 6 characters');
@@ -325,7 +346,7 @@ function validateBody(body: unknown, iss: Issues): void {
 
   if (body.weightClass !== undefined) {
     iss.enumOf('body.weightClass', body.weightClass, 'weight class', WEIGHT_CLASS_IDS);
-    const limit = WEIGHT_CLASS_LIMIT_KG[body.weightClass as NonNullable<BodySpec['weightClass']>];
+    const limit = own(WEIGHT_CLASS_LIMIT_KG as Readonly<Record<string, number>>, body.weightClass);
     const scale = typeof weighIn === 'number' ? weighIn : body.massKg;
     if (limit !== undefined && typeof scale === 'number' && scale > limit) {
       iss.warn('body.weightClass', `${scale} kg misses the ${limit} kg limit of ${String(body.weightClass)}`);
@@ -435,7 +456,7 @@ function validateDisciplines(disciplines: unknown, mental: unknown, iss: Issues)
 
   for (const [key, raw] of Object.entries(disciplines)) {
     const path = `disciplines.${key}`;
-    const canonical = DISCIPLINE_KEYS[key];
+    const canonical = own(DISCIPLINE_KEYS, key);
     if (canonical === undefined) {
       iss.error(path, `unknown discipline "${key}"; 01 §2.3 models ${Object.keys(SUB_SKILLS).join(', ')}`);
       continue;
@@ -620,8 +641,12 @@ function validateDisciplineDepth(
     } else {
       iss.enumOf(`${path}.grade.system`, raw.grade.system, 'grade system', GRADE_SYSTEMS);
       const system = raw.grade.system as keyof typeof GRADE_RANKS;
-      const ranks = GRADE_RANKS[system];
-      if (ranks !== undefined && typeof raw.grade.rank === 'string' && !ranks.includes(raw.grade.rank)) {
+      const ranks = own(GRADE_RANKS, system);
+      if (typeof raw.grade.rank === 'string' && Object.prototype.hasOwnProperty.call(Object.prototype, raw.grade.rank)) {
+        // `toString`, `constructor`… would resolve to a function in the
+        // sim's prior table and derive a NaN prior: refuse it outright.
+        iss.error(`${path}.grade.rank`, `"${raw.grade.rank}" is not a rank in any grading system`);
+      } else if (ranks !== undefined && typeof raw.grade.rank === 'string' && !ranks.includes(raw.grade.rank)) {
         // Not an error: the prior resolves an unknown rank to 0 rather than
         // throwing, so the definition still derives. It is a silent zero,
         // though, which is exactly the surprise worth surfacing.
@@ -643,7 +668,7 @@ function validateDisciplineDepth(
     if (!Array.isArray(raw.specialisations)) {
       iss.error(`${path}.specialisations`, 'specialisations must be an array of ids');
     } else {
-      const catalogue = SPECIALISATIONS_BY_DISCIPLINE[discipline] ?? [];
+      const catalogue = own(SPECIALISATIONS_BY_DISCIPLINE, discipline) ?? [];
       const known = new Set(catalogue.map((c) => c.id));
       raw.specialisations.forEach((id, i) => {
         if (typeof id !== 'string') {

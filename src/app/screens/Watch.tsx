@@ -30,7 +30,7 @@ import {
   DEFAULT_SETTINGS, ARCHETYPES, configFromReplay, resolveArena, resolveRuleset,
   type SimConfig,
 } from '../../sim';
-import { BoutPlayer, TICK_SECONDS, stepSpeed } from '../replay/player';
+import { BoutPlayer, SPEED_STEPS, TICK_SECONDS, stepSpeed } from '../replay/player';
 import type { WatchBout } from '../replay/bout';
 import { cornerOf, roundBaselines } from '../replay/viewModel';
 import { Arena3D } from '../components/Arena3D';
@@ -276,7 +276,14 @@ export function Watch(props: WatchProps): JSX.Element {
 
   // ---- transport ------------------------------------------------------------
   /** Built during render, not in an effect (else missing on the first render with the bout). */
-  const player = useMemo(() => (bout ? new BoutPlayer({ frames: bout.run.frames, events: bout.run.events }) : null), [bout]);
+  const player = useMemo(() => {
+    if (!bout) return null;
+    const p = new BoutPlayer({ frames: bout.run.frames, events: bout.run.events });
+    // Match setup's "Playback speed" is where a bout starts playing (snapped
+    // to the transport's own steps, so the speed control can step from it).
+    p.setSpeed(startSpeed(bout.run.config.settings?.speed));
+    return p;
+  }, [bout]);
   const playerRef = useRef<BoutPlayer | null>(null);
   playerRef.current = player;
 
@@ -979,4 +986,12 @@ export function Watch(props: WatchProps): JSX.Element {
       </div>
     </WatchProfiler>
   );
+}
+
+/** The playback speed a bout opens at: its setting, snapped to the nearest transport step. */
+export function startSpeed(setting: number | undefined): number {
+  const v = typeof setting === 'number' && Number.isFinite(setting) && setting > 0 ? setting : 1;
+  let best: number = SPEED_STEPS[0];
+  for (const s of SPEED_STEPS) if (Math.abs(Math.log(s / v)) < Math.abs(Math.log(best / v))) best = s;
+  return best;
 }

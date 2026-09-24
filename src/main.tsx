@@ -1,21 +1,23 @@
 /**
  * Entry point. Mounts the app shell into #root.
  *
- * Nothing here talks to the network: the simulation, the replay data and the
- * renderer all ship inside the bundle, which is what lets the whole thing run
- * as one self-contained page.
+ * Nothing here talks to the network: the simulation, the fighter catalogue
+ * and the renderer all ship inside the bundle, which is what lets the whole
+ * thing run as one self-contained page.
  *
- * The shell is `src/app/App` from Phase 6 on. It still renders the legacy
- * `src/ui` Replay, Dashboard and Model views alongside the new fighter screens;
- * Phase 7 retires those three. The stylesheets are imported here, in cascade
- * order, so the creator's rules land after the ones they build on rather than
- * wherever the module graph happens to put them.
+ * Stylesheets are imported here, in cascade order: the base reset and shared
+ * classes, then the creator and match screens, and finally the design system
+ * (src/app/theme.css), whose tokens and component rules win over everything
+ * before it. The Watch screen and broadcast overlay import their own sheets,
+ * which read the same tokens.
  */
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import './ui/styles.css';
+import './app/base.css';
 import './app/creator.css';
 import './app/match.css';
+import './app/theme.css';
+import './app/pages.css';
 import { App } from './app/App';
 
 const host = document.getElementById('root');

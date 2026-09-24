@@ -36,6 +36,33 @@ export interface ScrubberProps {
 
 const KIND_LABEL = new Map(MARKER_KINDS.map((k) => [k.kind, k.label]));
 
+/** Horizontal room one marker needs, as a fraction of the lane (~12 px at ~1,000 px). */
+export const MARKER_GAP = 0.012;
+export const MARKER_ROWS = 3;
+const ROW_PX = 11;
+
+/**
+ * Collision-stack markers: each goes in the lowest row whose previous marker
+ * is at least `gap` to its left, so markers close in time sit above one
+ * another instead of on top of one another. When every row is taken it uses
+ * the row that freed up longest ago. Returns a row per input, in input order.
+ */
+export function stackMarkers(ats: readonly number[], gap = MARKER_GAP, maxRows = MARKER_ROWS): number[] {
+  const order = ats.map((at, i) => ({ at, i })).sort((a, b) => a.at - b.at || a.i - b.i);
+  const lastAt: number[] = [];
+  const rows = new Array<number>(ats.length).fill(0);
+  for (const { at, i } of order) {
+    let row = lastAt.findIndex((x) => at - x >= gap);
+    if (row < 0) {
+      if (lastAt.length < maxRows) row = lastAt.length;
+      else row = lastAt.indexOf(Math.min(...lastAt));
+    }
+    lastAt[row] = at;
+    rows[i] = row;
+  }
+  return rows;
+}
+
 function ScrubberInner(props: ScrubberProps): JSX.Element {
   const { player, signal, markers } = props;
   const frame = usePlayhead(signal, () => player.frame, 20);
@@ -53,19 +80,21 @@ function ScrubberInner(props: ScrubberProps): JSX.Element {
 
   // Markers are static per bout; only their "passed" state follows the playhead.
   const tick = tickOfFrame(player, frame);
-  const lane = useMemo(() => markers.map((m) => (
+  const rows = useMemo(() => stackMarkers(markers.map((m) => m.at)), [markers]);
+  const laneRows = rows.length > 0 ? Math.max(...rows) + 1 : 1;
+  const lane = useMemo(() => markers.map((m, i) => (
     <button
       key={`${m.kind}-${m.eventIndex}`}
       type="button"
       className="watch-marker"
       data-kind={m.kind}
-      style={{ left: `${m.at * 100}%` }}
+      style={{ left: `${m.at * 100}%`, marginTop: `${(laneRows - 1 - rows[i]) * ROW_PX}px` }}
       title={`${KIND_LABEL.get(m.kind) ?? m.kind} · ${props.label(m.tick)} — ${m.label}`}
       aria-label={`${KIND_LABEL.get(m.kind) ?? m.kind} at ${props.label(m.tick)}: ${m.label}`}
       onClick={() => props.onMarker(m)}
     />
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  )), [markers, props.onMarker, props.label]);
+  )), [markers, rows, laneRows, props.onMarker, props.label]);
 
   const rail = useMemo(() => (
     <>
@@ -87,7 +116,7 @@ function ScrubberInner(props: ScrubberProps): JSX.Element {
 
   return (
     <div className="watch-scrub">
-      <div className="watch-scrub-lane" aria-label="Highlights">{lane}</div>
+      <div className="watch-scrub-lane" aria-label="Highlights" style={{ height: `${laneRows * ROW_PX + 1}px` }}>{lane}</div>
       <div
         className="watch-scrub-track"
         onPointerMove={onMove}

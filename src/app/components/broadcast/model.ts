@@ -8,6 +8,7 @@
  * knockdown flash just after a knockdown, the stat comparison in the break,
  * the result at the end. No wall clock, no component state.
  */
+import { clockText, methodText } from '../../model/format';
 import type {
   BoutResult, BoutStats, FighterDefinition, FighterRuntime, RoundStats, SimEvent, TickSnapshot,
 } from '../../../sim';
@@ -298,10 +299,11 @@ export function broadcastScene(
     } else if (method) {
       const round = res?.round ?? frame.round;
       scene.finish = {
-        method: FINISH_LABEL[method] ?? method.toUpperCase(),
+        method: FINISH_LABEL[method] ?? methodText(method).toUpperCase(),
         detail: res?.detail ? titleCase(res.detail.replace(/^tech\./, '')) : '',
         round,
-        time: clock(res?.timeSeconds ?? frame.roundTime),
+        // Official finish time: elapsed in the round, floored (as on the Result screen).
+        time: clockText(res?.timeSeconds ?? frame.roundTime),
         winner: res && typeof res.winner === 'number' ? res.winner : null,
       };
     }

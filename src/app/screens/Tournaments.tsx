@@ -40,6 +40,7 @@ import {
   describeCarry, EMPTY_LEDGER, type CarriedState, type DamageLedger,
 } from '../model/carryOver';
 import { clockOf, methodLabel } from './BoutResult';
+import { EmptyState, useConfirm, useToast, IconTrophy } from '../ui';
 
 export interface TournamentsProps {
   store: FighterStoreApi;
@@ -105,6 +106,36 @@ export function carryStates(
 }
 
 // --------------------------------------------------------------------------
+// Committing a result
+// --------------------------------------------------------------------------
+
+type ResolvedMatch = ReturnType<typeof resolveMatch>;
+
+/**
+ * Write one match's outcome through a functional update of the tournament's
+ * *current* stored state. Returns null (and writes nothing) when the
+ * tournament no longer exists, or the slot no longer holds the pairing that
+ * was run, or it already has a winner: in every one of those cases writing
+ * would overwrite something newer than this bout.
+ */
+export function commitMatchResult(
+  matchStore: Pick<MatchStoreApi, 'tournaments' | 'putTournament'>,
+  tournamentId: string,
+  round: number,
+  match: number,
+  ranSlot: { a: string | null; b: string | null },
+  update: (current: Tournament, liveSlot: Tournament['bracket'][number][number]) => { next: Tournament; res: ResolvedMatch },
+): ResolvedMatch | null {
+  const current = matchStore.tournaments().find((x) => x.id === tournamentId);
+  const liveSlot = current?.bracket[round]?.[match];
+  if (!current || !liveSlot) return null;
+  if (liveSlot.a !== ranSlot.a || liveSlot.b !== ranSlot.b || liveSlot.winner !== null) return null;
+  const { next, res } = update(current, liveSlot);
+  matchStore.putTournament(next);
+  return res;
+}
+
+// --------------------------------------------------------------------------
 // Screen
 // --------------------------------------------------------------------------
 
@@ -114,6 +145,8 @@ export function Tournaments({
   const [selected, setSelected] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [running, setRunning] = useState<string | null>(null);
+  const [confirm, confirmUi] = useConfirm();
+  const toast = useToast();
   const [draft, setDraft] = useState({
     name: 'New tournament',
     format: 'single' as BracketFormat,
@@ -205,12 +238,23 @@ export function Tournaments({
     onChanged();
   }, [draft, matchStore, onChanged, recordById]);
 
-  const remove = useCallback((t: Tournament) => {
-    if (!window.confirm(`Delete "${t.name}"? Its bouts stay in history.`)) return;
+  const remove = useCallback(async (t: Tournament) => {
+    const ok = await confirm({
+      title: `Delete “${t.name}”?`,
+      body: 'The bracket is removed; its bouts stay in History. You can undo this from the notification for a few seconds.',
+      confirmLabel: 'Delete tournament',
+      danger: true,
+    });
+    if (!ok) return;
     matchStore.removeTournament(t.id);
     if (selected === t.id) setSelected(null);
     onChanged();
-  }, [matchStore, onChanged, selected]);
+    toast({
+      message: `Deleted “${t.name}”.`,
+      actionLabel: 'Undo',
+      onAction: () => { matchStore.putTournament(t); onChanged(); },
+    });
+  }, [matchStore, onChanged, selected, confirm, toast]);
 
   // ---- running a match ---------------------------------------------------
 
@@ -265,14 +309,31 @@ export function Tournaments({
 
         const r = outcome.run.result;
         const plan = bracketPlan(t.format, t.size);
-        const outcomeForBracket = resolveMatch(slot, t.entrantIds, r.winner, outcome.run.stats.fighters);
+        // Resolve against the tournament as it is *now*, not the copy this
+        // closure captured when the bout started: another match may have
+        // finished (or the tournament been deleted) while this one ran, and
+        // writing the stale copy back would erase that result.
+        const committed = commitMatchResult(matchStore, t.id, round, match, slot, (current, liveSlot) => {
+          const res = resolveMatch(liveSlot, current.entrantIds, r.winner, outcome.run.stats.fighters);
+          if (res.kind === 'rematch') {
+            return { next: { ...current, bracket: recordNoDecision(current.bracket as BracketMatch[][], round, match) }, res };
+          }
+          return {
+            next: { ...current, bracket: applyResult(plan, current.bracket as BracketMatch[][], round, match, res.winnerId, entry.id) },
+            res,
+          };
+        });
+        if (committed === null) {
+          setMessage('The bout finished, but its tournament was deleted or that match was already decided, '
+            + 'so the bracket was left as it is. The bout is in History.');
+          onRan(outcome);
+          onChanged();
+          return;
+        }
+        const outcomeForBracket = committed;
         if (outcomeForBracket.kind === 'rematch') {
           // A draw or a no-contest has no winner to advance. The match stays
           // open for a rematch on a fresh, derived seed (model/bracket.ts).
-          matchStore.putTournament({
-            ...t,
-            bracket: recordNoDecision(t.bracket as BracketMatch[][], round, match),
-          });
           setMessage(`${methodLabel(r.method)} — no winner to advance. Run the match again for a `
             + `rematch on a new seed (run ${outcomeForBracket.nextAttempt + 1} of ${MAX_NO_DECISION_RUNS}; `
             + 'if that is level too, it is decided on knockdowns, significant strikes, takedowns, '
@@ -286,11 +347,6 @@ export function Tournaments({
           setMessage(`${methodLabel(r.method)} again after ${MAX_NO_DECISION_RUNS} runs — `
             + `${nameOf(winnerId)} advances on the tie-break.`);
         }
-        const next: Tournament = {
-          ...t,
-          bracket: applyResult(plan, t.bracket as BracketMatch[][], round, match, winnerId, entry.id),
-        };
-        matchStore.putTournament(next);
         onRan(outcome);
         onChanged();
       },
@@ -305,10 +361,10 @@ export function Tournaments({
 
   return (
     <div className="ms">
-      <header className="ms-head">
+      <header className="ms-head page-head">
         <div>
-          <h2 className="fc-h">Tournaments</h2>
-          <p className="fc-blurb">
+          <h1 className="page-title">Tournaments</h1>
+          <p className="page-sub">
             Brackets are generated from the entrant list and the seeding method; a random draw is
             seeded from the tournament id, so the same tournament always produces the same bracket.
             Byes fill the gap when there are fewer entrants than places.
@@ -316,7 +372,7 @@ export function Tournaments({
         </div>
       </header>
 
-      {message ? <p className="creator-message" role="status">{message}</p> : null}
+      {message ? <p className="ui-alert" role="status">{message}</p> : null}
 
       <section className="fc-section">
         <h3 className="fc-h fc-h--sub">New tournament</h3>
@@ -440,7 +496,7 @@ export function Tournaments({
       <section className="fc-section">
         <h3 className="fc-h fc-h--sub">Saved tournaments</h3>
         {tournaments.length === 0 ? (
-          <p className="empty">None yet.</p>
+          <EmptyState compact icon={<IconTrophy />} title="No tournaments yet">Pick a format and at least two entrants above, then create the bracket.</EmptyState>
         ) : (
           <div className="fdb-actions tr-list">
             {tournaments.map((t) => (
@@ -453,7 +509,7 @@ export function Tournaments({
                 >
                   {t.name} · {FORMAT_LABELS[t.format]} {t.size}
                 </button>
-                <button type="button" className="btn btn--danger btn--chip" onClick={() => remove(t)}>
+                <button type="button" className="btn btn--danger btn--chip" onClick={() => { void remove(t); }}>
                   Delete
                 </button>
               </span>
@@ -471,6 +527,7 @@ export function Tournaments({
           carry={carryStates(current, historyById)}
         />
       ) : null}
+      {confirmUi}
     </div>
   );
 }

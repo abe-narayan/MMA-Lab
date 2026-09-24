@@ -21,7 +21,7 @@
  */
 
 import { SIM_ENGINE_VERSION, type FighterDefinition } from '../../sim';
-import { validateFighter } from './validate';
+import { NAME_MAX, validateFighter } from './validate';
 import type {
   BoutLabExport, FighterRecord, HistoryEntry, MatchupPreset, Tournament, ValidationIssue,
 } from './types';
@@ -115,7 +115,7 @@ const isObject = (v: unknown): v is Record<string, unknown> =>
 function empty(): ImportResult {
   return {
     imported: 0, skipped: 0, issues: [], fighters: [], presets: [],
-    tournaments: [], history: [], renamed: {}, extra: {},
+    tournaments: [], history: [], renamed: Object.create(null) as Record<string, string>, extra: {},
   };
 }
 
@@ -199,8 +199,20 @@ function importFighters(raw: unknown, taken: Set<string>, result: ImportResult):
     return;
   }
 
-  raw.forEach((entry, i) => {
+  raw.forEach((original, i) => {
     const at = `fighters[${i}]`;
+    // An over-long name is the one identity problem worth repairing rather
+    // than refusing: shorten it and say so.
+    let entry = original;
+    if (isObject(entry) && typeof entry.name === 'string' && entry.name.length > NAME_MAX) {
+      const cut = entry.name.slice(0, NAME_MAX).trimEnd();
+      result.issues.push({
+        path: `${at}.name`,
+        message: `the name was ${entry.name.length} characters; imported as "${cut.slice(0, 24)}…" (${NAME_MAX} max)`,
+        severity: 'warning',
+      });
+      entry = { ...entry, name: cut };
+    }
     const check = validateFighter(entry);
     for (const issue of check.issues) result.issues.push(prefixed(issue, at));
     if (!check.ok) {
@@ -308,20 +320,25 @@ function importHistory(raw: unknown, taken: Set<string>, engineVersion: string, 
 // Reference repair
 // --------------------------------------------------------------------------
 
+/** The renamed id, reading only the map's own entries (ids are file-chosen). */
+function renamedId(renamed: Record<string, string>, id: string): string {
+  return Object.prototype.hasOwnProperty.call(renamed, id) ? renamed[id] : id;
+}
+
 function repointPreset(preset: MatchupPreset, renamed: Record<string, string>): MatchupPreset {
   if (!Array.isArray(preset.fighterIds)) return preset;
-  return { ...preset, fighterIds: preset.fighterIds.map((id) => renamed[id] ?? id) };
+  return { ...preset, fighterIds: preset.fighterIds.map((id) => renamedId(renamed, id)) };
 }
 
 function repointTournament(t: Tournament, renamed: Record<string, string>): Tournament {
-  const entrantIds = Array.isArray(t.entrantIds) ? t.entrantIds.map((id) => renamed[id] ?? id) : t.entrantIds;
+  const entrantIds = Array.isArray(t.entrantIds) ? t.entrantIds.map((id) => renamedId(renamed, id)) : t.entrantIds;
   const bracket = Array.isArray(t.bracket)
     ? t.bracket.map((round) => (Array.isArray(round)
       ? round.map((m) => ({
         ...m,
-        a: m.a === null ? null : renamed[m.a] ?? m.a,
-        b: m.b === null ? null : renamed[m.b] ?? m.b,
-        winner: m.winner === null ? null : renamed[m.winner] ?? m.winner,
+        a: m.a === null ? null : renamedId(renamed, m.a),
+        b: m.b === null ? null : renamedId(renamed, m.b),
+        winner: m.winner === null ? null : renamedId(renamed, m.winner),
       }))
       : round))
     : t.bracket;

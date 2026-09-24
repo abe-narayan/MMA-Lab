@@ -1,7 +1,7 @@
 /* ==========================================================================
    BOUT LAB - fighter database and creator (Phase 6)
    --------------------------------------------------------------------------
-   Loaded after src/ui/styles.css and written to sit inside it, not beside it:
+   Loaded after src/app/base.css and written to sit inside it, not beside it:
    every colour here is one of that file's :root tokens, so both themes resolve
    without a single rule in this file knowing which one is active. The few
    tokens declared below are creator-only (the tier ramp) and follow the same

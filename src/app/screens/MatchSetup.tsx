@@ -163,7 +163,14 @@ export function MatchSetup({
       record: true,
       onProgress: (p) => setRun((s) => (s.status === 'running' ? { ...s, progress: p } : s)),
     });
-    setRun({ status: 'running', cancel: handle.cancel });
+    const startedAt = Date.now();
+    // A double-click on Run must never cancel: the Cancel control lives in
+    // the progress strip, away from Run, and ignores clicks for 700 ms.
+    const guardedCancel = (): void => {
+      if (Date.now() - startedAt < 700) return;
+      handle.cancel();
+    };
+    setRun({ status: 'running', cancel: guardedCancel });
     handle.promise.then(
       (outcome) => {
         setRun({ status: 'idle' });
@@ -176,7 +183,10 @@ export function MatchSetup({
       },
       (err: unknown) => {
         const text = err instanceof Error ? err.message : String(err);
-        if (text.includes('cancelled')) setRun({ status: 'idle' });
+        if (text.includes('cancelled')) {
+          setRun({ status: 'idle' });
+          setMessage('Cancelled. Nothing was saved; run it again with the same seed for the same fight.');
+        }
         else setRun({ status: 'failed', message: text });
       },
     );
@@ -188,16 +198,16 @@ export function MatchSetup({
 
   return (
     <div className="ms">
-      <header className="ms-head">
+      <header className="ms-head page-head">
         <div>
-          <h2 className="fc-h">Match setup</h2>
-          <p className="fc-blurb">
+          <h1 className="page-title">Match setup</h1>
+          <p className="page-sub">
             A bout is a pure function of the seed and everything on this page. Two runs of the same
             setup are the same fight, on any machine — which is why the seed is a field and not a
             hidden detail.
           </p>
         </div>
-        <div className="fdb-actions">
+        <div className="page-actions">
           <button
             type="button"
             className="btn btn--play"
@@ -206,22 +216,23 @@ export function MatchSetup({
           >
             {run.status === 'running' ? 'Running…' : 'Run bout'}
           </button>
-          {run.status === 'running' && run.cancel ? (
-            <button type="button" className="btn" onClick={run.cancel}>Cancel</button>
-          ) : null}
         </div>
       </header>
 
       {run.status === 'running' ? (
-        <p className="ms-progress mono" role="status">
+        <p className="ms-progress" role="status">
+          <span className="ui-spinner" aria-hidden="true" />
           Simulating in a background worker so the page stays live
           {run.progress ? ` — round ${run.progress.round}, tick ${run.progress.tick.toLocaleString()}` : '…'}
+          {run.cancel ? (
+            <button type="button" className="btn ms-progress-cancel" onClick={run.cancel}>Cancel</button>
+          ) : null}
         </p>
       ) : null}
       {run.status === 'failed' ? (
         <p className="ms-warn ms-warn--error" role="alert">The bout failed: {run.message}</p>
       ) : null}
-      {message ? <p className="creator-message" role="status">{message}</p> : null}
+      {message ? <p className="ui-alert" role="status">{message}</p> : null}
 
       {/* ---- mode ---------------------------------------------------- */}
       <section className="fc-section">
@@ -542,7 +553,7 @@ export function MatchSetup({
               value={String(draft.settings.speed)}
               onChange={(e) => patchSettings({ speed: Number(e.target.value) as MatchSettings['speed'] })}
             >
-              {SPEEDS.map((s) => <option key={s} value={String(s)}>{s}×</option>)}
+              {SPEEDS.filter((s) => s <= 4).map((s) => <option key={s} value={String(s)}>{s}×</option>)}
             </select>
             <p className="fc-help">{SETTING_HELP.speed}</p>
           </div>

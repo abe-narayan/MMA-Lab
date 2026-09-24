@@ -20,23 +20,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ENDURANCE_SPORTS, INJURY_REGIONS, SUBMISSIONS, TECHNIQUES, WEIGHT_CLASS_LIMIT_KG, buildBlendOf,
-  type CoreDisciplineId, type EnduranceSportId, type FighterDefinition, type InjuryEntry,
+  type CoreDisciplineId, type EnduranceSportId, type FighterDefinition, type FighterRuntime, type InjuryEntry,
   type InjuryRegion,
 } from '../../sim';
 import {
   BUILDS, GUARD_STYLES, HANDEDNESSES, HURT_BEHAVIOURS, INITIATIVES, LOSING_BEHAVIOURS,
   PRIMARY_MODES, RANGE_BANDS, SEXES, STANCES, TAKEDOWN_SETUPS, THAI_STYLES,
-  TIRED_BEHAVIOURS, WEIGHT_CLASS_IDS, WHEN_LOSING,
+  TIRED_BEHAVIOURS, WEIGHT_CLASS_IDS, WHEN_LOSING, NAME_MAX, exportFighter, toJson,
 } from '../store';
 import type { FighterRecord, ValidationIssue, ValidationResult } from '../store/types';
 import type { FighterStoreApi } from '../storeApi';
 import { AttributeSlider } from '../components/AttributeSlider';
 import { BodyDiagram } from '../components/BodyDiagram';
 import { DerivedPanel } from '../components/DerivedPanel';
+import { ProfileEditor } from '../components/ProfileEditor';
+import { TierBadge } from '../components/TierBadge';
+import {
+  Alert, Button, Dialog, EmptyState, Segmented, StatusBadge, useConfirm, useToast,
+  IconCompare, IconCopy, IconDownload, IconSearch, IconSliders, IconUndo, IconX,
+} from '../ui';
+import { noSimEffect } from '../model/profileModel';
 import { SubSkillGrid } from '../components/SubSkillGrid';
 import { ValidationList, errorPaths, focusPath } from '../components/ValidationList';
 import {
-  blankDisciplineBlock, comboSpecs, disciplineSections, isDirty,
+  blankDisciplineBlock, comboSpecs, disciplineSections, idFromName, isDirty,
   takedownPrefs, weightedSubmissions, weightedTechniques,
 } from '../model/editorModel';
 import { deriveSafely, disciplineTierRows } from '../model/derivedModel';
@@ -131,6 +138,13 @@ interface CommonFieldProps {
   invalid?: boolean;
 }
 
+/** The "stored, not simulated" marker for raw fields the sim never reads. */
+function NoEffect({ path }: { path: string }): JSX.Element | null {
+  if (path.startsWith('appearance')) return null; // the whole tab says so once
+  const why = noSimEffect(path);
+  return why ? <> <StatusBadge tone="warn" title={why}>No effect on the bout</StatusBadge></> : null;
+}
+
 function NumberField({
   path, meta, value, onChange, step = 1, invalid = false, suffix,
 }: CommonFieldProps & {
@@ -148,6 +162,7 @@ function NumberField({
       <label htmlFor={id}>
         {meta.label}
         {meta.unit ? <span className="fc-unit"> ({meta.unit})</span> : null}
+        <NoEffect path={path} />
       </label>
       <div className="fc-input-row">
         <input
@@ -183,7 +198,7 @@ function SelectField<T extends string>({
   const descId = describedByIdForPath(path);
   return (
     <div className={`fc-field${invalid ? ' is-invalid' : ''}`} data-path={path}>
-      <label htmlFor={id}>{meta.label}</label>
+      <label htmlFor={id}>{meta.label}<NoEffect path={path} /></label>
       <select
         id={id}
         className="field"
@@ -241,37 +256,138 @@ export interface FighterCreatorProps {
   onCancel: () => void;
   /** Lets the shell warn before it swaps this screen out. */
   onDirtyChange?: (dirty: boolean) => void;
+  /** Bumped by the shell when the database changes (the compare list reads it). */
+  revision?: number;
+}
+
+type EditorView = 'basic' | 'advanced' | 'schema';
+
+/** How long consecutive edits to one field merge into a single undo step. */
+const UNDO_COALESCE_MS = 700;
+const UNDO_LIMIT = 150;
+
+/**
+ * Apply an archetype's fighting attributes to the draft while keeping who the
+ * fighter *is*: id, name, short code, nickname and notes survive; body,
+ * physical, disciplines, mental, record, style and history come from the
+ * preset. Appearance is kept too — a preset is a way of fighting, not a face.
+ */
+export function applyPreset(draft: FighterDefinition, preset: FighterDefinition): FighterDefinition {
+  const copy = JSON.parse(JSON.stringify(preset)) as FighterDefinition;
+  return {
+    ...copy,
+    id: draft.id,
+    name: draft.name,
+    short: draft.short,
+    appearance: draft.appearance,
+    ...(draft.notes !== undefined ? { notes: draft.notes } : {}),
+  };
 }
 
 export function FighterCreator({
-  store, initial, fromBuiltIn, onSaved, onCancel, onDirtyChange,
+  store, initial, fromBuiltIn, onSaved, onCancel, onDirtyChange, revision = 0,
 }: FighterCreatorProps): JSX.Element {
   const [baseline, setBaseline] = useState<FighterDefinition>(initial);
-  const [draft, setDraft] = useState<FighterDefinition>(initial);
+  const [draft, setDraftRaw] = useState<FighterDefinition>(initial);
   const [section, setSection] = useState<SectionId>('body');
+  const [view, setView] = useState<EditorView>('basic');
+  const [query, setQuery] = useState('');
+  const [compareId, setCompareId] = useState('');
+  const [presetsOpen, setPresetsOpen] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(Object.keys(initial.disciplines)),
   );
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: 'ok' | 'alert' | 'info'; text: string } | null>(null);
   const pendingFocus = useRef<string | null>(null);
+  const [confirm, confirmUi] = useConfirm();
+  const toast = useToast();
+
+  // ---- undo history -------------------------------------------------------
+  // Past states, newest last. Edits to the same field within
+  // UNDO_COALESCE_MS merge, so one slider drag is one undo step.
+  const past = useRef<FighterDefinition[]>([]);
+  const future = useRef<FighterDefinition[]>([]);
+  const lastEdit = useRef<{ key: string; at: number } | null>(null);
+  const [, setHistoryTick] = useState(0);
+
+  // The current draft, readable synchronously. History bookkeeping happens
+  // here rather than inside a state updater, because StrictMode runs
+  // updaters twice in development and would record every step twice.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+
+  const update = useCallback((fn: (d: FighterDefinition) => FighterDefinition, key = '*') => {
+    const d = draftRef.current;
+    const next = fn(d);
+    if (next === d) return;
+    const now = Date.now();
+    const merge = lastEdit.current !== null && key !== '*' && lastEdit.current.key === key
+      && now - lastEdit.current.at < UNDO_COALESCE_MS;
+    if (!merge) {
+      past.current.push(d);
+      if (past.current.length > UNDO_LIMIT) past.current.shift();
+    }
+    future.current = [];
+    lastEdit.current = { key, at: now };
+    draftRef.current = next;
+    setDraftRaw(next);
+    setHistoryTick((t) => t + 1);
+  }, []);
+
+  const undo = useCallback(() => {
+    const prev = past.current.pop();
+    if (!prev) return;
+    future.current.push(draftRef.current);
+    draftRef.current = prev;
+    setDraftRaw(prev);
+    lastEdit.current = null;
+    setHistoryTick((t) => t + 1);
+  }, []);
+
+  const redo = useCallback(() => {
+    const next = future.current.pop();
+    if (!next) return;
+    past.current.push(draftRef.current);
+    draftRef.current = next;
+    setDraftRaw(next);
+    lastEdit.current = null;
+    setHistoryTick((t) => t + 1);
+  }, []);
 
   // A new fighter arriving from the database replaces the whole editor state,
   // baseline included — otherwise the dirty flag would compare the new fighter
   // against the old one and claim unsaved changes immediately.
   useEffect(() => {
     setBaseline(initial);
-    setDraft(initial);
+    setDraftRaw(initial);
+    past.current = [];
+    future.current = [];
     setExpanded(new Set(Object.keys(initial.disciplines)));
     setMessage(null);
   }, [initial]);
+
+  // Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z / Ctrl+Y, except inside a text box,
+  // where the browser's own text undo is the one the user means.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const t = e.target as HTMLElement | null;
+      const typing = t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && ['text', 'search'].includes((t as HTMLInputElement).type)));
+      if (typing) return;
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); redo(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undo, redo]);
 
   const dirty = useMemo(() => isDirty(baseline, draft), [baseline, draft]);
 
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
   // The browser-level guard. It only fires for a real page unload; navigating
-  // between our own tabs is handled by `requestCancel` below, because the
-  // native dialog cannot be triggered from script.
+  // between our own pages is handled by the shell.
   useEffect(() => {
     if (!dirty) return undefined;
     const onBeforeUnload = (e: BeforeUnloadEvent): void => {
@@ -297,14 +413,25 @@ export function FighterCreator({
   const derived = useMemo(() => deriveSafely(draft), [draft]);
   const badPaths = useMemo(() => errorPaths(validation), [validation]);
   const hasErrors = useMemo(() => validation.issues.some((i) => i.severity === 'error'), [validation]);
+  const errorCount = useMemo(() => validation.issues.filter((i) => i.severity === 'error').length, [validation]);
+
+  const records = useMemo<FighterRecord[]>(() => {
+    try { return store.list(); } catch { return []; }
+  }, [store, revision]);
+  const compareRecord = records.find((r) => r.definition.id === compareId) ?? null;
+  const compareDerived = useMemo(
+    () => (compareRecord ? deriveSafely(compareRecord.definition) : null),
+    [compareRecord],
+  );
+  const presets = useMemo(() => records.filter((r) => r.builtIn), [records]);
 
   const setField = useCallback((path: string, value: unknown) => {
-    setDraft((d) => setAtPath(d, path, value));
-  }, []);
+    update((d) => setAtPath(d, path, value), path);
+  }, [update]);
 
   const setNumber = useCallback((path: string, value: number) => {
-    setDraft((d) => setAtPath(d, path, value));
-  }, []);
+    update((d) => setAtPath(d, path, value), path);
+  }, [update]);
 
   // Focus has to happen after the section has actually rendered: focusing a
   // control inside a `hidden` panel silently does nothing.
@@ -318,6 +445,7 @@ export function FighterCreator({
 
   const goToIssue = useCallback((issue: ValidationIssue) => {
     if (!issue.path) return;
+    setView('schema');
     setSection(sectionForPath(issue.path));
     const disc = disciplineForPath(issue.path);
     if (disc !== null) setExpanded((prev) => new Set(prev).add(disc));
@@ -333,35 +461,75 @@ export function FighterCreator({
   }, []);
 
   const trainDiscipline = useCallback((id: string) => {
-    setDraft((d) => setAtPath(d, `disciplines.${id}`, blankDisciplineBlock(id as CoreDisciplineId)));
+    update((d) => setAtPath(d, `disciplines.${id}`, blankDisciplineBlock(id as CoreDisciplineId)));
     setExpanded((prev) => new Set(prev).add(id));
-  }, []);
+  }, [update]);
 
   const untrainDiscipline = useCallback((id: string) => {
-    setDraft((d) => deleteAtPath(d, `disciplines.${id}`));
-  }, []);
+    update((d) => deleteAtPath(d, `disciplines.${id}`));
+    toast({ message: `Removed ${DISCIPLINE_LABELS[id] ?? id} and its sub-skills.`, actionLabel: 'Undo', onAction: undo });
+  }, [update, toast, undo]);
 
   const save = useCallback(() => {
     if (hasErrors) return;
     try {
       const saved = store.save(draft);
       setBaseline(saved.definition);
-      setDraft(saved.definition);
-      setMessage(fromBuiltIn ? 'Saved as a new custom fighter (built-ins are read-only).' : 'Saved.');
+      draftRef.current = saved.definition;
+      setDraftRaw(saved.definition);
+      setMessage({ tone: 'ok', text: fromBuiltIn ? 'Saved as a new custom fighter (built-in archetypes are read-only).' : 'Saved.' });
       onSaved(saved);
     } catch (err) {
-      setMessage(`Could not save: ${err instanceof Error ? err.message : String(err)}`);
+      setMessage({ tone: 'alert', text: `Could not save: ${err instanceof Error ? err.message : String(err)}` });
     }
   }, [store, draft, hasErrors, fromBuiltIn, onSaved]);
 
-  const requestCancel = useCallback(() => {
-    if (dirty && !window.confirm('This fighter has unsaved changes. Discard them?')) return;
+  const saveAsCopy = useCallback(() => {
+    if (hasErrors) return;
+    try {
+      const name = `${draft.name} (copy)`;
+      const saved = store.save({ ...draft, name, id: idFromName(name, Date.now().toString(36)) });
+      setMessage({ tone: 'ok', text: `Saved a copy as “${saved.summary.name}”. You are now editing the copy.` });
+      onSaved(saved);
+    } catch (err) {
+      setMessage({ tone: 'alert', text: `Could not save a copy: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }, [store, draft, hasErrors, onSaved]);
+
+  const exportDraft = useCallback(() => {
+    try {
+      const text = toJson(exportFighter(draft));
+      const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${draft.id || 'fighter'}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setMessage({ tone: 'info', text: `Exported “${draft.name}” as a versioned BOUT LAB file (schema 1).${dirty ? ' The export includes the unsaved edits.' : ''}` });
+    } catch (err) {
+      setMessage({ tone: 'alert', text: `Export failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }, [draft, dirty]);
+
+  const requestCancel = useCallback(async () => {
+    if (dirty && !(await confirm({
+      title: 'Close the editor?', body: 'This fighter has unsaved changes. Closing discards them.',
+      confirmLabel: 'Discard changes', cancelLabel: 'Keep editing', danger: true,
+    }))) return;
     onCancel();
-  }, [dirty, onCancel]);
+  }, [dirty, onCancel, confirm]);
 
   const revert = useCallback(() => {
-    if (!dirty || window.confirm('Discard every change since the last save?')) setDraft(baseline);
-  }, [dirty, baseline]);
+    if (!dirty) return;
+    update(() => baseline);
+    toast({ message: 'Reverted to the last save.', actionLabel: 'Undo', onAction: undo });
+  }, [dirty, baseline, update, toast, undo]);
+
+  const usePreset = useCallback((record: FighterRecord) => {
+    update((d) => applyPreset(d, record.definition));
+    setPresetsOpen(false);
+    toast({ message: `Applied the “${record.summary.name}” preset. Name, nickname and look were kept.`, actionLabel: 'Undo', onAction: undo });
+  }, [update, toast, undo]);
 
   const sections = useMemo(() => disciplineSections(draft), [draft]);
   const runtimeDisciplines = derived.runtime?.disciplines ?? null;
@@ -383,7 +551,9 @@ export function FighterCreator({
               id={fieldIdForPath('name')}
               className="field creator-name"
               type="text"
+              maxLength={NAME_MAX}
               value={draft.name}
+              aria-invalid={badPaths.has('name') || undefined}
               onChange={(e) => setField('name', e.target.value)}
             />
           </div>
@@ -412,128 +582,202 @@ export function FighterCreator({
         </div>
 
         <div className="creator-actions">
-          {dirty ? <span className="badge badge--info">unsaved changes</span> : null}
-          {fromBuiltIn ? <span className="tag">built-in &middot; saves as a copy</span> : null}
-          <button type="button" className="btn" onClick={revert} disabled={!dirty}>Revert</button>
-          <button type="button" className="btn" onClick={requestCancel}>Close</button>
-          <button
-            type="button"
-            className="btn btn--play"
-            onClick={save}
-            disabled={hasErrors}
-            title={hasErrors ? 'Fix the errors listed below before saving.' : 'Save this fighter'}
-          >
-            Save
-          </button>
+          <div className="creator-status" aria-live="polite">
+            {fromBuiltIn ? <StatusBadge tone="outline" title="Built-in archetypes are read-only; saving creates your own copy">Built-in · saves as a copy</StatusBadge> : null}
+            {dirty ? <StatusBadge tone="warn" dot>Unsaved changes</StatusBadge> : <StatusBadge tone="ok" dot>Saved</StatusBadge>}
+            {hasErrors ? <StatusBadge tone="alert">{errorCount} error{errorCount === 1 ? '' : 's'}</StatusBadge> : null}
+          </div>
+          <div className="creator-buttons">
+            <Button size="sm" variant="ghost" iconOnly icon={<IconUndo />} aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)"
+              disabled={past.current.length === 0} onClick={undo} />
+            <Button size="sm" variant="ghost" iconOnly icon={<IconUndo style={{ transform: 'scaleX(-1)' }} />} aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z)"
+              disabled={future.current.length === 0} onClick={redo} />
+            <Button size="sm" icon={<IconSliders />} onClick={() => setPresetsOpen(true)} title="Start from one of the built-in archetypes">Presets</Button>
+            <Button size="sm" icon={<IconDownload />} onClick={exportDraft} title="Download this fighter as a JSON file">Export</Button>
+            <Button size="sm" icon={<IconCopy />} onClick={saveAsCopy} disabled={hasErrors} title="Save the current edits as a new fighter">Save as copy</Button>
+            <Button size="sm" onClick={revert} disabled={!dirty}>Revert</Button>
+            <Button size="sm" onClick={() => { void requestCancel(); }}>Close</Button>
+            <Button
+              variant="primary"
+              onClick={save}
+              disabled={hasErrors}
+              title={hasErrors ? 'Fix the errors listed below before saving.' : 'Save this fighter'}
+            >
+              Save
+            </Button>
+          </div>
         </div>
       </header>
 
       {message ? (
-        <p className="creator-message" role="status">{message}</p>
+        <Alert tone={message.tone} action={<Button size="sm" variant="ghost" iconOnly icon={<IconX />} aria-label="Dismiss" onClick={() => setMessage(null)} />}>
+          {message.text}
+        </Alert>
       ) : null}
+
+      <div className="creator-toolbar">
+        <Segmented<EditorView>
+          label="Editor view"
+          value={view}
+          onChange={setView}
+          options={[
+            { value: 'basic', label: 'Basic', title: 'The controls that define a fighter' },
+            { value: 'advanced', label: 'Advanced', title: 'Every mapped control, with schema paths' },
+            { value: 'schema', label: 'Full schema', title: 'Every raw field of the definition (expert)' },
+          ]}
+        />
+        {view !== 'schema' ? (
+          <div className="creator-search">
+            <IconSearch aria-hidden="true" />
+            <label className="visually-hidden" htmlFor="creator-search">Search attributes</label>
+            <input
+              id="creator-search"
+              className="field"
+              type="search"
+              placeholder="Search attributes (e.g. reach, cardio, takedown)"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+        ) : null}
+        <div className="creator-compare">
+          <label htmlFor="creator-compare-select"><IconCompare aria-hidden="true" /> Compare with</label>
+          <select
+            id="creator-compare-select"
+            className="field"
+            value={compareId}
+            onChange={(e) => setCompareId(e.target.value)}
+          >
+            <option value="">Nobody</option>
+            {records.filter((r) => r.definition.id !== draft.id).map((r) => (
+              <option key={r.definition.id} value={r.definition.id}>{r.summary.name} · T{r.summary.overallTier}</option>
+            ))}
+          </select>
+        </div>
+      </div>
 
       <div className="creator-body">
         <div className="creator-form">
-          <div className="tabs creator-tabs" role="tablist" aria-label="Fighter sections">
-            {SECTIONS.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                role="tab"
-                id={`sect-${s.id}`}
-                className="tab"
-                aria-selected={section === s.id}
-                aria-controls={`sectpanel-${s.id}`}
-                title={s.hint}
-                onClick={() => setSection(s.id)}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-
-          <div role="tabpanel" id="sectpanel-body" aria-labelledby="sect-body" hidden={section !== 'body'}>
-            <BodySection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
-          </div>
-          <div role="tabpanel" id="sectpanel-appearance" aria-labelledby="sect-appearance" hidden={section !== 'appearance'}>
-            <AppearanceSection draft={draft} onNumber={setNumber} onField={setField} />
-          </div>
-          <div role="tabpanel" id="sectpanel-physical" aria-labelledby="sect-physical" hidden={section !== 'physical'}>
-            <AttributeSection
-              title="Physical attributes"
-              blurb="The fourteen attributes of chapter 01 §2.2. Stored values are what you author; age and career history move them before the first bell, and the derived panel shows both."
-              meta={PHYSICAL_META}
-              groups={PHYSICAL_GROUPS}
-              prefix="physical"
-              values={draft.physical as unknown as Record<string, number>}
-              onChange={setNumber}
-              bad={badPaths}
+          {view !== 'schema' ? (
+            <ProfileEditor
+              draft={draft}
+              onChange={(next, key) => update(() => next, key ?? 'profile')}
+              mode={view}
+              query={query}
+              runtime={derived.runtime}
+              compare={compareRecord?.definition ?? null}
+              compareRuntime={compareDerived?.runtime ?? null}
             />
-          </div>
-          <div role="tabpanel" id="sectpanel-disciplines" aria-labelledby="sect-disciplines" hidden={section !== 'disciplines'}>
-            <div className="fc-section">
-              <h3 className="fc-h">Disciplines</h3>
-              <p className="fc-blurb">
-                Tier is per discipline, and derived: sub-skills set the band, training years cap it,
-                and tier 5 additionally gates on fight IQ 80 and composure 75. A T4 boxer with T0
-                wrestling shows T0 wrestling the moment he is shot on.
-              </p>
-              {sections.map((s) => {
-                const rt = runtimeDisciplines?.[s.id] ?? null;
-                return (
-                  <SubSkillGrid
+          ) : (
+            <>
+              <Alert tone="info">
+                Every raw field of the fighter definition. Fields marked <StatusBadge tone="warn">No effect on the bout</StatusBadge>{' '}
+                are stored and exported but not read by the simulation.
+              </Alert>
+              <div className="tabs creator-tabs" role="tablist" aria-label="Fighter sections">
+                {SECTIONS.map((s) => (
+                  <button
                     key={s.id}
-                    section={s}
-                    tier={rt ? rt.tier : null}
-                    effectiveMean={rt ? rt.mean : null}
-                    expanded={expanded.has(s.id)}
-                    onToggleExpanded={toggleDiscipline}
-                    onChange={setNumber}
-                    onField={setField}
-                    onTrain={trainDiscipline}
-                    onUntrain={untrainDiscipline}
-                    invalidPaths={badPaths}
-                    derived={derivedByDiscipline[s.id] ?? null}
-                    effectiveSub={rt ? rt.effective : null}
-                  />
-                );
-              })}
+                    type="button"
+                    role="tab"
+                    id={`sect-${s.id}`}
+                    className="tab"
+                    aria-selected={section === s.id}
+                    aria-controls={`sectpanel-${s.id}`}
+                    title={s.hint}
+                    onClick={() => setSection(s.id)}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          <div className={view !== 'schema' ? 'creator-schema-hidden' : undefined}>
+            <div role="tabpanel" id="sectpanel-body" aria-labelledby="sect-body" hidden={view !== 'schema' || section !== 'body'}>
+              <BodySection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
+            </div>
+            <div role="tabpanel" id="sectpanel-appearance" aria-labelledby="sect-appearance" hidden={view !== 'schema' || section !== 'appearance'}>
+              <AppearanceSection draft={draft} onNumber={setNumber} onField={setField} />
+            </div>
+            <div role="tabpanel" id="sectpanel-physical" aria-labelledby="sect-physical" hidden={view !== 'schema' || section !== 'physical'}>
+              <AttributeSection
+                title="Physical attributes"
+                blurb="The fourteen attributes of chapter 01 §2.2. Stored values are what you author; age and career history move them before the first bell, and the derived panel shows both."
+                meta={PHYSICAL_META}
+                groups={PHYSICAL_GROUPS}
+                prefix="physical"
+                values={draft.physical as unknown as Record<string, number>}
+                onChange={setNumber}
+                bad={badPaths}
+              />
+            </div>
+            <div role="tabpanel" id="sectpanel-disciplines" aria-labelledby="sect-disciplines" hidden={view !== 'schema' || section !== 'disciplines'}>
+              <div className="fc-section">
+                <h3 className="fc-h">Disciplines</h3>
+                <p className="fc-blurb">
+                  Tier is per discipline, and derived: sub-skills set the band, training years cap it,
+                  and tier 5 additionally gates on fight IQ 80 and composure 75. A T4 boxer with T0
+                  wrestling shows T0 wrestling the moment he is shot on.
+                </p>
+                {sections.map((s) => {
+                  const rt = runtimeDisciplines?.[s.id] ?? null;
+                  return (
+                    <SubSkillGrid
+                      key={s.id}
+                      section={s}
+                      tier={rt ? rt.tier : null}
+                      effectiveMean={rt ? rt.mean : null}
+                      expanded={expanded.has(s.id)}
+                      onToggleExpanded={toggleDiscipline}
+                      onChange={setNumber}
+                      onField={setField}
+                      onTrain={trainDiscipline}
+                      onUntrain={untrainDiscipline}
+                      invalidPaths={badPaths}
+                      derived={derivedByDiscipline[s.id] ?? null}
+                      effectiveSub={rt ? rt.effective : null}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+            <div role="tabpanel" id="sectpanel-record" aria-labelledby="sect-record" hidden={view !== 'schema' || section !== 'record'}>
+              <RecordSection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
+            </div>
+            <div role="tabpanel" id="sectpanel-experience" aria-labelledby="sect-experience" hidden={view !== 'schema' || section !== 'experience'}>
+              <ExperienceSection
+                draft={draft}
+                onNumber={setNumber}
+                onField={setField}
+                bad={badPaths}
+                derivedExperience={derived.runtime?.experienceDerived ?? null}
+                usedExperience={derived.runtime?.experience ?? null}
+              />
+            </div>
+            <div role="tabpanel" id="sectpanel-history" aria-labelledby="sect-history" hidden={view !== 'schema' || section !== 'history'}>
+              <HistorySection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
+            </div>
+            <div role="tabpanel" id="sectpanel-mental" aria-labelledby="sect-mental" hidden={view !== 'schema' || section !== 'mental'}>
+              <AttributeSection
+                title="Mental attributes"
+                blurb="Six attributes that decide what the fighter does with the body above. They do not age: a 40-year-old keeps his fight IQ and loses his legs."
+                meta={MENTAL_META}
+                groups={[{ title: 'Mental', keys: Object.keys(MENTAL_META) }]}
+                prefix="mental"
+                values={draft.mental as unknown as Record<string, number>}
+                onChange={setNumber}
+                bad={badPaths}
+              />
+            </div>
+            <div role="tabpanel" id="sectpanel-style" aria-labelledby="sect-style" hidden={view !== 'schema' || section !== 'style'}>
+              <StyleSection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
             </div>
           </div>
-          <div role="tabpanel" id="sectpanel-record" aria-labelledby="sect-record" hidden={section !== 'record'}>
-            <RecordSection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
-          </div>
-          <div role="tabpanel" id="sectpanel-experience" aria-labelledby="sect-experience" hidden={section !== 'experience'}>
-            <ExperienceSection
-              draft={draft}
-              onNumber={setNumber}
-              onField={setField}
-              bad={badPaths}
-              derivedExperience={derived.runtime?.experienceDerived ?? null}
-              usedExperience={derived.runtime?.experience ?? null}
-            />
-          </div>
-          <div role="tabpanel" id="sectpanel-history" aria-labelledby="sect-history" hidden={section !== 'history'}>
-            <HistorySection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
-          </div>
-          <div role="tabpanel" id="sectpanel-mental" aria-labelledby="sect-mental" hidden={section !== 'mental'}>
-            <AttributeSection
-              title="Mental attributes"
-              blurb="Six attributes that decide what the fighter does with the body above. They do not age: a 40-year-old keeps his fight IQ and loses his legs."
-              meta={MENTAL_META}
-              groups={[{ title: 'Mental', keys: Object.keys(MENTAL_META) }]}
-              prefix="mental"
-              values={draft.mental as unknown as Record<string, number>}
-              onChange={setNumber}
-              bad={badPaths}
-            />
-          </div>
-          <div role="tabpanel" id="sectpanel-style" aria-labelledby="sect-style" hidden={section !== 'style'}>
-            <StyleSection draft={draft} onNumber={setNumber} onField={setField} bad={badPaths} />
-          </div>
 
-          <div className="fc-section">
-            <h3 className="fc-h">Notes</h3>
+          <div className="fc-section creator-notes">
+            <h3 className="fc-h fc-h--sub">Notes</h3>
             <label className="visually-hidden" htmlFor={fieldIdForPath('notes')}>Notes</label>
             <textarea
               id={fieldIdForPath('notes')}
@@ -547,6 +791,10 @@ export function FighterCreator({
         </div>
 
         <aside className="creator-side" aria-label="Live derivation and validation">
+          {compareRecord && compareDerived?.runtime && derived.runtime ? (
+            <CompareCard me={derived.runtime} other={compareDerived.runtime} otherName={compareRecord.summary.name}
+              onClear={() => setCompareId('')} />
+          ) : null}
           <BodyDiagram
             body={{
               heightM: draft.body.heightM,
@@ -562,7 +810,73 @@ export function FighterCreator({
           <DerivedPanel runtime={derived.runtime} error={derived.error} />
         </aside>
       </div>
+
+      <Dialog
+        open={presetsOpen}
+        onClose={() => setPresetsOpen(false)}
+        title="Start from a preset"
+        description="Each preset is one of the built-in archetypes. Applying one replaces the body, attributes, disciplines, record and style; the name, short code, nickname, look and notes stay. You can undo it."
+        wide
+      >
+        {presets.length === 0 ? (
+          <EmptyState compact title="No presets available">The built-in archetypes could not be read.</EmptyState>
+        ) : (
+          <ul className="preset-grid">
+            {presets.map((r) => (
+              <li key={r.definition.id}>
+                <button type="button" className="preset-card" onClick={() => usePreset(r)}>
+                  <span className="preset-name">{r.summary.name} <TierBadge tier={r.summary.overallTier} /></span>
+                  <span className="preset-meta">{weightClassLabel(r.summary.weightClass)} · {r.summary.topDiscipline} · {r.summary.recordLine}</span>
+                  {r.definition.notes ? <span className="preset-note">{r.definition.notes}</span> : null}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Dialog>
+      {confirmUi}
     </div>
+  );
+}
+
+/** Side-by-side derived composites for the comparison fighter. */
+function CompareCard({
+  me, other, otherName, onClear,
+}: { me: FighterRuntime; other: FighterRuntime; otherName: string; onClear: () => void }): JSX.Element {
+  const rows: [string, number, number, (v: number) => string][] = [
+    ['Striking tier', me.strikingTier, other.strikingTier, (v) => `T${v}`],
+    ['Grappling tier', me.grapplingTier, other.grapplingTier, (v) => `T${v}`],
+    ['MMA tier', me.mmaTier, other.mmaTier, (v) => `T${v}`],
+    ['Striking mean', me.strikingMean, other.strikingMean, (v) => v.toFixed(1)],
+    ['Grappling mean', me.grapplingMean, other.grapplingMean, (v) => v.toFixed(1)],
+    ['Experience', me.experience * 100, other.experience * 100, (v) => v.toFixed(0)],
+    ['Reach (cm)', me.body.reachM * 100, other.body.reachM * 100, (v) => v.toFixed(0)],
+    ['Fight-night kg', me.body.fightNightKg, other.body.fightNightKg, (v) => v.toFixed(1)],
+    ['Age', me.body.ageYears, other.body.ageYears, (v) => v.toFixed(0)],
+  ];
+  return (
+    <section className="ui-card compare-card" aria-labelledby="compare-h">
+      <div className="ui-card-head">
+        <h3 className="ui-card-title" id="compare-h">Compared with {otherName}</h3>
+        <Button size="sm" variant="ghost" iconOnly icon={<IconX />} aria-label="Stop comparing" onClick={onClear} style={{ marginLeft: 'auto' }} />
+      </div>
+      <table className="ui-table compare-table">
+        <thead><tr><th scope="col">Derived</th><th scope="col" className="num">This</th><th scope="col" className="num">Other</th><th scope="col" className="num">Δ</th></tr></thead>
+        <tbody>
+          {rows.map(([label, a, b, f]) => {
+            const d = a - b;
+            return (
+              <tr key={label}>
+                <th scope="row" style={{ fontWeight: 400 }}>{label}</th>
+                <td className="num">{f(a)}</td>
+                <td className="num">{f(b)}</td>
+                <td className={`num ${d > 0.05 ? 'is-up' : d < -0.05 ? 'is-down' : ''}`}>{Math.abs(d) < 0.05 ? '·' : `${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(label.includes('tier') ? 0 : 1)}`}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </section>
   );
 }
 
@@ -1106,7 +1420,8 @@ function StyleSection({ draft, onNumber, onField, bad }: SectionProps): JSX.Elem
           help={STYLE_META.pressureBias.help} value={s.pressureBias ?? 50} onChange={onNumber}
           invalid={bad?.has('style.pressureBias')} />
         <AttributeSlider path="style.stanceSwitching" label={STYLE_META.stanceSwitching.label}
-          help={STYLE_META.stanceSwitching.help} value={s.stanceSwitching ?? 10} onChange={onNumber}
+          help={noSimEffect('style.stanceSwitching') ? `${STYLE_META.stanceSwitching.help} Not read by the simulation today: ${noSimEffect('style.stanceSwitching')}` : STYLE_META.stanceSwitching.help}
+          value={s.stanceSwitching ?? 10} onChange={onNumber}
           invalid={bad?.has('style.stanceSwitching')} />
       </div>
 

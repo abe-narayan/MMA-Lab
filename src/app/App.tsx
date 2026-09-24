@@ -1,11 +1,18 @@
 /**
- * APP SHELL (Phase 6).
+ * APP SHELL.
  *
- * The same three tabs the page has always had — Replay, Dashboard, Model, still
- * rendered by the legacy `src/ui` components against the v3 engine — plus the
- * two new ones: the fighter database and the creator. Phase 7 retires the
- * legacy trio; until then both live here, which is why this file composes
- * `src/ui/*` rather than replacing it.
+ * A left navigation rail grouped by task (Simulate / Review / Library /
+ * Reference), a top bar that names the current page, a one-line model
+ * notice, and one panel per page. Every panel stays mounted once visited, so
+ * switching pages never throws away a half-built match card, a running
+ * tournament or a batch in progress.
+ *
+ * The legacy v3 views (Replay, Dashboard and the v3 Model notes) are no
+ * longer mounted: Watch replaces the replay view, the Batch screen carries
+ * the aggregate analytics the dashboard used to show, and "About the model"
+ * replaces the v3 notes with the v4 rulebook summary and the live parameter
+ * registry. Nothing under src/ui, src/engine, src/render, src/replay or
+ * src/data is imported by the app any more (see docs/design/UI_PASS.md).
  *
  * This is also the one file that knows the concrete store module. The screens
  * are written against `FighterStoreApi`, so the mapping from that interface
@@ -15,11 +22,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FighterDefinition } from '../sim';
-import { ReplayView } from '../ui/ReplayView';
-import { BOUT_COUNT, FORMATS } from '../ui/Controls';
-import { ModelNotes } from '../ui/ModelNotes';
-import { Dashboard } from '../ui/Dashboard';
-import { REPLAY_INDEX } from '../data/replays';
 import {
   allFighters, createFighter, deleteFighter, duplicateFighter, getFighter, updateFighter,
   validateFighter, blankFighter, randomFighter, exportRecords, toJson, importAll,
@@ -32,45 +34,90 @@ import { MatchSetup } from './screens/MatchSetup';
 import { Tournaments } from './screens/Tournaments';
 import { History } from './screens/History';
 import { BoutResultScreen } from './screens/BoutResult';
+import { BatchSim } from './screens/BatchSim';
+import { About } from './screens/About';
 import { bindMatchStore } from './run/matchStore';
 import { defaultDraft, newSeed, type MatchDraft } from './model/matchModel';
 import type { BoutRunOutcome } from './run/runBout';
 import type { BoutRun, SimConfig } from '../sim';
 import { Watch } from './screens/Watch';
+import {
+  Button, EmptyState, Segmented, ToastProvider, useConfirm,
+  IconBatch, IconBook, IconEdit, IconHistory, IconMatch, IconMonitor, IconMoon, IconPlay,
+  IconPlus, IconDice, IconResult, IconSidebar, IconSun, IconTrophy, IconUsers,
+} from './ui';
 
 type TabId =
-  | 'replay' | 'dashboard' | 'model' | 'fighters' | 'creator'
-  | 'match' | 'watch' | 'result' | 'tournaments' | 'history';
+  | 'match' | 'batch' | 'tournaments' | 'watch' | 'result' | 'history'
+  | 'fighters' | 'creator' | 'model';
 type ThemeChoice = 'system' | 'light' | 'dark';
+type NavPref = 'auto' | 'expanded' | 'collapsed';
 
-const TABS: { id: TabId; label: string; hint: string }[] = [
-  { id: 'match', label: 'Match', hint: 'Build a bout: mode, fighters, ruleset, arena, settings, seed' },
-  { id: 'watch', label: 'Watch', hint: 'Play a bout back, frame by frame' },
-  { id: 'result', label: 'Result', hint: 'The last bout: scorecards and the full stat sheet' },
-  { id: 'tournaments', label: 'Tournaments', hint: 'Brackets, seeding, carry-over' },
-  { id: 'history', label: 'History', hint: 'Past bouts: re-watch, verify, export' },
-  { id: 'replay', label: 'Replay', hint: 'Watch one simulated bout in 3D' },
-  { id: 'dashboard', label: 'Dashboard', hint: 'Aggregate outcomes across every recorded bout' },
-  { id: 'model', label: 'Model', hint: 'Derived attributes and every model parameter' },
-  { id: 'fighters', label: 'Fighters', hint: 'The fighter database: search, import, export' },
-  { id: 'creator', label: 'Creator', hint: 'Build or edit one fighter, with the derivation shown live' },
+interface NavItem {
+  id: TabId;
+  label: string;
+  title: string;
+  hint: string;
+  icon: JSX.Element;
+}
+
+const NAV: readonly { group: string; items: readonly NavItem[] }[] = [
+  {
+    group: 'Simulate',
+    items: [
+      { id: 'match', label: 'Match setup', title: 'Match setup', hint: 'Build one bout: mode, fighters, ruleset, arena, settings and seed', icon: <IconMatch /> },
+      { id: 'batch', label: 'Batch simulation', title: 'Batch simulation', hint: 'Run hundreds or thousands of seeded bouts in parallel and read the distribution', icon: <IconBatch /> },
+      { id: 'tournaments', label: 'Tournaments', title: 'Tournaments', hint: 'Brackets, seeding and carry-over', icon: <IconTrophy /> },
+    ],
+  },
+  {
+    group: 'Review',
+    items: [
+      { id: 'watch', label: 'Watch', title: 'Watch', hint: 'Play a bout back in 3D, frame by frame', icon: <IconPlay /> },
+      { id: 'result', label: 'Result', title: 'Bout result', hint: 'The last bout: scorecards and the full stat sheet', icon: <IconResult /> },
+      { id: 'history', label: 'History', title: 'History', hint: 'Past bouts: re-watch, verify, export', icon: <IconHistory /> },
+    ],
+  },
+  {
+    group: 'Library',
+    items: [
+      { id: 'fighters', label: 'Fighters', title: 'Fighter database', hint: 'Browse, search, import and export fighters', icon: <IconUsers /> },
+      { id: 'creator', label: 'Fighter editor', title: 'Fighter editor', hint: 'Build or edit one fighter, with the derivation shown live', icon: <IconEdit /> },
+    ],
+  },
+  {
+    group: 'Reference',
+    items: [
+      { id: 'model', label: 'About the model', title: 'About the model', hint: 'What the simulation models, its calibration targets and every parameter', icon: <IconBook /> },
+    ],
+  },
 ];
 
+const ALL_ITEMS: readonly NavItem[] = NAV.flatMap((g) => g.items);
+
 const THEME_KEY = 'bout-lab.theme';
+const NAV_KEY = 'bout-lab.nav';
 
-const DISCLAIMER =
-  'This is a modelling toy. Every probability in it is a hand-chosen assumption, ' +
-  'not a figure fitted to real fight data — the output describes this model and ' +
-  'is not a validated prediction about what would happen between real people.';
+export const DISCLAIMER =
+  'This is a modelling toy. Every probability in it is a hand-chosen or literature-derived assumption, '
+  + 'not a validated prediction: the output describes this model, not what would happen between real people.';
 
-function readStoredTheme(): ThemeChoice {
+function readStored<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
   try {
-    const raw = localStorage.getItem(THEME_KEY);
-    if (raw === 'light' || raw === 'dark' || raw === 'system') return raw;
+    const raw = localStorage.getItem(key);
+    if (raw !== null && (allowed as readonly string[]).includes(raw)) return raw as T;
   } catch {
     /* storage can be unavailable; the default is fine */
   }
-  return 'system';
+  return fallback;
+}
+
+function writeStored(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* non-fatal */
+  }
 }
 
 /**
@@ -134,14 +181,25 @@ export function bindStore(): FighterStoreApi {
 }
 
 export function App(): JSX.Element {
+  return (
+    <ToastProvider>
+      <Shell />
+    </ToastProvider>
+  );
+}
+
+function Shell(): JSX.Element {
   // `?watchDemo=1` opens straight onto the Watch screen with the demonstration
   // bout: the QA shortcut every Phase 8 capture script uses.
   const [tab, setTab] = useState<TabId>(() => (
     typeof location !== 'undefined' && new URLSearchParams(location.search).has('watchDemo') ? 'watch' : 'match'
   ));
-  const [opponents, setOpponents] = useState(1);
-  const [boutIndex, setBoutIndex] = useState(1);
-  const [theme, setTheme] = useState<ThemeChoice>(readStoredTheme);
+  // Panels mount on first visit and then stay mounted (state survives).
+  const [visited, setVisited] = useState<ReadonlySet<TabId>>(() => new Set([tab]));
+  const [theme, setTheme] = useState<ThemeChoice>(() => readStored(THEME_KEY, ['system', 'light', 'dark'] as const, 'system'));
+  const [navPref, setNavPref] = useState<NavPref>(() => readStored(NAV_KEY, ['auto', 'expanded', 'collapsed'] as const, 'auto'));
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1100);
+  const [confirm, confirmUi] = useConfirm();
 
   const store = useMemo(() => bindStore(), []);
   const matchStore = useMemo(() => bindMatchStore(), []);
@@ -149,91 +207,100 @@ export function App(): JSX.Element {
   const [editing, setEditing] = useState<{ def: FighterDefinition; fromBuiltIn: boolean } | null>(null);
   const [creatorDirty, setCreatorDirty] = useState(false);
 
-  // Phase 7a state: the match draft, and the last bout that was run. The draft
-  // lives here rather than in the screen so a rematch from the result screen
-  // can pre-fill it, and so switching tabs never throws away a half-built card.
+  // The match draft lives here rather than in the screen so a rematch from
+  // the result screen can pre-fill it, and so switching pages never throws
+  // away a half-built card.
   const [draft, setDraft] = useState<MatchDraft>(() => defaultDraft(newSeed('bout', Date.now())));
   const [lastRun, setLastRun] = useState<BoutRun | null>(null);
   // What the replay view is showing. It takes a `SimConfig` and rebuilds the
   // frames itself (09 §4.5), so handing a bout over means handing over its
-  // config — which is the same object whether the bout came from Match setup,
-  // from a tournament, or from a replay file in History.
+  // config — the same object whether the bout came from Match setup, a
+  // tournament, or a replay file in History.
   const [watching, setWatching] = useState<SimConfig | null>(null);
 
-  const watchRun = useCallback((run: BoutRun) => {
-    setWatching(run.config);
-    setLastRun(run);
-    setTab('watch');
+  useEffect(() => {
+    const onResize = (): void => setNarrow(window.innerWidth < 1100);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
   }, []);
 
   useEffect(() => {
     const root = document.documentElement;
     if (theme === 'system') root.removeAttribute('data-theme');
     else root.setAttribute('data-theme', theme);
-    try {
-      localStorage.setItem(THEME_KEY, theme);
-    } catch {
-      /* non-fatal */
-    }
+    writeStored(THEME_KEY, theme);
   }, [theme]);
 
-  const cycleTheme = useCallback(() => {
-    setTheme((t) => (t === 'system' ? 'dark' : t === 'dark' ? 'light' : 'system'));
-  }, []);
+  useEffect(() => { writeStored(NAV_KEY, navPref); }, [navPref]);
 
-  const openBout = useCallback((nextOpponents: number, index: number) => {
-    const o = Math.min(5, Math.max(1, Math.round(nextOpponents)));
-    setOpponents(o);
-    setBoutIndex(Math.min(BOUT_COUNT, Math.max(1, Math.round(index))));
-    setTab('replay');
+  // "auto" collapses the rail where width matters most: narrow windows and
+  // the Watch screen, whose 3D stage wants every pixel.
+  const collapsed = navPref === 'collapsed' || (navPref === 'auto' && (narrow || tab === 'watch'));
+
+  const go = useCallback((next: TabId) => {
+    setTab(next);
+    setVisited((v) => (v.has(next) ? v : new Set(v).add(next)));
   }, []);
 
   /**
    * The unsaved-changes guard for in-page navigation. `beforeunload` covers
-   * closing the page; leaving the creator tab is script-driven, so it has to be
-   * intercepted here — a tab switch that silently discards half an hour of
-   * authoring is the single worst thing this screen could do.
+   * closing the page; leaving the editor is script-driven, so it has to be
+   * intercepted here — a page switch that silently discards half an hour of
+   * authoring is the single worst thing this app could do.
    */
-  const changeTab = useCallback((next: TabId) => {
+  const changeTab = useCallback(async (next: TabId) => {
     if (next === tab) return;
     if (tab === 'creator' && creatorDirty) {
-      if (!window.confirm('This fighter has unsaved changes. Leave the creator and discard them?')) return;
+      const ok = await confirm({
+        title: 'Leave the editor?',
+        body: 'This fighter has unsaved changes. Leaving now discards them.',
+        confirmLabel: 'Discard and leave',
+        cancelLabel: 'Keep editing',
+        danger: true,
+      });
+      if (!ok) return;
       setCreatorDirty(false);
     }
-    setTab(next);
-  }, [tab, creatorDirty]);
+    go(next);
+  }, [tab, creatorDirty, confirm, go]);
+
+  const watchRun = useCallback((run: BoutRun) => {
+    setWatching(run.config);
+    setLastRun(run);
+    go('watch');
+  }, [go]);
 
   const editFighter = useCallback((record: FighterRecord) => {
     setEditing({ def: record.definition, fromBuiltIn: record.builtIn });
-    setTab('creator');
-  }, []);
+    go('creator');
+  }, [go]);
 
   const newFighter = useCallback(() => {
     setEditing({ def: store.blank(), fromBuiltIn: false });
-    setTab('creator');
-  }, [store]);
+    go('creator');
+  }, [store, go]);
 
   const rollFighter = useCallback(() => {
     // Seeded, not random: nothing in this project may call `Math.random`, and a
     // seed printed in the notes means a generated fighter can be reproduced.
     const seed = `creator.${Date.now().toString(36)}`;
     setEditing({ def: store.random(seed), fromBuiltIn: false });
-    setTab('creator');
-  }, [store]);
+    go('creator');
+  }, [store, go]);
 
   /** A finished bout: remember it, refresh history, and show the card. */
   const onRan = useCallback((outcome: BoutRunOutcome) => {
     setLastRun(outcome.run);
     setRevision((r) => r + 1);
-    setTab('result');
-  }, []);
+    go('result');
+  }, [go]);
 
   /** Same fighters and settings, a new seed. */
   const rematch = useCallback((run: BoutRun) => {
     setDraft((d) => ({ ...d, seed: newSeed('bout', Date.now()) }));
     void run;
-    setTab('match');
-  }, []);
+    go('match');
+  }, [go]);
 
   const exportRun = useCallback((run: BoutRun) => {
     try {
@@ -258,237 +325,220 @@ export function App(): JSX.Element {
     setEditing({ def: record.definition, fromBuiltIn: false });
   }, []);
 
-  const replays = useMemo(() => REPLAY_INDEX, []);
+  const current = ALL_ITEMS.find((i) => i.id === tab) ?? ALL_ITEMS[0];
+  const fighterCount = useMemo(() => {
+    try { return store.list().length; } catch { return 0; }
+  }, [store, revision]);
 
-  const recordedCount = useMemo(
-    () => FORMATS.reduce((sum, n) => sum + (replays[n]?.length ?? 0), 0),
-    [replays],
+  const panel = (id: TabId, scroll: boolean, body: () => JSX.Element): JSX.Element => (
+    <div
+      className={`tabpanel${scroll ? ' tabpanel--scroll' : ''}`}
+      role="region"
+      id={`panel-${id}`}
+      aria-label={ALL_ITEMS.find((i) => i.id === id)?.title}
+      hidden={tab !== id}
+    >
+      {visited.has(id) ? body() : null}
+    </div>
   );
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="brand">
-          <span className="brand-mark">Bout Lab</span>
-          <span className="brand-sub">
-            deterministic bout simulator &middot; seed-replayable &middot;{' '}
-            {recordedCount > 0
-              ? `${recordedCount.toLocaleString()} recorded bouts`
-              : 'bouts recomputed on demand'}
+    <div className="shell" data-collapsed={collapsed}>
+      <nav className="nav" aria-label="Main">
+        <div className="nav-brand">
+          <span className="nav-logo" aria-hidden="true">BL</span>
+          <span className="nav-wordmark">
+            <b>Bout Lab</b>
+            <span>Deterministic bout simulator</span>
           </span>
         </div>
-
-        <div className="tabs" role="tablist" aria-label="Views">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              id={`tab-${t.id}`}
-              className="tab"
-              aria-selected={tab === t.id}
-              aria-controls={`panel-${t.id}`}
-              title={t.hint}
-              onClick={() => changeTab(t.id)}
-            >
-              {t.label}
-              {t.id === 'creator' && creatorDirty ? <span aria-hidden="true"> &bull;</span> : null}
-            </button>
+        <div className="nav-scroll">
+          {NAV.map((g) => (
+            <div className="nav-group" key={g.group} role="group" aria-label={g.group}>
+              <div className="nav-group-label" aria-hidden="true">{g.group}</div>
+              {g.items.map((it) => (
+                <button
+                  key={it.id}
+                  type="button"
+                  id={`tab-${it.id}`}
+                  className="nav-item"
+                  aria-current={tab === it.id ? 'page' : undefined}
+                  aria-label={collapsed ? it.label : undefined}
+                  title={collapsed ? `${it.label} — ${it.hint}` : it.hint}
+                  onClick={() => { void changeTab(it.id); }}
+                >
+                  <span className="nav-icon">{it.icon}</span>
+                  <span className="nav-label">{it.label}</span>
+                  {it.id === 'creator' && creatorDirty ? <span className="nav-dot" title="Unsaved changes" /> : null}
+                  {it.id === 'fighters' && fighterCount > 0 ? <span className="nav-count">{fighterCount}</span> : null}
+                </button>
+              ))}
+            </div>
           ))}
         </div>
-
-        <button
-          type="button"
-          className="theme-btn"
-          onClick={cycleTheme}
-          aria-label={`Colour theme: ${theme}. Activate to change.`}
-        >
-          Theme: {theme}
-        </button>
-      </header>
-
-      <p className="disclaimer">
-        <b>Toy model</b>
-        <span>{DISCLAIMER}</span>
-      </p>
-
-      <main className="app-main">
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-match"
-          aria-labelledby="tab-match"
-          hidden={tab !== 'match'}
-        >
-          <MatchSetup
-            store={store}
-            matchStore={matchStore}
-            revision={revision}
-            draft={draft}
-            onDraftChange={setDraft}
-            onRan={onRan}
-          />
+        <div className="nav-foot">
+          <button
+            type="button"
+            className="nav-item"
+            aria-pressed={!collapsed}
+            aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            title={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            onClick={() => setNavPref(collapsed ? 'expanded' : 'collapsed')}
+          >
+            <span className="nav-icon"><IconSidebar /></span>
+            <span className="nav-label">{collapsed ? 'Expand' : 'Collapse'}</span>
+          </button>
         </div>
+      </nav>
 
-        <div
-          className="tabpanel"
-          role="tabpanel"
-          id="panel-watch"
-          aria-labelledby="tab-watch"
-          hidden={tab !== 'watch'}
-        >
-          <Watch config={watching} active={tab === 'watch'} />
-        </div>
-
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-result"
-          aria-labelledby="tab-result"
-          hidden={tab !== 'result'}
-        >
-          <BoutResultScreen
-            run={lastRun}
-            onWatch={watchRun}
-            onExport={exportRun}
-            onRematch={rematch}
-          />
-        </div>
-
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-tournaments"
-          aria-labelledby="tab-tournaments"
-          hidden={tab !== 'tournaments'}
-        >
-          <Tournaments
-            store={store}
-            matchStore={matchStore}
-            revision={revision}
-            onChanged={() => setRevision((r) => r + 1)}
-            onRan={(outcome) => setLastRun(outcome.run)}
-          />
-        </div>
-
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-history"
-          aria-labelledby="tab-history"
-          hidden={tab !== 'history'}
-        >
-          <History
-            matchStore={matchStore}
-            revision={revision}
-            onChanged={() => setRevision((r) => r + 1)}
-            onWatch={watchRun}
-            onOpenResult={(run) => {
-              setLastRun(run);
-              setTab('result');
-            }}
-          />
-        </div>
-
-        <div
-          className="tabpanel"
-          role="tabpanel"
-          id="panel-replay"
-          aria-labelledby="tab-replay"
-          hidden={tab !== 'replay'}
-        >
-          <ReplayView
-            opponents={opponents}
-            boutIndex={boutIndex}
-            active={tab === 'replay'}
-            onChangeOpponents={setOpponents}
-            onChangeBout={setBoutIndex}
-          />
-        </div>
-
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-dashboard"
-          aria-labelledby="tab-dashboard"
-          hidden={tab !== 'dashboard'}
-        >
-          <Dashboard replays={replays} onOpenBout={openBout} />
-        </div>
-
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-model"
-          aria-labelledby="tab-model"
-          hidden={tab !== 'model'}
-        >
-          <ModelNotes />
-        </div>
-
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-fighters"
-          aria-labelledby="tab-fighters"
-          hidden={tab !== 'fighters'}
-        >
-          <FighterDatabase
-            store={store}
-            revision={revision}
-            onEdit={editFighter}
-            onNew={newFighter}
-            onRandom={rollFighter}
-            onChanged={() => setRevision((r) => r + 1)}
-          />
-        </div>
-
-        <div
-          className="tabpanel tabpanel--scroll"
-          role="tabpanel"
-          id="panel-creator"
-          aria-labelledby="tab-creator"
-          hidden={tab !== 'creator'}
-        >
-          {editing === null ? (
-            <div className="creator-blank">
-              <p className="empty">
-                Nothing open. Pick a fighter from the database, or start a new one.
-              </p>
-              <div className="fdb-actions">
-                <button type="button" className="btn btn--play" onClick={newFighter}>New fighter</button>
-                <button type="button" className="btn" onClick={rollFighter}>Random fighter</button>
-                <button type="button" className="btn" onClick={() => changeTab('fighters')}>
-                  Browse the database
-                </button>
-              </div>
-            </div>
-          ) : (
-            <FighterCreator
-              // Remounting on a different fighter is deliberate: the editor
-              // holds a draft, and carrying one fighter's draft into another
-              // is how an editor corrupts data.
-              key={editing.def.id}
-              store={store}
-              initial={editing.def}
-              fromBuiltIn={editing.fromBuiltIn}
-              onSaved={onSaved}
-              onCancel={() => {
-                setCreatorDirty(false);
-                setEditing(null);
-                setTab('fighters');
-              }}
-              onDirtyChange={setCreatorDirty}
+      <div className="main">
+        <header className="topbar">
+          <div className="topbar-title">
+            <b>{current.title}</b>
+            <span>{current.hint}</span>
+          </div>
+          <div className="topbar-actions">
+            <Segmented<ThemeChoice>
+              label="Colour theme"
+              value={theme}
+              onChange={setTheme}
+              options={[
+                { value: 'system', label: <span className="nav-icon" style={{ width: 16, height: 16 }}><IconMonitor width={15} height={15} /><span className="visually-hidden">System</span></span>, title: 'Follow the system theme' },
+                { value: 'light', label: <span className="nav-icon" style={{ width: 16, height: 16 }}><IconSun width={15} height={15} /><span className="visually-hidden">Light</span></span>, title: 'Light theme' },
+                { value: 'dark', label: <span className="nav-icon" style={{ width: 16, height: 16 }}><IconMoon width={15} height={15} /><span className="visually-hidden">Dark</span></span>, title: 'Dark theme' },
+              ]}
             />
-          )}
-        </div>
-      </main>
+          </div>
+        </header>
 
-      <footer className="app-footer">
-        Bout Lab simulates a regulated, refereed contest under unified-style rules. Accumulated
-        impact is an abstract 0&ndash;100 index whose only role is to trigger an administrative
-        stoppage; no injury, medical outcome or lasting harm is modelled or shown. {DISCLAIMER}
-      </footer>
+        <p className="notice-strip">
+          <b>Toy model</b>
+          <span>{DISCLAIMER}</span>
+          {tab !== 'model' ? (
+            <Button size="sm" variant="ghost" onClick={() => { void changeTab('model'); }}>About the model</Button>
+          ) : null}
+        </p>
+
+        <main className="app-main">
+          {panel('match', true, () => (
+            <div className="page">
+              <MatchSetup
+                store={store}
+                matchStore={matchStore}
+                revision={revision}
+                draft={draft}
+                onDraftChange={setDraft}
+                onRan={onRan}
+              />
+            </div>
+          ))}
+
+          {panel('batch', true, () => (
+            <div className="page page--wide">
+              <BatchSim store={store} revision={revision} />
+            </div>
+          ))}
+
+          {panel('watch', false, () => <Watch config={watching} active={tab === 'watch'} />)}
+
+          {panel('result', true, () => (
+            <div className="page">
+              <BoutResultScreen
+                run={lastRun}
+                onWatch={watchRun}
+                onExport={exportRun}
+                onRematch={rematch}
+              />
+            </div>
+          ))}
+
+          {panel('tournaments', true, () => (
+            <div className="page page--wide">
+              <Tournaments
+                store={store}
+                matchStore={matchStore}
+                revision={revision}
+                onChanged={() => setRevision((r) => r + 1)}
+                onRan={(outcome) => setLastRun(outcome.run)}
+              />
+            </div>
+          ))}
+
+          {panel('history', true, () => (
+            <div className="page">
+              <History
+                matchStore={matchStore}
+                revision={revision}
+                onChanged={() => setRevision((r) => r + 1)}
+                onWatch={watchRun}
+                onOpenResult={(run) => {
+                  setLastRun(run);
+                  go('result');
+                }}
+              />
+            </div>
+          ))}
+
+          {panel('fighters', true, () => (
+            <div className="page page--wide">
+              <FighterDatabase
+                store={store}
+                revision={revision}
+                onEdit={editFighter}
+                onNew={newFighter}
+                onRandom={rollFighter}
+                onChanged={() => setRevision((r) => r + 1)}
+              />
+            </div>
+          ))}
+
+          {panel('creator', true, () => (
+            <div className="page page--wide">
+              {editing === null ? (
+                <EmptyState
+                  icon={<IconEdit />}
+                  title="No fighter open"
+                  actions={(
+                    <>
+                      <Button variant="primary" icon={<IconPlus />} onClick={newFighter}>New fighter</Button>
+                      <Button icon={<IconDice />} onClick={rollFighter}>Random fighter</Button>
+                      <Button icon={<IconUsers />} onClick={() => { void changeTab('fighters'); }}>Browse the database</Button>
+                    </>
+                  )}
+                >
+                  Pick a fighter from the database to edit it, start from a blank fighter or a preset
+                  archetype, or roll a seeded random one.
+                </EmptyState>
+              ) : (
+                <FighterCreator
+                  // Remounting on a different fighter is deliberate: the editor
+                  // holds a draft, and carrying one fighter's draft into another
+                  // is how an editor corrupts data.
+                  key={editing.def.id}
+                  store={store}
+                  initial={editing.def}
+                  fromBuiltIn={editing.fromBuiltIn}
+                  revision={revision}
+                  onSaved={onSaved}
+                  onCancel={() => {
+                    setCreatorDirty(false);
+                    setEditing(null);
+                    go('fighters');
+                  }}
+                  onDirtyChange={setCreatorDirty}
+                />
+              )}
+            </div>
+          ))}
+
+          {panel('model', true, () => (
+            <div className="page">
+              <About />
+            </div>
+          ))}
+        </main>
+      </div>
+      {confirmUi}
     </div>
   );
 }

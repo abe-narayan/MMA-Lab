@@ -26,6 +26,7 @@ import type { HistoryEntry } from '../store/types';
 import type { MatchStoreApi } from '../run/matchStore';
 import { runBout } from '../run/runBout';
 import { clockOf, methodLabel, winnerLabel } from './BoutResult';
+import { Button, EmptyState, useConfirm, useToast, IconHistory } from '../ui';
 
 export interface HistoryProps {
   matchStore: MatchStoreApi;
@@ -85,6 +86,8 @@ export function History({
   const [verdicts, setVerdicts] = useState<Record<string, VerifyResult | 'pending'>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [confirm, confirmUi] = useConfirm();
+  const toast = useToast();
 
   const entries = useMemo(() => {
     const list = [...matchStore.history()];
@@ -161,40 +164,61 @@ export function History({
     }
   }, []);
 
+  // Deletes are immediate and undoable: the entry (replay body included) is
+  // held by the toast and written back if the user asks.
   const remove = useCallback((entry: HistoryEntry) => {
-    if (!window.confirm(`Delete this bout from history? ${entry.fighterNames.join(' vs ')}`)) return;
     matchStore.removeHistory(entry.id);
     onChanged();
-  }, [matchStore, onChanged]);
+    toast({
+      message: `Deleted ${entry.fighterNames.join(' vs ')} from history.`,
+      actionLabel: 'Undo',
+      onAction: () => { matchStore.putHistory(entry); onChanged(); },
+    });
+  }, [matchStore, onChanged, toast]);
 
-  const clearAll = useCallback(() => {
-    if (!window.confirm('Delete every bout in history? This cannot be undone.')) return;
+  const clearAll = useCallback(async () => {
+    const saved = matchStore.history();
+    const ok = await confirm({
+      title: `Clear all ${saved.length} bouts from history?`,
+      body: 'Tournament brackets keep their results, but their bouts will no longer be re-watchable. You can undo this from the notification for a few seconds.',
+      confirmLabel: 'Clear history',
+      danger: true,
+    });
+    if (!ok) return;
     matchStore.clearHistory();
     onChanged();
-  }, [matchStore, onChanged]);
+    toast({
+      message: `Cleared ${saved.length} bouts.`,
+      actionLabel: 'Undo',
+      onAction: () => { for (const e of [...saved].reverse()) matchStore.putHistory(e); onChanged(); },
+    });
+  }, [matchStore, onChanged, confirm, toast]);
 
   return (
     <div className="ms">
-      <header className="ms-head">
+      <header className="ms-head page-head">
         <div>
-          <h2 className="fc-h">History</h2>
-          <p className="fc-blurb">
+          <h1 className="page-title">History</h1>
+          <p className="page-sub">
             The last {entries.length} bout{entries.length === 1 ? '' : 's'}. The newest 50 keep a
             full replay; older ones keep the seed, the digest and a summary, which is enough to
             reproduce the fight but not to verify it against a stored stream.
           </p>
         </div>
-        <div className="fdb-actions">
-          <button type="button" className="btn btn--danger" onClick={clearAll} disabled={entries.length === 0}>
+        <div className="page-actions">
+          <Button variant="danger" onClick={() => { void clearAll(); }} disabled={entries.length === 0}>
             Clear history
-          </button>
+          </Button>
         </div>
       </header>
 
-      {message ? <p className="creator-message" role="status">{message}</p> : null}
+      {message ? <p className="ui-alert" role="status">{message}</p> : null}
 
       {entries.length === 0 ? (
-        <p className="empty">Nothing yet. Run a bout in Match setup and it will appear here.</p>
+        <EmptyState icon={<IconHistory />} title="No bouts yet">
+          Run a bout in Match setup, or a tournament match, and it will appear here with its seed,
+          result and a verifiable replay.
+        </EmptyState>
       ) : (
         <div className="table-wrap">
           <table className="fdb-table">
@@ -231,7 +255,7 @@ export function History({
                       </span>
                     </th>
                     <td>
-                      {winnerLabel(entry.result, entry.fighterNames)}
+                      {winnerLabel(entry.result, entry.fighterNames, full ? (entry.replay as ReplayFileV4).teams?.teamOf : undefined)}
                       {' · '}{methodLabel(entry.result.method)}
                       <span className="mono"> · R{entry.result.round} {clockOf(entry.result.timeSeconds)}</span>
                     </td>
@@ -285,6 +309,7 @@ export function History({
         from another build is reported as an engine-version mismatch rather than as a failure,
         because a different engine is allowed to produce a different fight from the same seed.
       </p>
+      {confirmUi}
     </div>
   );
 }

@@ -6,14 +6,15 @@
  * disagree with the table, and the filtering itself is pure and tested
  * (`model/filterModel`).
  *
- * Built-in archetypes and the user's own fighters share one list rather than
- * two tabs. They are the same kind of thing, the only difference is that a
- * built-in is read-only — and the way to learn the schema is to open one, so
- * hiding them behind a second tab would hide the best documentation there is.
- * Editing a built-in is allowed; the store clones it on save.
+ * Built-in archetypes and the user's own fighters share one list. They are the
+ * same kind of thing; the only difference is that a built-in is read-only (it
+ * is also a *preset*: open it and save, and you get your own copy).
  *
- * Export and import are file-based and local. There is no network anywhere in
- * this app, so "share a fighter" means "hand someone a JSON file".
+ * Every destructive action can be taken back: deleting shows an Undo toast
+ * that restores the fighter exactly, and an import is previewed — fighter by
+ * fighter, with the reason for every rejection — before anything is written
+ * (`model/importModel`). Export and import are file-based and local; there is
+ * no network anywhere in this app.
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react';
@@ -27,6 +28,12 @@ import {
 } from '../model/filterModel';
 import { DISCIPLINE_LABELS, weightClassLabel } from '../model/fieldMeta';
 import { metresToFeetInches, metresToInches } from '../model/units';
+import { previewImport, type ImportPreview } from '../model/importModel';
+import { NAME_MAX } from '../store/validate';
+import {
+  Alert, Button, Dialog, EmptyState, ErrorState, Field, StatusBadge, useConfirm, useToast,
+  IconCopy, IconDice, IconDownload, IconEdit, IconPlus, IconSearch, IconTrash, IconUpload, IconUsers,
+} from '../ui';
 
 export interface FighterDatabaseProps {
   store: FighterStoreApi;
@@ -42,16 +49,19 @@ export function FighterDatabase({
   store, revision, onEdit, onNew, onRandom, onChanged,
 }: FighterDatabaseProps): JSX.Element {
   const [query, setQuery] = useState<DatabaseQuery>(EMPTY_QUERY);
-  const [message, setMessage] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: 'ok' | 'alert' | 'info'; text: string } | null>(null);
+  const [preview, setPreview] = useState<{ file: string; data: ImportPreview } | null>(null);
+  const [renaming, setRenaming] = useState<{ record: FighterRecord; name: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [confirm, confirmUi] = useConfirm();
+  const toast = useToast();
 
-  const records = useMemo<FighterRecord[]>(() => {
+  const [readError, records] = useMemo<[string | null, FighterRecord[]]>(() => {
     try {
-      return store.list();
+      return [null, store.list()];
     } catch (err) {
       // A corrupt localStorage must not blank the screen.
-      setMessage(`Could not read the fighter database: ${String(err)}`);
-      return [];
+      return [`Could not read the fighter database: ${err instanceof Error ? err.message : String(err)}`, []];
     }
     // `revision` is the dependency that matters: the store is not reactive, so
     // the shell tells us when it has changed.
@@ -59,6 +69,7 @@ export function FighterDatabase({
 
   const visible = useMemo(() => applyQuery(records, query), [records, query]);
   const classes = useMemo(() => weightClassesPresent(records), [records]);
+  const custom = useMemo(() => records.filter((r) => !r.builtIn).length, [records]);
 
   const patch = useCallback((p: Partial<DatabaseQuery>) => setQuery((q) => ({ ...q, ...p })), []);
 
@@ -80,80 +91,139 @@ export function FighterDatabase({
   const exportOne = useCallback((r: FighterRecord) => {
     try {
       download(store.exportJson([r.definition.id]), `${r.definition.id}.json`);
-      setMessage(`Exported ${r.summary.name}.`);
+      setMessage({ tone: 'ok', text: `Exported ${r.summary.name} as a BOUT LAB file (schema version 1).` });
     } catch (err) {
-      setMessage(`Export failed: ${String(err)}`);
+      setMessage({ tone: 'alert', text: `Export failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }, [store, download]);
 
   const exportVisible = useCallback(() => {
     try {
       download(store.exportJson(visible.map((r) => r.definition.id)), 'boutlab-fighters.json');
-      setMessage(`Exported ${visible.length} fighter${visible.length === 1 ? '' : 's'}.`);
+      setMessage({ tone: 'ok', text: `Exported ${visible.length} fighter${visible.length === 1 ? '' : 's'}.` });
     } catch (err) {
-      setMessage(`Export failed: ${String(err)}`);
+      setMessage({ tone: 'alert', text: `Export failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }, [store, visible, download]);
 
   const onImportFile = useCallback(async (file: File) => {
     try {
-      const outcome = store.importJson(await file.text());
-      setMessage(
-        `Imported ${outcome.added}, skipped ${outcome.skipped}.` +
-        (outcome.problems.length > 0 ? ` ${outcome.problems.slice(0, 3).join(' ')}` : ''),
-      );
-      onChanged();
+      const text = await file.text();
+      const data = previewImport(text, records.map((r) => r.definition.id));
+      setPreview({ file: file.name, data });
     } catch (err) {
-      setMessage(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+      setMessage({ tone: 'alert', text: `Could not read ${file.name}: ${err instanceof Error ? err.message : String(err)}` });
     }
-  }, [store, onChanged]);
+  }, [records]);
 
-  const remove = useCallback((r: FighterRecord) => {
-    if (!window.confirm(`Delete ${r.summary.name}? This cannot be undone.`)) return;
+  const commitImport = useCallback(() => {
+    if (!preview?.data.normalised) return;
     try {
-      store.remove(r.definition.id);
-      setMessage(`Deleted ${r.summary.name}.`);
+      const outcome = store.importJson(preview.data.normalised);
+      setPreview(null);
+      setMessage({
+        tone: outcome.added > 0 ? 'ok' : 'alert',
+        text: `Imported ${outcome.added} fighter${outcome.added === 1 ? '' : 's'}`
+          + (outcome.skipped > 0 ? `, skipped ${outcome.skipped}.` : '.'),
+      });
       onChanged();
     } catch (err) {
-      setMessage(`Could not delete: ${String(err)}`);
+      setMessage({ tone: 'alert', text: `Import failed: ${err instanceof Error ? err.message : String(err)}` });
     }
-  }, [store, onChanged]);
+  }, [store, preview, onChanged]);
+
+  const remove = useCallback(async (r: FighterRecord) => {
+    const ok = await confirm({
+      title: `Delete ${r.summary.name}?`,
+      body: 'The fighter is removed from this browser’s database. You can undo this from the notification for a few seconds; bouts already in History keep their copy.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const def = r.definition;
+      store.remove(def.id);
+      onChanged();
+      toast({
+        message: `Deleted ${r.summary.name}.`,
+        actionLabel: 'Undo',
+        onAction: () => {
+          try {
+            store.save(def);
+            onChanged();
+          } catch (err) {
+            setMessage({ tone: 'alert', text: `Could not restore ${r.summary.name}: ${String(err)}` });
+          }
+        },
+      });
+    } catch (err) {
+      setMessage({ tone: 'alert', text: `Could not delete: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }, [store, onChanged, confirm, toast]);
 
   const duplicate = useCallback((r: FighterRecord) => {
     try {
       const copy = store.duplicate(r.definition.id);
-      setMessage(`Duplicated as ${copy.summary.name}.`);
       onChanged();
+      toast({
+        message: `Duplicated as ${copy.summary.name}.`,
+        actionLabel: 'Edit',
+        onAction: () => onEdit(copy),
+      });
     } catch (err) {
-      setMessage(`Could not duplicate: ${String(err)}`);
+      setMessage({ tone: 'alert', text: `Could not duplicate: ${err instanceof Error ? err.message : String(err)}` });
     }
-  }, [store, onChanged]);
+  }, [store, onChanged, toast, onEdit]);
+
+  const commitRename = useCallback(() => {
+    if (!renaming) return;
+    const name = renaming.name.trim();
+    if (name === '' || name.length > NAME_MAX) return;
+    try {
+      const before = renaming.record.definition;
+      store.save({ ...before, name });
+      setRenaming(null);
+      onChanged();
+      toast({
+        message: `Renamed to ${name}.`,
+        actionLabel: 'Undo',
+        onAction: () => { store.save(before); onChanged(); },
+      });
+    } catch (err) {
+      setMessage({ tone: 'alert', text: `Could not rename: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }, [renaming, store, onChanged, toast]);
+
+  const filtered = query.search !== '' || query.discipline !== 'all' || query.tier !== 'all'
+    || query.weightClass !== 'all' || query.origin !== 'all';
 
   return (
     <div className="fdb">
-      <header className="fdb-head">
-        <div className="fdb-title">
-          <h2 className="fc-h">Fighters</h2>
-          <span className="fdb-count mono">
-            showing {visible.length} of {records.length}
-          </span>
+      <header className="page-head">
+        <div>
+          <h1 className="page-title">Fighters</h1>
+          <p className="page-sub">
+            {records.length} fighters: {records.length - custom} built-in archetypes (read-only presets — open
+            one and save to make your own copy) and {custom} of your own.{' '}
+            <span className="fdb-count mono">showing {visible.length} of {records.length}</span>
+          </p>
         </div>
-
-        <div className="fdb-actions">
-          <button type="button" className="btn btn--play" onClick={onNew}>New fighter</button>
-          <button type="button" className="btn" onClick={onRandom} title="A seeded, plausible fighter you can then edit">
+        <div className="page-actions">
+          <Button variant="primary" icon={<IconPlus />} onClick={onNew}>New fighter</Button>
+          <Button icon={<IconDice />} onClick={onRandom} title="A seeded, plausible fighter you can then edit">
             Random fighter
-          </button>
-          <button type="button" className="btn" onClick={() => fileInput.current?.click()}>Import</button>
-          <button type="button" className="btn" onClick={exportVisible} disabled={visible.length === 0}>
+          </Button>
+          <Button icon={<IconUpload />} onClick={() => fileInput.current?.click()}>Import</Button>
+          <Button icon={<IconDownload />} onClick={exportVisible} disabled={visible.length === 0}>
             Export shown
-          </button>
+          </Button>
           <input
             ref={fileInput}
             type="file"
             accept="application/json,.json"
             className="visually-hidden"
             aria-label="Import a fighter JSON file"
+            tabIndex={-1}
             onChange={(e) => {
               const file = e.target.files?.[0];
               if (file) void onImportFile(file);
@@ -164,20 +234,28 @@ export function FighterDatabase({
         </div>
       </header>
 
-      {message ? <p className="creator-message" role="status">{message}</p> : null}
+      {message ? (
+        <Alert tone={message.tone} action={<Button size="sm" variant="ghost" onClick={() => setMessage(null)}>Dismiss</Button>}>
+          {message.text}
+        </Alert>
+      ) : null}
 
       <div className="fdb-filters" role="search">
-        <div className="fc-field">
-          <label htmlFor="fdb-search">Search</label>
-          <input
-            id="fdb-search"
-            className="field"
-            type="search"
-            value={query.search}
-            placeholder="name, nickname, tag"
-            onChange={(e) => patch({ search: e.target.value })}
-          />
-        </div>
+        <Field label="Search">
+          {(p) => (
+            <div className="fdb-search">
+              <IconSearch aria-hidden="true" />
+              <input
+                id={p.id}
+                className="field"
+                type="search"
+                value={query.search}
+                placeholder="Name, nickname or tag"
+                onChange={(e) => patch({ search: e.target.value })}
+              />
+            </div>
+          )}
+        </Field>
 
         <div className="fc-field">
           <label htmlFor="fdb-discipline">Discipline</label>
@@ -222,33 +300,45 @@ export function FighterDatabase({
           </select>
         </div>
 
-        <button type="button" className="btn" onClick={() => setQuery(EMPTY_QUERY)}>Reset</button>
+        <Button variant="ghost" onClick={() => setQuery(EMPTY_QUERY)} disabled={!filtered}>Reset filters</Button>
       </div>
 
-      {visible.length === 0 ? (
-        <p className="empty">
-          {records.length === 0
-            ? 'No fighters yet. Start from a built-in archetype, roll a random one, or import a file.'
-            : 'No fighter matches these filters.'}
-        </p>
+      {readError ? (
+        <ErrorState title="The fighter database could not be read" detail={readError}>
+          Your browser storage may be full, blocked or damaged. Built-in archetypes are still
+          available after a reload; exporting regularly keeps a copy of your own fighters safe.
+        </ErrorState>
+      ) : visible.length === 0 ? (
+        records.length === 0 ? (
+          <EmptyState icon={<IconUsers />} title="No fighters yet"
+            actions={<><Button variant="primary" icon={<IconPlus />} onClick={onNew}>New fighter</Button><Button icon={<IconUpload />} onClick={() => fileInput.current?.click()}>Import a file</Button></>}>
+            Start from a built-in archetype, roll a random one, or import a file.
+          </EmptyState>
+        ) : (
+          <EmptyState icon={<IconSearch />} title="No fighter matches these filters"
+            actions={<Button onClick={() => setQuery(EMPTY_QUERY)}>Reset filters</Button>}>
+            Try a shorter search, or widen the tier and weight-class filters.
+          </EmptyState>
+        )
       ) : (
         <div className="table-wrap">
           <table className="fdb-table">
             <caption className="visually-hidden">
-              Fighters in the database. Column headers sort; each row has edit, duplicate, export
-              and delete actions.
+              Fighters in the database. Column headers sort; each row has edit, duplicate, export,
+              rename and delete actions.
             </caption>
             <thead>
               <tr>
                 {(['name', 'tier', 'weight', 'age', 'reach', 'updated'] as SortKey[]).map((key) => (
-                  <th key={key} scope="col" aria-sort={query.sort === key ? (query.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                  <th key={key} scope="col" className={key === 'age' || key === 'reach' ? 'num' : undefined}
+                    aria-sort={query.sort === key ? (query.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
                     <button type="button" className="fdb-sort" onClick={() => toggleSort(key)}>
                       {SORT_LABELS[key]}
-                      {query.sort === key ? <span aria-hidden="true">{query.dir === 'asc' ? ' ▴' : ' ▾'}</span> : null}
+                      <span aria-hidden="true" className="fdb-sort-caret">{query.sort === key ? (query.dir === 'asc' ? '▴' : '▾') : '↕'}</span>
                     </button>
                   </th>
                 ))}
-                <th scope="col">Top discipline</th>
+                <th scope="col"><span className="fdb-sort fdb-sort--static">Top discipline</span></th>
                 <th scope="col"><span className="visually-hidden">Actions</span></th>
               </tr>
             </thead>
@@ -258,10 +348,12 @@ export function FighterDatabase({
                 return (
                   <tr key={r.definition.id}>
                     <th scope="row" className="fdb-name">
-                      <span className="fdb-name-main">{s.name}</span>
+                      <button type="button" className="fdb-name-btn" onClick={() => onEdit(r)} title={r.builtIn ? 'Open this preset' : 'Edit this fighter'}>
+                        <span className="fdb-name-main">{s.name}</span>
+                      </button>
                       <span className="fdb-name-sub mono">
                         {s.short}
-                        {r.builtIn ? <em className="tag">built-in</em> : null}
+                        {r.builtIn ? <StatusBadge tone="outline">preset</StatusBadge> : null}
                         {' · '}{s.recordLine}{' · '}{s.stance}
                       </span>
                     </th>
@@ -271,23 +363,32 @@ export function FighterDatabase({
                     <td className="num" title={`${s.heightCm} cm tall (${metresToFeetInches(s.heightCm / 100)})`}>
                       {s.reachCm} cm <span className="fdb-alt">{metresToInches(s.reachCm / 100)}</span>
                     </td>
-                    <td className="mono fdb-when">{r.updatedAt.slice(0, 10)}</td>
+                    <td className="mono fdb-when">{r.builtIn ? '—' : r.updatedAt.slice(0, 10)}</td>
                     <td>{s.topDiscipline}</td>
                     <td className="fdb-row-actions">
-                      <button type="button" className="btn" onClick={() => onEdit(r)}>
+                      <Button size="sm" icon={<IconEdit />} onClick={() => onEdit(r)}>
                         {r.builtIn ? 'Open' : 'Edit'}
-                      </button>
-                      <button type="button" className="btn" onClick={() => duplicate(r)}>Duplicate</button>
-                      <button type="button" className="btn" onClick={() => exportOne(r)}>Export</button>
-                      <button
-                        type="button"
-                        className="btn btn--danger"
-                        onClick={() => remove(r)}
+                      </Button>
+                      <Button size="sm" variant="ghost" iconOnly icon={<IconCopy />} onClick={() => duplicate(r)}
+                        aria-label={`Duplicate ${s.name}`} title="Duplicate" />
+                      <Button size="sm" variant="ghost" iconOnly icon={<IconDownload />} onClick={() => exportOne(r)}
+                        aria-label={`Export ${s.name}`} title="Export as JSON" />
+                      <Button size="sm" variant="ghost" onClick={() => setRenaming({ record: r, name: s.name })}
+                        disabled={r.builtIn} aria-label={`Rename ${s.name}`}
+                        title={r.builtIn ? 'Presets are read-only; duplicate it first' : 'Rename'}>
+                        Rename
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        iconOnly
+                        icon={<IconTrash />}
+                        className="fdb-delete"
+                        onClick={() => { void remove(r); }}
                         disabled={r.builtIn}
-                        title={r.builtIn ? 'Built-in archetypes cannot be deleted' : 'Delete this fighter'}
-                      >
-                        Delete
-                      </button>
+                        aria-label={`Delete ${s.name}`}
+                        title={r.builtIn ? 'Built-in archetypes cannot be deleted' : 'Delete'}
+                      />
                     </td>
                   </tr>
                 );
@@ -296,6 +397,92 @@ export function FighterDatabase({
           </table>
         </div>
       )}
+
+      <Dialog
+        open={preview !== null}
+        onClose={() => setPreview(null)}
+        title={preview ? `Import ${preview.file}` : 'Import'}
+        description={preview?.data.fatal ? undefined : 'Nothing has been written yet. Check the list, then import.'}
+        wide
+        footer={preview && !preview.data.fatal ? (
+          <>
+            <Button onClick={() => setPreview(null)}>Cancel</Button>
+            <Button variant="primary" onClick={commitImport}
+              disabled={!preview.data.fighters.some((f) => f.status !== 'rejected')}>
+              Import {preview.data.fighters.filter((f) => f.status !== 'rejected').length} fighter
+              {preview.data.fighters.filter((f) => f.status !== 'rejected').length === 1 ? '' : 's'}
+            </Button>
+          </>
+        ) : <Button onClick={() => setPreview(null)}>Close</Button>}
+      >
+        {preview?.data.fatal ? (
+          <ErrorState title="This file cannot be imported">{preview.data.fatal}</ErrorState>
+        ) : preview ? (
+          <div className="import-preview">
+            {preview.data.schemaNote ? <Alert tone="info">{preview.data.schemaNote}</Alert> : null}
+            {preview.data.otherContent.length > 0 ? (
+              <Alert tone="info">The file also holds {preview.data.otherContent.join(', ')}; only fighters are imported here.</Alert>
+            ) : null}
+            <ul className="import-list">
+              {preview.data.fighters.map((f) => (
+                <li key={f.index} data-status={f.status}>
+                  <div className="import-row">
+                    <b>{f.name}</b>
+                    {f.status === 'ok' ? <StatusBadge tone="ok" dot>Will import</StatusBadge> : null}
+                    {f.status === 'renamed' ? <StatusBadge tone="info" dot>Will import as {f.finalId}</StatusBadge> : null}
+                    {f.status === 'rejected' ? <StatusBadge tone="alert" dot>Rejected</StatusBadge> : null}
+                  </div>
+                  {f.problems.length > 0 ? (
+                    <ul className="import-problems">
+                      {f.problems.slice(0, 4).map((p) => <li key={p}>{p}</li>)}
+                      {f.problems.length > 4 ? <li>…and {f.problems.length - 4} more.</li> : null}
+                    </ul>
+                  ) : null}
+                  {f.warnings.length > 0 && f.status !== 'rejected' ? (
+                    <p className="import-warn">{f.warnings.length} warning{f.warnings.length === 1 ? '' : 's'} (imported anyway): {f.warnings[0]}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={renaming !== null}
+        onClose={() => setRenaming(null)}
+        title="Rename fighter"
+        initialFocus="input"
+        footer={(
+          <>
+            <Button onClick={() => setRenaming(null)}>Cancel</Button>
+            <Button variant="primary" onClick={commitRename} disabled={!renaming || renaming.name.trim() === '' || renaming.name.length > NAME_MAX}>Rename</Button>
+          </>
+        )}
+      >
+        {renaming ? (
+          <Field label="Name"
+            error={renaming.name.trim() === '' ? 'A fighter needs a name.'
+              : renaming.name.length > NAME_MAX ? `At most ${NAME_MAX} characters.` : null}
+            hint="The id stays the same, so matchups, tournaments and history that use this fighter keep working.">
+            {(p) => (
+              <input
+                id={p.id}
+                className="field"
+                type="text"
+                value={renaming.name}
+                maxLength={NAME_MAX}
+                aria-invalid={p.invalid || undefined}
+                aria-describedby={p.describedBy}
+                onChange={(e) => setRenaming({ ...renaming, name: e.target.value })}
+                onKeyDown={(e) => { if (e.key === 'Enter') commitRename(); }}
+                style={{ width: '100%' }}
+              />
+            )}
+          </Field>
+        ) : null}
+      </Dialog>
+      {confirmUi}
     </div>
   );
 }

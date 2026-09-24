@@ -498,7 +498,7 @@ export const SETTING_HELP: Readonly<Record<string, string>> = Object.freeze({
   homeFighter: 'The fighter with the crowd. Worth about +3.6 pp of round-win probability to them on the cards; it changes nothing about the fighting itself.',
   blood: 'Presentation only. Has no effect whatsoever on the simulation — the same seed gives the same bout either way.',
   commentary: 'App-level. Generates the commentary line stream; no effect on the simulation.',
-  speed: 'Playback only. 0.1× to 8×; below 0.25× the presenter places contacts inside the tick using their sub-tick offset.',
+  speed: 'The speed Watch starts this bout at (0.1× to 4×; change it any time with the transport). Playback only: it never changes the fight.',
   seed: 'The whole bout is a pure function of this string plus the settings above. Same seed, same fight, on any machine — so copy it if you want to show someone exactly what you saw.',
 });
 

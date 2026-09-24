@@ -80,7 +80,7 @@ function Clock(props: { m: HudModel; roundTime: number; roundSeconds: number }):
   return (
     <div className="wf-clock" aria-label={`Round ${m.round} of ${m.rounds}, ${left}`}>
       <span className="wf-round">Round {m.round}<small>/{m.rounds}</small></span>
-      <span className="wf-time num" title="Time left in the round">{left}</span>
+      <span className="wf-time num" title={m.phase === 'ended' ? 'Finish time (elapsed in the round, as on the result)' : 'Time left in the round'}>{left}</span>
       <span className="wf-phase">{phase ?? `Referee: ${m.referee.state}`}</span>
     </div>
   );

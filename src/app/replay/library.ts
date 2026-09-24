@@ -19,6 +19,7 @@
  * in-memory backend: the session still works, it forgets on reload.
  */
 import type { ReplayFileV4 } from '../../sim';
+import { clockText, methodText } from '../model/format';
 
 export const LIBRARY_DB = 'boutlab-replays';
 export const LIBRARY_DB_VERSION = 1;
@@ -51,16 +52,20 @@ export function replayId(file: Pick<ReplayFileV4, 'digest' | 'seed'>): string {
   return `r.${file.digest.slice(0, 16)}.${file.seed.length.toString(36)}`;
 }
 
-function clock(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-}
 
 export function resultLine(file: ReplayFileV4): string {
-  const r = file.result as { winner?: number | string; method?: string; round?: number; timeSeconds?: number };
-  const winner = typeof r.winner === 'number' ? file.fighters[r.winner]?.short ?? `F${r.winner}` : String(r.winner ?? '');
-  const when = r.round !== undefined && r.timeSeconds !== undefined ? ` · R${r.round} ${clock(r.timeSeconds)}` : '';
-  return `${(r.method ?? 'result').toUpperCase()}${when}${winner && winner !== 'undefined' ? ` · ${winner}` : ''}`;
+  const r = file.result as { winner?: number | string; winningTeam?: number | null; method?: string; round?: number; timeSeconds?: number };
+  // Team modes report winner 'none' with a winning team: name the team, not "none".
+  let winner = '';
+  if (typeof r.winner === 'number') winner = file.fighters[r.winner]?.short ?? `F${r.winner + 1}`;
+  else if (typeof r.winningTeam === 'number') {
+    const teamOf = file.teams?.teamOf ?? [];
+    const members = file.fighters.filter((_, i) => teamOf[i] === r.winningTeam).map((f) => f.short);
+    const team = r.winningTeam === 0 ? 'Red team' : r.winningTeam === 1 ? 'Blue team' : `Team ${r.winningTeam + 1}`;
+    winner = members.length > 0 ? `${team} (${members.join(', ')})` : team;
+  } else if (r.winner === 'draw') winner = 'Draw';
+  const when = r.round !== undefined && r.timeSeconds !== undefined ? ` · R${r.round} ${clockText(r.timeSeconds)}` : '';
+  return `${methodText(r.method ?? 'result')}${when}${winner ? ` · ${winner}` : ''}`;
 }
 
 export function metaFor(file: ReplayFileV4, bytes: number, profile: ReplayMeta['profile'], savedAt: string, label?: string): ReplayMeta {

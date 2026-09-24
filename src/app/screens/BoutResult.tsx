@@ -23,6 +23,8 @@ import type {
 } from '../../sim';
 import { RULESET_LABELS } from '../model/matchModel';
 import type { RulesetId } from '../../sim';
+import { EmptyState, IconResult } from '../ui';
+import { clockText, methodText } from '../model/format';
 
 export interface BoutResultProps {
   run: BoutRun | null;
@@ -37,41 +39,42 @@ export interface BoutResultProps {
 // --------------------------------------------------------------------------
 
 export function clockOf(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  return clockText(seconds);
 }
-
-const METHOD_LABELS: Readonly<Record<string, string>> = Object.freeze({
-  ko: 'KO',
-  tko: 'TKO',
-  'tko.doctor': 'TKO (doctor stoppage)',
-  'tko.corner': 'TKO (corner stoppage)',
-  'tko.retirement': 'TKO (retirement)',
-  submission: 'Submission',
-  'submission.technical': 'Technical submission',
-  'decision.unanimous': 'Unanimous decision',
-  'decision.split': 'Split decision',
-  'decision.majority': 'Majority decision',
-  'decision.technical': 'Technical decision',
-  draw: 'Draw',
-  'draw.majority': 'Majority draw',
-  'draw.split': 'Split draw',
-  dq: 'Disqualification',
-  noContest: 'No contest',
-  allOpponentsStopped: 'All opponents stopped',
-  escaped: 'Defender escaped',
-  separated: 'Separated (no decision)',
-  timeLimit: 'Time limit reached',
-});
 
 export function methodLabel(method: string): string {
-  return METHOD_LABELS[method] ?? method;
+  return methodText(method);
 }
 
-export function winnerLabel(result: BoutResultData, names: readonly string[]): string {
+/** "Red team", "Blue team", then "Team 3"… — the corner colours of 09 §3.2. */
+export function teamName(team: number): string {
+  if (team === 0) return 'Red team';
+  if (team === 1) return 'Blue team';
+  return `Team ${team + 1}`;
+}
+
+/**
+ * Who won, in words. Team modes (teams, crowd, team scoring) return
+ * `winner: 'none'` with `winningTeam` set — a team win, not a no contest —
+ * so the team is named, with its members when the team layout is known.
+ */
+export function winnerLabel(
+  result: Pick<BoutResultData, 'winner' | 'winningTeam' | 'method'>,
+  names: readonly string[],
+  teamOf?: readonly number[],
+): string {
   if (result.winner === 'draw') return 'Draw';
-  if (result.winner === 'none') return 'No contest';
-  return names[result.winner] ?? `Fighter ${result.winner}`;
+  if (typeof result.winner === 'number') return names[result.winner] ?? `Fighter ${result.winner + 1}`;
+  if (typeof result.winningTeam === 'number') {
+    const members = teamOf ? names.filter((_, i) => teamOf[i] === result.winningTeam) : [];
+    return members.length > 0 ? `${teamName(result.winningTeam)} (${members.join(', ')})` : teamName(result.winningTeam);
+  }
+  return result.method === 'noContest' ? 'No contest' : 'No winner';
+}
+
+/** True when the result has someone to name as the winner. */
+export function hasWinner(result: Pick<BoutResultData, 'winner' | 'winningTeam'>): boolean {
+  return typeof result.winner === 'number' || typeof result.winningTeam === 'number';
 }
 
 const pct = (la: LandedAttempted): string =>
@@ -250,9 +253,10 @@ export function BoutResultScreen({ run, onWatch, onExport, onRematch }: BoutResu
   if (!run) {
     return (
       <div className="ms">
-        <p className="empty">
-          No bout yet. Build one in Match setup, or open a past bout from History.
-        </p>
+        <EmptyState icon={<IconResult />} title="No bout to show yet">
+          Build and run a bout in Match setup, or open a past bout from History. Its scorecards and
+          the full round-by-round stat sheet will appear here.
+        </EmptyState>
       </div>
     );
   }
@@ -266,15 +270,14 @@ export function BoutResultScreen({ run, onWatch, onExport, onRematch }: BoutResu
 
   return (
     <div className="ms">
-      <header className="ms-head">
+      <header className="ms-head page-head">
         <div>
-          <h2 className="fc-h">{names.join(' vs ')}</h2>
+          <h1 className="page-title">{names.join(' vs ')}</h1>
           <p className="ms-verdict">
-            <b>{winnerLabel(r, names)}</b>
-            {r.winner === 'draw' || r.winner === 'none' ? '' : ' def. '}
-            {r.winner === 'draw' || r.winner === 'none'
-              ? ''
-              : names.filter((_, i) => i !== r.winner).join(', ')}
+            <b>{winnerLabel(r, names, run.config.teams?.teamOf)}</b>
+            {typeof r.winner === 'number'
+              ? ` def. ${names.filter((_, i) => i !== r.winner).join(', ')}`
+              : ''}
             {' · '}
             {methodLabel(r.method)}
             {r.detail ? ` (${r.detail})` : ''}
@@ -290,7 +293,7 @@ export function BoutResultScreen({ run, onWatch, onExport, onRematch }: BoutResu
             seed <code>{run.config.seed}</code> · digest <code>{run.digest.slice(0, 16)}</code>
           </p>
         </div>
-        <div className="fdb-actions">
+        <div className="page-actions">
           {onWatch ? (
             <button type="button" className="btn btn--play" onClick={() => onWatch(run)}>Watch</button>
           ) : null}
