@@ -89,13 +89,19 @@ export function installSkinnedVelocityFix(): void {
  * until the render updates them) become its previous ones.
  */
 export function snapshotPreviousBones(root: Object3D): void {
-  const seen = new Set<Skeleton>();
-  root.traverse((o) => {
-    const m = o as SkinnedMesh;
-    if (!m.isSkinnedMesh || !m.skeleton || seen.has(m.skeleton)) return;
-    seen.add(m.skeleton);
-    if (m.skeleton.boneMatrices) ensurePrevious(m.skeleton as SkeletonWithPrev).set(m.skeleton.boneMatrices);
-  });
+  // Scratch set and callback hoisted to module scope: this runs every frame,
+  // and allocating them per call was steady GC churn (review L6).
+  seen.clear();
+  root.traverse(visit);
+  seen.clear();
+}
+
+const seen = new Set<Skeleton>();
+function visit(o: Object3D): void {
+  const m = o as SkinnedMesh;
+  if (!m.isSkinnedMesh || !m.skeleton || seen.has(m.skeleton)) return;
+  seen.add(m.skeleton);
+  if (m.skeleton.boneMatrices) ensurePrevious(m.skeleton as SkeletonWithPrev).set(m.skeleton.boneMatrices);
 }
 
 /** Give every skeleton its previous-matrix array before shaders are compiled. */

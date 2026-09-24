@@ -3,7 +3,14 @@
  * Watch-screen load timeline: time to the live picture, main-thread long tasks
  * and the longest gap between painted frames while the loading card is up.
  *
- *   node scripts/dev/heavy.mjs node scripts/dev/load-timeline.mjs <url> <out.png> [--webgl] [--label text]
+ *   node scripts/dev/heavy.mjs node scripts/dev/load-timeline.mjs <url> <out.png> [--webgl] [--label text] [--cold]
+ *
+ * Cold vs warm: Playwright starts every browser with a fresh temporary profile, so Chrome's own
+ * GPU shader cache is always empty; what makes a *second* load fast is the graphics driver's
+ * shader cache (outside the profile, keyed by the compiled bytecode). `--cold` defeats it: every
+ * WebGL shader source gets a unique, unfoldable no-op (`x += 1e-30 * salt`, salt = the run's
+ * timestamp) appended to its main(), so the driver sees bytecode it has never compiled — the
+ * first-ever-load case. WebGL2 only.
  *
  * Instruments the page before any script runs (PerformanceObserver 'longtask'
  * plus a requestAnimationFrame probe), waits for `[data-phase="live"]`, then
@@ -32,6 +39,28 @@ const browser = await chromium.launch({
   args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-webgpu'],
 });
 const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
+if (args.includes('--cold')) {
+  await page.addInitScript((salt) => {
+    const proto = WebGL2RenderingContext.prototype;
+    const orig = proto.shaderSource;
+    // The shader's type is remembered at creation: querying it with getShaderParameter would be
+    // a synchronous round trip to the GPU process and could itself block behind a compile.
+    const create = proto.createShader;
+    proto.createShader = function (type) { const sh = create.call(this, type); if (sh) sh.__type = type; return sh; };
+    proto.shaderSource = function (shader, src) {
+      const type = shader.__type;
+      const end = src.lastIndexOf('}');
+      let line = '';
+      if (type === this.VERTEX_SHADER) line = `gl_Position.x += 1e-30 * ${salt}.0;`;
+      else {
+        const m = /out\s+(?:highp\s+|mediump\s+|lowp\s+)?vec4\s+(\w+)\s*;/.exec(src);
+        if (m) line = `${m[1]}.a += 1e-30 * ${salt}.0;`;
+      }
+      return orig.call(this, shader, end > 0 && line ? `${src.slice(0, end)}	${line}
+${src.slice(end)}` : src);
+    };
+  }, Date.now() % 1000000);
+}
 await page.addInitScript(() => {
   const w = window;
   w.__lt = { tasks: [], gaps: [], frames: 0 };
@@ -58,6 +87,7 @@ await page.waitForTimeout(1500);
 const r = await page.evaluate(() => ({
   lt: window.__lt,
   ttff: window.__ttff ?? null,
+  precompile: window.__precompile ?? null,
   backend: window.__stats?.backend ?? null,
   live: Math.round(performance.now()),
 }));
@@ -67,7 +97,7 @@ const blocked = r.lt.tasks.reduce((s, t) => s + t[1], 0);
 const longestGap = r.lt.gaps.reduce((m, g) => Math.max(m, g[1]), 0);
 const summary = {
   label, backend: r.backend, liveMs: liveAt, longestTaskMs: longest, totalLongTaskMs: blocked,
-  longTasks: r.lt.tasks.length, longestFrameGapMs: longestGap, ttff: r.ttff,
+  longTasks: r.lt.tasks.length, longestFrameGapMs: longestGap, ttff: r.ttff, precompile: r.precompile,
 };
 
 // Draw the timeline in a blank page.

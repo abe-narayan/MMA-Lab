@@ -25,7 +25,7 @@ import {
   positionViewDirection, pow, smoothstep, texture, uniform, uniformArray, uv, vec2, vec3, vec4, exp,
   atan, cos, sin, select, floor, varying, BRDF_GGX, BRDF_Lambert, F_Schlick, clearcoat as ccProp,
   clearcoatRoughness as ccRough, specularColor, clearcoatNormalView, step, diffuseContribution, roughness as roughProp,
-  fract, normalWorld,
+  fract, normalWorld, property,
 } from 'three/tsl';
 import { SWEAT_ONSET } from './anatomy';
 import type { CanonicalLandmarks } from './canonical';
@@ -230,6 +230,17 @@ export interface SkinOptions {
 
 const V3c = (v: readonly number[]): N => vec3(v[0], v[1], v[2]);
 
+/**
+ * The skin's branches (head-only features, cuts, tattoos) skip work that is exactly zero for the
+ * pixel or the fighter. `?skinGate=0` in the page URL evaluates everything everywhere, as before
+ * the performance pass, for A/B cost measurements (the picture is identical either way).
+ */
+const SKIN_GATES = !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('skinGate') === '0');
+/** QA: set to 1 to take every branch (in-page A/B of the gates' saving; `window.__skinGatesOff`). */
+export const skinGatesOff: N = uniform(0);
+if (typeof window !== 'undefined') (window as unknown as { __skinGatesOff?: N }).__skinGatesOff = skinGatesOff;
+const gate = (cond: N): N => (SKIN_GATES ? cond.or(skinGatesOff.greaterThan(0.5)) : float(1).greaterThan(0));
+
 /** Lookdev debug channel for every skin material (0 = off). */
 export const skinDebug: N = uniform(0);
 
@@ -277,100 +288,141 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   const eyeMid: N = vec3((lm.eyeL[0] + lm.eyeR[0]) / 2, (lm.eyeL[1] + lm.eyeR[1]) / 2, (lm.eyeL[2] + lm.eyeR[2]) / 2);
   const eyeX = (lm.eyeL[0] - lm.eyeR[0]) / 2;
   const hc: N = V3c(lm.headCentre);
-  const q: N = ref.sub(hc);
-  const theta: N = abs(atan(q.x, q.z)); // 0 front … π back
-  const ey: N = ref.y.sub(eyeMid.y).div(eyeR); // height above the eyes, in eye radii
-  const headW: N = smoothstep(lm.neckY - 0.02, lm.neckY + 0.04, ref.y); // above the neck joint
-
-  // Hairline height (eye radii above the eyes) as a function of angle around the head.
-  const recede: N = u.hairRecede;
-  const hlFront: N = float(4.7).add(recede);
-  const hlTemple: N = float(4.0).add(recede.mul(1.6));
-  // Angles measured from the head centre: temple ≈ 0.9, sideburn ≈ 1.65, ear ≈ 1.95, nape = π.
-  const hairline: N = select(theta.lessThan(0.7), mix(hlFront, hlTemple, theta.div(0.7)),
-    select(theta.lessThan(1.35), mix(hlTemple, hlTemple.sub(1.0), smoothstep(0.7, 1.35, theta)),
-      select(theta.lessThan(1.75), mix(hlTemple.sub(1.0), float(-1.0), smoothstep(1.35, 1.6, theta)),
-        select(theta.lessThan(2.25), mix(float(-1.0), float(1.4), smoothstep(1.72, 1.85, theta)),
-          mix(float(1.4), float(-5.5), smoothstep(2.25, 2.9, theta))))));
-  const edgeNoise: N = mx_noise_float(ref.mul(160)).mul(0.35);
-  const scalpRegion: N = smoothstep(-0.25, 0.35, ey.sub(hairline).add(edgeNoise)).mul(headW).mul(float(1).sub(earM.mul(1.5)).clamp());
-  // Fade: bare skin at the ear line, a smooth 3-4 cm gradient up the sides and back, full on top.
-  const sideBack: N = smoothstep(0.55, 1.15, theta);
-  const fadeProfile: N = smoothstep(-0.6, 3.6, ey.add(edgeNoise.mul(0.8)));
-  const fadeD: N = mix(float(1), mix(float(1), fadeProfile.mul(fadeProfile), sideBack), u.hairFade);
-  // Follicles (~0.8 mm apart) and short directional strands; both settle to their mean once they
-  // are smaller than a pixel, so the painted hair never sparkles at broadcast distance.
-  const pxm: N = length(fwidth(ref));
-  const folAA: N = smoothstep(0.0007, 0.00025, pxm);
-  // Round follicle dots: one jittered dot per 0.8 mm cell (cheap; cell noise alone renders as
-  // squares up close, and a full Worley search costs 27 cells per pixel).
-  const fcell: N = floor(ref.mul(1250));
-  const fjit: N = vec3(mx_cell_noise_float(fcell), mx_cell_noise_float(fcell.add(17.3)), mx_cell_noise_float(fcell.add(41.9))).mul(0.5).add(0.25);
-  const fol: N = smoothstep(0.34, 0.12, length(fract(ref.mul(1250)).sub(fjit)));
-  const strandN: N = mx_noise_float(ref.mul(vec3(2200, 700, 2200))).mul(0.5).add(0.5);
-  const speckle: N = mix(float(0.62), fol.mul(0.55).add(strandN.mul(0.45)), folAA);
-  // Cornrow / braid partings: lines of bare scalp between rows running front to back along the
-  // head's meridians (u.rows = hair.ts ROW_FREQ, rows per π radians about the front-back axis).
-  const rowPhase: N = abs(sin(atan(q.x, q.y).mul(u.rows)));
-  const rowsLine: N = smoothstep(0.32, 0.08, rowPhase).mul(step(1, u.rows));
-  const scalpCov: N = scalpRegion.mul(u.hairScalp).mul(fadeD).mul(speckle.mul(0.55).add(0.45)).mul(float(1).sub(rowsLine.mul(0.92)));
-
-  // Eyebrows: a dense core with a soft, irregular edge, made of individual hairs (0.4 mm apart)
-  // that grow up at the head of the brow, outward along the body and slightly down at the tail.
-  const edge0: N = edgeNoise.mul(2.8);
-  // One evaluation serves both brows (mirrored about the face's midline).
-  const brow = (): N => {
-    const side: N = select(ref.x.greaterThan(0), float(1), float(-1));
-    const bu: N = abs(ref.x).sub(eyeX).div(eyeR); // outward from the eye centre
-    const bv: N = ey;
-    const centre: N = float(1.72).sub(bu.add(0.1).mul(bu.add(0.1)).mul(0.11));
-    const thick: N = mix(float(0.5), float(0.17), smoothstep(-0.9, 1.7, bu));
-    const span: N = smoothstep(-1.35, -0.7, bu.add(edge0.mul(0.3))).mul(smoothstep(1.95, 1.35, bu));
-    const ang: N = mix(float(1.25), float(-0.2), smoothstep(-0.9, 1.6, bu));
-    const qx: N = abs(ref.x), qy: N = ref.y;
-    // Lanes warped by noise so the hairs are not a regular comb up close.
-    const across: N = qy.mul(cos(ang)).sub(qx.mul(sin(ang))).add(strandN.sub(0.5).mul(0.0005));
-    const along: N = qx.mul(cos(ang)).add(qy.mul(sin(ang)));
-    const k = 1 / 0.00042;
-    const lane: N = floor(across.mul(k));
-    const seg: N = mx_cell_noise_float(vec3(lane, floor(along.mul(k / 7).add(lane.mul(0.37))), side));
-    const hairLine: N = smoothstep(0.45, 0.12, abs(fract(across.mul(k)).sub(0.5))).mul(step(0.28, seg));
-    const aa: N = smoothstep(0.0006, 0.00025, pxm);
-    const density: N = smoothstep(-1.15, -0.6, bu).mul(0.3).add(0.7).mul(smoothstep(1.9, 0.9, bu).mul(0.45).add(0.55)).mul(u.browDensity);
-    const edge: N = strandN.sub(0.5).mul(0.28);
-    const soft: N = smoothstep(thick.mul(1.3), thick.mul(0.3), abs(bv.sub(centre)).add(edge.mul(thick)));
-    return soft.mul(span).mul(density).mul(mix(float(0.82), hairLine.mul(1.4), aa)).clamp()
-      .mul(smoothstep(lm.eyeL[2] - 0.02, lm.eyeL[2] - 0.005, ref.z));
-  };
-  const browM: N = brow().mul(headW);
-
-  // Beard regions (in eye radii relative to the eyes).
-  const ax: N = abs(ref.x.sub(eyeMid.x)).div(eyeR);
   const lipsY = (lm.lips[1] - (lm.eyeL[1] + lm.eyeR[1]) / 2) / eyeR;
   const noseY = (lm.noseTip[1] - (lm.eyeL[1] + lm.eyeR[1]) / 2) / eyeR;
   const chinY = (lm.chin[1] - (lm.eyeL[1] + lm.eyeR[1]) / 2) / eyeR;
-  const front: N = smoothstep(1.45, 1.2, theta);
-  // Beard top edge: from the sideburn at the ear diagonally down to the corner of the mouth.
-  const cheekLine: N = mix(float(-4.6), float(-1.6), smoothstep(1.6, 6.8, ax)).add(edgeNoise.mul(0.7));
-  const neckLine: N = float(chinY - 1.6).add(ax.mul(0.3));
-  const beardRegion: N = smoothstep(0.9, -0.9, ey.sub(cheekLine)).mul(smoothstep(-0.4, 0.4, ey.sub(neckLine))).mul(front).mul(headW.max(smoothstep(lm.neckY - 0.06, lm.neckY - 0.02, ref.y)));
-  const mous: N = smoothstep(2.1, 1.6, ax).mul(smoothstep(lipsY + 0.2, lipsY + 0.6, ey)).mul(smoothstep(noseY - 0.5, noseY - 1.0, ey));
-  const goat: N = smoothstep(1.9, 1.4, ax).mul(smoothstep(chinY - 1.8, chinY - 1.0, ey)).mul(smoothstep(lipsY - 0.3, lipsY - 0.7, ey)).max(mous);
-  const beardAmt: N = max(max(beardRegion.mul(u.beard), goat.mul(u.goatee)), mous.mul(u.moustache));
-  const stubbleAmt: N = beardRegion.max(mous).mul(u.stubble);
-  const noLip: N = float(1).sub(lipsM);
-  // Beard: short curled strands with density falling off at the edges; stubble: follicle dots
-  // over a blue-grey shadow (the hair sits under the skin surface).
-  // Beard: ~4 mm clumps of short downward strands; the strands resolve only in close-ups (AA),
-  // so at cageside the beard reads as a textured dark mass with a soft, irregular edge.
-  const clump: N = mx_noise_float(ref.mul(vec3(260, 170, 260))).mul(0.5).add(0.5);
-  const bStrand: N = strandN;
-  const beardTex: N = mix(float(0.8), smoothstep(0.25, 0.75, bStrand).mul(0.5).add(0.5), folAA).mul(clump.mul(0.3).add(0.8));
-  const beardCov: N = smoothstep(0.08, 0.6, beardAmt.add(edgeNoise.mul(0.3))).mul(beardTex).clamp().mul(noLip).mul(0.95);
-  // Stubble sits in and just above the skin: an even blue-grey shadow at distance, follicle
-  // dots only when a follicle is bigger than a pixel.
-  const stubbleDots: N = mix(float(0.3), fol, folAA);
-  const stubbleCov: N = stubbleAmt.mul(float(0.3).add(stubbleDots.mul(0.45))).mul(noLip);
+  // Head-only features — the hair painted on the scalp, brows, beard and stubble, the
+  // periorbital tone and the lip lines — are evaluated only above the lowest point any of them
+  // can reach (a per-pixel branch). The rest of the body, which is most of the skin on screen in
+  // every broadcast shot, skips their seven noise evaluations and the trigonometry (performance
+  // pass: about a third of the skin's fragment cost at cageside). Identical output: every one of
+  // these terms is exactly zero below HEAD_Y0 (headW, the beard's neck line, the goatee's chin
+  // line). Values that need screen derivatives or textures are taken before the branch.
+  const headY0 = Math.min(lm.neckY - 0.065, (lm.eyeL[1] + lm.eyeR[1]) / 2 + (chinY - 1.9) * eyeR) - 0.005;
+  const pScalp: N = property('float'), pScalpRegion: N = property('float'), pBrow: N = property('float');
+  const pBeard: N = property('float'), pStubble: N = property('float'), pPeri: N = property('float');
+  const pLipLines: N = property('float');
+  const headFx: N = Fn(() => {
+    const earV: N = earM.toVar();
+    const noLipV: N = float(1).sub(lipsM).toVar();
+    const pxmV: N = length(fwidth(ref)).toVar();
+    pScalp.assign(0); pScalpRegion.assign(0); pBrow.assign(0); pBeard.assign(0); pStubble.assign(0); pPeri.assign(0);
+    pLipLines.assign(0.55);
+    If(gate(ref.y.greaterThan(headY0)), () => {
+      const q: N = ref.sub(hc);
+      const theta: N = abs(atan(q.x, q.z)); // 0 front … π back
+      const ey: N = ref.y.sub(eyeMid.y).div(eyeR); // height above the eyes, in eye radii
+      const headW: N = smoothstep(lm.neckY - 0.02, lm.neckY + 0.04, ref.y); // above the neck joint
+
+      // Hairline height (eye radii above the eyes) as a function of angle around the head.
+      const recede: N = u.hairRecede;
+      const hlFront: N = float(4.7).add(recede);
+      const hlTemple: N = float(4.0).add(recede.mul(1.6));
+      // Angles measured from the head centre: temple ≈ 0.9, sideburn ≈ 1.65, ear ≈ 1.95, nape = π.
+      const hairline: N = select(theta.lessThan(0.7), mix(hlFront, hlTemple, theta.div(0.7)),
+        select(theta.lessThan(1.35), mix(hlTemple, hlTemple.sub(1.0), smoothstep(0.7, 1.35, theta)),
+          select(theta.lessThan(1.75), mix(hlTemple.sub(1.0), float(-1.0), smoothstep(1.35, 1.6, theta)),
+            select(theta.lessThan(2.25), mix(float(-1.0), float(1.4), smoothstep(1.72, 1.85, theta)),
+              mix(float(1.4), float(-5.5), smoothstep(2.25, 2.9, theta))))));
+      const edgeNoise: N = mx_noise_float(ref.mul(160)).mul(0.35);
+      const scalpRegion: N = smoothstep(-0.25, 0.35, ey.sub(hairline).add(edgeNoise)).mul(headW).mul(float(1).sub(earV.mul(1.5)).clamp());
+      // Fade: bare skin at the ear line, a smooth 3-4 cm gradient up the sides and back, full on top.
+      const sideBack: N = smoothstep(0.55, 1.15, theta);
+      const fadeProfile: N = smoothstep(-0.6, 3.6, ey.add(edgeNoise.mul(0.8)));
+      const fadeD: N = mix(float(1), mix(float(1), fadeProfile.mul(fadeProfile), sideBack), u.hairFade);
+      // Follicles (~0.8 mm apart) and short directional strands; both settle to their mean once they
+      // are smaller than a pixel, so the painted hair never sparkles at broadcast distance.
+      const folAA: N = smoothstep(0.0007, 0.00025, pxmV);
+      // Round follicle dots: one jittered dot per 0.8 mm cell (cheap; cell noise alone renders as
+      // squares up close, and a full Worley search costs 27 cells per pixel).
+      const fcell: N = floor(ref.mul(1250));
+      const fjit: N = vec3(mx_cell_noise_float(fcell), mx_cell_noise_float(fcell.add(17.3)), mx_cell_noise_float(fcell.add(41.9))).mul(0.5).add(0.25);
+      const fol: N = smoothstep(0.34, 0.12, length(fract(ref.mul(1250)).sub(fjit)));
+      const strandN: N = mx_noise_float(ref.mul(vec3(2200, 700, 2200))).mul(0.5).add(0.5);
+      const speckle: N = mix(float(0.62), fol.mul(0.55).add(strandN.mul(0.45)), folAA);
+      // Cornrow / braid partings: lines of bare scalp between rows running front to back along the
+      // head's meridians (u.rows = hair.ts ROW_FREQ, rows per π radians about the front-back axis).
+      const rowPhase: N = abs(sin(atan(q.x, q.y).mul(u.rows)));
+      const rowsLine: N = smoothstep(0.32, 0.08, rowPhase).mul(step(1, u.rows));
+      const scalpCov: N = scalpRegion.mul(u.hairScalp).mul(fadeD).mul(speckle.mul(0.55).add(0.45)).mul(float(1).sub(rowsLine.mul(0.92)));
+
+      // Eyebrows: a dense core with a soft, irregular edge, made of individual hairs (0.4 mm apart)
+      // that grow up at the head of the brow, outward along the body and slightly down at the tail.
+      const edge0: N = edgeNoise.mul(2.8);
+      // One evaluation serves both brows (mirrored about the face's midline).
+      const brow = (): N => {
+        const side: N = select(ref.x.greaterThan(0), float(1), float(-1));
+        const bu: N = abs(ref.x).sub(eyeX).div(eyeR); // outward from the eye centre
+        const bv: N = ey;
+        const centre: N = float(1.72).sub(bu.add(0.1).mul(bu.add(0.1)).mul(0.11));
+        const thick: N = mix(float(0.5), float(0.17), smoothstep(-0.9, 1.7, bu));
+        const span: N = smoothstep(-1.35, -0.7, bu.add(edge0.mul(0.3))).mul(smoothstep(1.95, 1.35, bu));
+        const ang: N = mix(float(1.25), float(-0.2), smoothstep(-0.9, 1.6, bu));
+        const qx: N = abs(ref.x), qy: N = ref.y;
+        // Lanes warped by noise so the hairs are not a regular comb up close.
+        const across: N = qy.mul(cos(ang)).sub(qx.mul(sin(ang))).add(strandN.sub(0.5).mul(0.0005));
+        const along: N = qx.mul(cos(ang)).add(qy.mul(sin(ang)));
+        const k = 1 / 0.00042;
+        const lane: N = floor(across.mul(k));
+        const seg: N = mx_cell_noise_float(vec3(lane, floor(along.mul(k / 7).add(lane.mul(0.37))), side));
+        const hairLine: N = smoothstep(0.45, 0.12, abs(fract(across.mul(k)).sub(0.5))).mul(step(0.28, seg));
+        const aa: N = smoothstep(0.0006, 0.00025, pxmV);
+        const density: N = smoothstep(-1.15, -0.6, bu).mul(0.3).add(0.7).mul(smoothstep(1.9, 0.9, bu).mul(0.45).add(0.55)).mul(u.browDensity);
+        const edge: N = strandN.sub(0.5).mul(0.28);
+        const soft: N = smoothstep(thick.mul(1.3), thick.mul(0.3), abs(bv.sub(centre)).add(edge.mul(thick)));
+        return soft.mul(span).mul(density).mul(mix(float(0.82), hairLine.mul(1.4), aa)).clamp()
+          .mul(smoothstep(lm.eyeL[2] - 0.02, lm.eyeL[2] - 0.005, ref.z));
+      };
+      const browM: N = brow().mul(headW);
+
+      // Beard regions (in eye radii relative to the eyes).
+      const ax: N = abs(ref.x.sub(eyeMid.x)).div(eyeR);
+      const front: N = smoothstep(1.45, 1.2, theta);
+      // Beard top edge: from the sideburn at the ear diagonally down to the corner of the mouth.
+      const cheekLine: N = mix(float(-4.6), float(-1.6), smoothstep(1.6, 6.8, ax)).add(edgeNoise.mul(0.7));
+      const neckLine: N = float(chinY - 1.6).add(ax.mul(0.3));
+      const beardRegion: N = smoothstep(0.9, -0.9, ey.sub(cheekLine)).mul(smoothstep(-0.4, 0.4, ey.sub(neckLine))).mul(front).mul(headW.max(smoothstep(lm.neckY - 0.06, lm.neckY - 0.02, ref.y)));
+      const mous: N = smoothstep(2.1, 1.6, ax).mul(smoothstep(lipsY + 0.2, lipsY + 0.6, ey)).mul(smoothstep(noseY - 0.5, noseY - 1.0, ey));
+      const goat: N = smoothstep(1.9, 1.4, ax).mul(smoothstep(chinY - 1.8, chinY - 1.0, ey)).mul(smoothstep(lipsY - 0.3, lipsY - 0.7, ey)).max(mous);
+      const beardAmt: N = max(max(beardRegion.mul(u.beard), goat.mul(u.goatee)), mous.mul(u.moustache));
+      const stubbleAmt: N = beardRegion.max(mous).mul(u.stubble);
+      // Beard: short curled strands with density falling off at the edges; stubble: follicle dots
+      // over a blue-grey shadow (the hair sits under the skin surface).
+      // Beard: ~4 mm clumps of short downward strands; the strands resolve only in close-ups (AA),
+      // so at cageside the beard reads as a textured dark mass with a soft, irregular edge.
+      const clump: N = mx_noise_float(ref.mul(vec3(260, 170, 260))).mul(0.5).add(0.5);
+      const bStrand: N = strandN;
+      const beardTex: N = mix(float(0.8), smoothstep(0.25, 0.75, bStrand).mul(0.5).add(0.5), folAA).mul(clump.mul(0.3).add(0.8));
+      const beardCov: N = smoothstep(0.08, 0.6, beardAmt.add(edgeNoise.mul(0.3))).mul(beardTex).clamp().mul(noLipV).mul(0.95);
+      // Stubble sits in and just above the skin: an even blue-grey shadow at distance, follicle
+      // dots only when a follicle is bigger than a pixel.
+      const stubbleDots: N = mix(float(0.3), fol, folAA);
+      const stubbleCov: N = stubbleAmt.mul(float(0.3).add(stubbleDots.mul(0.45))).mul(noLipV);
+      pScalp.assign(scalpCov);
+      pScalpRegion.assign(scalpRegion);
+      pBrow.assign(browM);
+      pBeard.assign(beardCov);
+      pStubble.assign(stubbleCov);
+      // Periorbital tone: the thin skin under and inside the eyes is darker (violet-grey on light
+      // skin, deeper brown on dark skin), which is much of what makes a face read as a person.
+      const under = (side: number): N => {
+        const ex: N = ref.x.mul(side).sub(eyeX).div(eyeR);
+        return smoothstep(1.7, 0.4, abs(ex.add(0.25))).mul(smoothstep(-2.6, -1.2, ey)).mul(smoothstep(0.1, -0.9, ey));
+      };
+      pPeri.assign(max(under(1), under(-1)).mul(headW).mul(front));
+      // Fine vertical lines on the lips.
+      pLipLines.assign(abs(sin(ref.x.mul(2300).add(edgeNoise.mul(5.7)))));
+    });
+    return float(1);
+  })();
+  // Reading through `headFx` builds the branch before the first use of any of its outputs.
+  const scalpCov: N = headFx.mul(pScalp);
+  const scalpRegion: N = headFx.mul(pScalpRegion);
+  const browM: N = headFx.mul(pBrow);
+  const beardCov: N = headFx.mul(pBeard);
+  const stubbleCov: N = headFx.mul(pStubble);
+  const lipLines: N = headFx.mul(pLipLines);
+  const peri: N = headFx.mul(pPeri);
 
   // --- colour --------------------------------------------------------------------------
   // One noise octave shared by pigment mottling, bruise blotching and cloth layering.
@@ -392,22 +444,12 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   col = mix(col, col.mul(vec3(0.84, 0.9, 0.96)), sB.g.mul(u.veins).mul(float(1).sub(u.tone.mul(0.75))).mul(0.35));
   col = mix(col, u.dark, areolaM.mul(0.85));
   // Lips: their own colour, a slightly lighter vermilion border, fine vertical lines.
-  const lipLines: N = abs(sin(ref.x.mul(2300).add(edgeNoise.mul(5.7))));
   col = mix(col, u.lips.mul(lipLines.mul(0.12).add(0.9)), lipsM.mul(0.92));
   col = col.mul(smoothstep(0.25, 0.45, mA.r).mul(smoothstep(0.62, 0.45, mA.r)).mul(0.1).add(1));
   col = mix(col, u.nail, nailM);
   col = mix(col, col.mul(vec3(0.84, 0.76, 0.76)), lidM.mul(0.3));
-  // Periorbital tone: the thin skin under and inside the eyes is darker (violet-grey on light skin,
-  // deeper brown on dark skin), which is much of what makes a face read as a person, not a mask.
-  {
-    const under = (side: number): N => {
-      const ex: N = ref.x.mul(side).sub(eyeX).div(eyeR);
-      return smoothstep(1.7, 0.4, abs(ex.add(0.25))).mul(smoothstep(-2.6, -1.2, ey)).mul(smoothstep(0.1, -0.9, ey));
-    };
-    const peri: N = max(under(1), under(-1)).mul(headW).mul(front);
-    const periTint: N = mix(vec3(0.8, 0.74, 0.8), vec3(0.78, 0.72, 0.7), smoothstep(0.3, 0.8, u.tone));
-    col = mix(col, col.mul(periTint), peri.mul(0.55));
-  }
+  // Periorbital tone (computed in the head branch above).
+  col = mix(col, col.mul(mix(vec3(0.8, 0.74, 0.8), vec3(0.78, 0.72, 0.7), smoothstep(0.3, 0.8, u.tone))), peri.mul(0.55));
   // Inside of the mouth: dark, red, wet.
   col = mix(col, vec3(0.035, 0.008, 0.008), mouthM.mul(0.95));
   // Muscle definition: the mesh's cavity and the baked grooves (skinA.b) occlude.
@@ -494,38 +536,58 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
     rough = rough.sub(red.mul(0.05));
 
     // Cuts: four slots. cutPos = (x, y, z, severity 0 = none), cutInfo = (bleeding, ageS, 0, 0).
-    let cutMark: N = float(0);
-    let blood: N = float(0);
-    for (let i = 0; i < 4; i++) {
-      const cp: N = u.cutPos[i];
-      const ci: N = u.cutInfo[i];
-      const sev: N = cp.w;
-      const d: N = ref.sub(cp.xyz);
-      // Half-length 3 / 5.5 / 8 mm for severity 1-3 (docs/design/08 §4.1.4: 6 / 12 / 20 mm wide).
-      const len: N = sev.mul(0.0025).add(0.0005);
-      const along: N = abs(d.x).div(len);
-      // A split: widest in the middle, tapering to the ends, with a ragged edge.
-      const wid: N = sev.mul(0.00035).add(0.0004).mul(float(1).sub(along.mul(along)).max(0).sqrt());
-      const jag: N = edgeNoise.mul(0.6).add(sin(ref.x.mul(2300)).mul(0.15));
-      const across: N = abs(d.y.add(d.x.mul(0.18)).add(jag.mul(0.0006)));
-      const depth: N = step(abs(d.z), 0.02);
-      const line: N = smoothstep(wid.add(0.0002), wid.mul(0.3), across).mul(step(along, 1)).mul(step(1e-4, sev)).mul(depth);
-      cutMark = max(cutMark, line);
-      // Drip: a run down from the middle of the cut, wider at the top, wandering, beading at the
-      // end, growing with the cut's age while it bleeds (capped at ~4 cm).
-      const run: N = min(ci.y.mul(0.0012).add(0.004), float(0.04)).mul(ci.x).mul(u.bloodOn);
-      const wob: N = sin(ref.y.mul(260).add(i * 2.1)).mul(0.0012).add(sin(ref.y.mul(610).add(i)).mul(0.0005));
-      const t: N = d.y.negate().div(run.max(1e-4)).clamp(); // 0 at the cut, 1 at the drip's end
-      const dripW: N = mix(sev.mul(0.0006).add(0.0009), float(0.0005), t).add(smoothstep(0.8, 1, t).mul(0.0006));
-      const drip: N = smoothstep(dripW, dripW.mul(0.45), abs(d.x.add(wob).sub(0.001 * (i - 1.5))))
-        .mul(smoothstep(run.negate().sub(0.0015), run.negate().add(0.0005), d.y)).mul(smoothstep(0.001, -0.0005, d.y))
-        .mul(step(1e-4, sev)).mul(depth);
-      const pool: N = smoothstep(wid.mul(2.2).add(0.0008), wid, across).mul(step(along, 1.15)).mul(step(1e-4, sev)).mul(depth)
-        .mul(ci.x).mul(u.bloodOn);
-      blood = max(blood, max(drip, pool));
-      // Surrounding redness.
-      col = mix(col, col.mul(vec3(1.2, 0.7, 0.68)), exp(d.dot(d).div(len.mul(len).mul(2.5)).negate()).mul(step(1e-4, sev)).mul(0.5));
-    }
+    // Evaluated only when the fighter has a cut (a uniform branch: the whole draw takes the
+    // same path), so an unmarked fighter pays nothing for the four slots.
+    const pCutTint: N = property('vec3');
+    const cutFx: N = Fn(() => {
+      const res: N = vec2(0).toVar();
+      pCutTint.assign(vec3(1));
+      const anyCut: N = u.cutPos[0].w.add(u.cutPos[1].w).add(u.cutPos[2].w).add(u.cutPos[3].w);
+      If(gate(anyCut.greaterThan(1e-4)), () => {
+        // The same field as the head's edge noise (a ragged cut edge).
+        const edgeN: N = mx_noise_float(ref.mul(160)).mul(0.35);
+        let cutMark: N = float(0);
+        let blood: N = float(0);
+        let tint: N = vec3(1);
+        for (let i = 0; i < 4; i++) {
+          const cp: N = u.cutPos[i];
+          const ci: N = u.cutInfo[i];
+          const sev: N = cp.w;
+          const d: N = ref.sub(cp.xyz);
+          // Half-length 3 / 5.5 / 8 mm for severity 1-3 (docs/design/08 §4.1.4: 6 / 12 / 20 mm wide).
+          const len: N = sev.mul(0.0025).add(0.0005);
+          const along: N = abs(d.x).div(len);
+          // A split: widest in the middle, tapering to the ends, with a ragged edge.
+          const wid: N = sev.mul(0.00035).add(0.0004).mul(float(1).sub(along.mul(along)).max(0).sqrt());
+          const jag: N = edgeN.mul(0.6).add(sin(ref.x.mul(2300)).mul(0.15));
+          const across: N = abs(d.y.add(d.x.mul(0.18)).add(jag.mul(0.0006)));
+          const depth: N = step(abs(d.z), 0.02);
+          const line: N = smoothstep(wid.add(0.0002), wid.mul(0.3), across).mul(step(along, 1)).mul(step(1e-4, sev)).mul(depth);
+          cutMark = max(cutMark, line);
+          // Drip: a run down from the middle of the cut, wider at the top, wandering, beading at the
+          // end, growing with the cut's age while it bleeds (capped at ~4 cm).
+          const run: N = min(ci.y.mul(0.0012).add(0.004), float(0.04)).mul(ci.x).mul(u.bloodOn);
+          const wob: N = sin(ref.y.mul(260).add(i * 2.1)).mul(0.0012).add(sin(ref.y.mul(610).add(i)).mul(0.0005));
+          const t: N = d.y.negate().div(run.max(1e-4)).clamp(); // 0 at the cut, 1 at the drip's end
+          const dripW: N = mix(sev.mul(0.0006).add(0.0009), float(0.0005), t).add(smoothstep(0.8, 1, t).mul(0.0006));
+          const drip: N = smoothstep(dripW, dripW.mul(0.45), abs(d.x.add(wob).sub(0.001 * (i - 1.5))))
+            .mul(smoothstep(run.negate().sub(0.0015), run.negate().add(0.0005), d.y)).mul(smoothstep(0.001, -0.0005, d.y))
+            .mul(step(1e-4, sev)).mul(depth);
+          const pool: N = smoothstep(wid.mul(2.2).add(0.0008), wid, across).mul(step(along, 1.15)).mul(step(1e-4, sev)).mul(depth)
+            .mul(ci.x).mul(u.bloodOn);
+          blood = max(blood, max(drip, pool));
+          // Surrounding redness (successive mixes toward the same tint multiply).
+          const a: N = exp(d.dot(d).div(len.mul(len).mul(2.5)).negate()).mul(step(1e-4, sev)).mul(0.5);
+          tint = tint.mul(mix(vec3(1), vec3(1.2, 0.7, 0.68), a));
+        }
+        pCutTint.assign(tint);
+        res.assign(vec2(cutMark, blood));
+      });
+      return res;
+    })();
+    const cutMark: N = cutFx.x;
+    const blood: N = cutFx.y;
+    col = col.mul(cutFx.x.mul(0).add(pCutTint));
     const closed: N = vec3(0.13, 0.035, 0.03);
     col = mix(col, closed, cutMark.mul(0.9));
     col = mix(col, vec3(0.2, 0.004, 0.006), blood);
@@ -542,7 +604,16 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
   }
 
   // --- tattoos -------------------------------------------------------------------------
-  col = applyTattoos(col, ref, u, lm);
+  // Only for a fighter who has any (a uniform branch; the blackwork field is a Worley search).
+  const ink: N = Fn(() => {
+    const v: N = float(0).toVar();
+    const t0: N = u.tattoo[0], t1: N = u.tattoo[1], t2: N = u.tattoo[2];
+    const anyInk: N = dot(t0, vec4(1)).add(dot(t1, vec4(1))).add(dot(t2, vec4(1)));
+    If(gate(anyInk.greaterThan(0)), () => { v.assign(tattooInk(ref, u, lm)); });
+    return v;
+  })();
+  // Ink sits under the epidermis: multiply, slightly translucent.
+  col = mix(col, col.mul(u.tattooTint.mul(6).add(0.08)), ink.mul(0.85));
 
   // --- hand wraps and ankle tape (cloth painted over the skin) --------------------------
   const layers: N = n1.mul(0.08).add(0.92)
@@ -587,7 +658,7 @@ export function createSkinMaterial(tex: SkinTextures, opt: SkinOptions): SkinNod
  * `TattooSlot` order: leftArmFull, rightArmFull, leftForearm, rightForearm, chest, stomach, back,
  * neck, leftLeg, rightLeg, leftCalf, rightCalf.
  */
-function applyTattoos(col: N, ref: N, u: SkinUniforms, lm: CanonicalLandmarks): N {
+function tattooInk(ref: N, u: SkinUniforms, lm: CanonicalLandmarks): N {
   const t0: N = u.tattoo[0], t1: N = u.tattoo[1], t2: N = u.tattoo[2];
   const x: N = ref.x, y: N = ref.y, z: N = ref.z;
   const ax: N = abs(x);
@@ -634,8 +705,7 @@ function applyTattoos(col: N, ref: N, u: SkinUniforms, lm: CanonicalLandmarks): 
   ink = max(ink, leg(-1, 0.5, 0.85).mul(tribal(atan(x.add(0.1), z), y, 12)).mul(t2.y));
   ink = max(ink, leg(1, 0.12, 0.4).mul(bw).mul(t2.z));
   ink = max(ink, leg(-1, 0.12, 0.4).mul(tribal(atan(x.sub(0.1), z), y, 16)).mul(t2.w));
-  // Ink sits under the epidermis: multiply, slightly translucent.
-  return mix(col, col.mul(u.tattooTint.mul(6).add(0.08)), ink.clamp().mul(0.85));
+  return ink.clamp();
 }
 
 export { vec4 };

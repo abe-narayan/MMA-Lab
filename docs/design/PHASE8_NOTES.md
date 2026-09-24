@@ -1487,6 +1487,14 @@ every object's render state and uniform buffers behind. Ten High↔Medium switch
 GPU memory alternating exactly 224/256 MB, uniform buffers 953 → 920 (before: → 2360).
 `snapshotPreviousBones` no longer allocates a Set and a closure per frame.
 
+**MRT blending (arena agent's request).** The scene pass's `normal` (GTAO input) and `velocity` (TAA
+input) targets had no blending, so any translucent surface (haze, beams, hair cards) overwrote the values
+of whatever was behind it. Both outputs now carry the material's alpha and use `MaterialBlending`
+(`MRTNode.setBlendMode`); opaque materials do not blend, so they are unchanged. `?mrtBlend=0` restores
+the old outputs. Overhead shot, same frame (`phase8-perf-mrt-blend-overhead.png`): full-size, the faint
+mottling of the lit canvas under the haze is gone; the downscaled composite shows no difference;
+cost within noise (13.6 vs 14.7 ms, busy GPU).
+
 **Screenshots** (same frame, before left / after right): `phase8-perf-{cageside,cageside-detail,corner,
 main,ground}.png`. The pictures match; the visible differences are the texture of the out-of-focus
 background behind the fence (lens DoF vs three's max filter) and slightly less broad occlusion under the

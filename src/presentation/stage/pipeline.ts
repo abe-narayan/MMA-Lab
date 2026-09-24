@@ -36,11 +36,11 @@
  * replay one is warmed up at start so the first instant replay does not hitch.
  */
 import {
-  Data3DTexture, LinearFilter, RenderPipeline, UnsignedByteType, RGBAFormat, ClampToEdgeWrapping,
+  BlendMode, Data3DTexture, LinearFilter, MaterialBlending, RenderPipeline, UnsignedByteType, RGBAFormat, ClampToEdgeWrapping,
   NoColorSpace, Vector2, type Camera, type Node, type Object3D, type Scene, type WebGPURenderer,
 } from 'three/webgpu';
 import {
-  Fn, float, int, interleavedGradientNoise, max as tslMax, metalness, mix, mrt, normalView, output, pass,
+  Fn, abs, diffuseColor, exp2, float, floor, int, ivec2, interleavedGradientNoise, max as tslMax, min as tslMin, metalness, mix, mrt, normalView, output, pass,
   packNormalToRGB, renderOutput, roughness, rtt, sample, screenCoordinate, screenUV, smoothstep,
   texture3D, uniform, unpackRGBToNormal, uv, vec2, vec3, vec4, velocity,
 } from 'three/tsl';
@@ -58,6 +58,7 @@ import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import type { QualitySettings } from '../contract';
 import type { StageTuning } from './quality';
 import { buildLutData, LUT_SIZE } from './lut';
+import { lensDof } from './lensDof';
 
 /** Every pass the dev page can switch individually; derived from the preset otherwise. */
 export interface PassToggles {
@@ -78,6 +79,14 @@ export interface PassToggles {
   grade: boolean;
   sharpen: boolean;
   vignetteGrain: boolean;
+  /** QA only (`?stagePost=legacyDof:1`): three's DepthOfFieldNode instead of the lens DoF. */
+  legacyDof?: boolean;
+  /** QA only (`?stagePost=legacySharpen:1`): three's SharpenNode as its own pass. */
+  legacySharpen?: boolean;
+  /** QA only (`?stagePost=abLegacy:1`): also build the legacy live tails, switchable at runtime. */
+  abLegacy?: boolean;
+  /** QA only (`?stagePost=aoSamples:8`): override the preset's GTAO sample count. */
+  aoSamples?: number;
   /** QA only (`?stagePost=view:velocity`): show the motion vectors instead of the picture. */
   debugView?: 'velocity';
 }
@@ -98,6 +107,21 @@ export function togglesFor(q: QualitySettings): PassToggles {
     sharpen: aa === 'taau' || aa === 'traa',
     vignetteGrain: true,
   };
+}
+
+/**
+ * GTAO radius for a shot (performance pass). The 0.4 m human-scale radius is
+ * right for the wide shots, but on a close handheld it spans ~40 % of the frame
+ * height: every horizon tap lands far from its pixel, the texture cache
+ * thrashes, and the pass cost rose from ~3 to ~5.6 ms (corner shot, Arc 140V,
+ * measured in-page A/B) for occlusion broader than a contact shadow. The radius
+ * is therefore held to 15 % of the frame height at the focus distance, between
+ * 0.12 m (still the armpit, the gap between arm and torso, chin to chest) and
+ * 0.4 m (every shot from about 6 m out is unchanged).
+ */
+export function aoRadiusFor(focusM: number, fovDeg: number): number {
+  const frameH = 2 * Math.max(0.3, focusM) * Math.tan((fovDeg * Math.PI) / 360);
+  return Math.min(0.4, Math.max(0.12, 0.15 * frameH));
 }
 
 /** The internal render target is scaled inside the pipeline only when a temporal upscaler reconstructs it. */
@@ -138,6 +162,41 @@ function grainOffset(frame: number, out: Vector2): Vector2 {
   return out.set(halton(i, 2) * 64, halton(i, 3) * 64);
 }
 
+/**
+ * RCAS (FidelityFX FSR 1 robust contrast-adaptive sharpening, as three's
+ * SharpenNode with denoise on) read straight from a texture node, so it can be
+ * part of the final quad instead of a pass of its own. `sharpness` 0 = max.
+ */
+export function rcas(tex: N, sharpness: N): N {
+  return Fn(() => {
+    const size: N = tex.size(0);
+    const I: N = int, F: N = floor, IV: N = ivec2;
+    const p: N = IV(I(F(uv().x.mul(size.x))), I(F(uv().y.mul(size.y)))).toConst();
+    const e: N = tex.load(p).toConst();
+    const b: N = tex.load(p.add(ivec2(0, -1)));
+    const d: N = tex.load(p.add(ivec2(-1, 0)));
+    const f: N = tex.load(p.add(ivec2(1, 0)));
+    const h: N = tex.load(p.add(ivec2(0, 1)));
+    const luma = (x: N): N => x.g.add(x.b.add(x.r).mul(0.5));
+    const bL: N = luma(b), dL: N = luma(d), eL: N = luma(e), fL: N = luma(f), hL: N = luma(h);
+    const con: N = exp2(sharpness.negate());
+    const mn4: N = tslMin(tslMin(b.rgb, d.rgb), tslMin(f.rgb, h.rgb)).toConst();
+    const mx4: N = tslMax(tslMax(b.rgb, d.rgb), tslMax(f.rgb, h.rgb)).toConst();
+    const hitMin: N = tslMin(mn4, e.rgb).div(mx4.mul(4.0));
+    const hitMax: N = vec3(1.0).sub(tslMax(mx4, e.rgb)).div(mn4.mul(4.0).sub(4.0));
+    const lobeRGB: N = tslMax(hitMin.negate(), hitMax);
+    const lobe: N = tslMax(float(-(0.25 - 1.0 / 16.0)), tslMin(tslMax(lobeRGB.r, tslMax(lobeRGB.g, lobeRGB.b)), float(0))).mul(con);
+    const nz: N = bL.add(dL).add(fL).add(hL).mul(0.25).sub(eL);
+    const nzRange: N = tslMax(tslMax(bL, dL), tslMax(eL, tslMax(fL, hL))).sub(tslMin(tslMin(bL, dL), tslMin(eL, tslMin(fL, hL))));
+    const nzFactor: N = float(1).sub(abs(nz).div(tslMax(nzRange, float(1 / 65536))).saturate().mul(0.5));
+    const w: N = lobe.mul(nzFactor).toConst();
+    const rgb: N = b.rgb.add(d.rgb).add(f.rgb).add(h.rgb).mul(w).add(e.rgb).div(w.mul(4.0).add(1.0));
+    return vec4(rgb, e.a);
+  })();
+}
+
+const MRT_CACHE = new Map<string, N>();
+
 export class StagePipeline {
   readonly live: RenderPipeline;
   readonly replay: RenderPipeline;
@@ -165,6 +224,10 @@ export class StagePipeline {
   private readonly uLiveFocus = uniform(3);
   private readonly uLiveK = uniform(4);
   private readonly uLiveBokeh = uniform(1.6);
+  /** Lens DoF blur radius at full CoC, output pixels (live handhelds / replay angles). */
+  private readonly uLiveRadius = uniform(10);
+  private readonly uReplayRadius = uniform(0);
+  private readonly uSharpness: N;
   private liveDofOn = false;
   private frameIndex = 0;
   private internalScale: number;
@@ -181,6 +244,7 @@ export class StagePipeline {
   ) {
     this.toggles = toggles;
     this.uGrain = uniform(tuning.grain);
+    this.uSharpness = uniform(tuning.sharpness);
     this.uVignette = uniform(tuning.vignette);
     this.aoResolution = tuning.aoResolution;
 
@@ -194,10 +258,36 @@ export class StagePipeline {
     // target would multiply the bandwidth of every attachment.
     const scenePass: N = pass(scene, camera, { samples: 0 });
     const outputs: Record<string, N> = { output };
-    if (needsNormal) outputs.normal = packNormalToRGB(normalView);
-    if (needsVelocity) outputs.velocity = velocity;
+    // Normal and velocity carry the material's alpha and blend like the
+    // colour (MaterialBlending below): a translucent surface (haze, beams,
+    // hair cards) then only partly replaces the values of what is behind it,
+    // instead of overwriting them outright (banding in GTAO, TAA ghosting
+    // behind the haze). Opaque materials do not blend, so they are unchanged.
+    // `?mrtBlend=0` restores the unblended outputs for A/B.
+    const mrtBlend = !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('mrtBlend') === '0');
+    if (needsNormal) outputs.normal = mrtBlend ? vec4(packNormalToRGB(normalView), diffuseColor.a) : packNormalToRGB(normalView);
+    if (needsVelocity) outputs.velocity = mrtBlend ? vec4((velocity as N).xy, 0, diffuseColor.a) : velocity;
     if (t.ssr) outputs.metalrough = vec2(metalness, roughness);
-    if (Object.keys(outputs).length > 1) scenePass.setMRT(mrt(outputs));
+    if (Object.keys(outputs).length > 1) {
+      // One MRT node per output layout for the page's lifetime: render
+      // contexts (and with them every object's render state and uniform
+      // buffers) are keyed by the MRT node's id, so a fresh node on each
+      // rebuild (every quality or render-scale change) left a full set of
+      // per-object bindings behind (review M2c; measured: uniform buffers
+      // 953 → 2360 over ten switches, flat with this cache).
+      const key = Object.keys(outputs).join(',') + (mrtBlend ? '' : ':noblend');
+      let m = MRT_CACHE.get(key);
+      if (!m) {
+        m = mrt(outputs);
+        if (mrtBlend) {
+          for (const name of ['normal', 'velocity']) {
+            if (outputs[name]) m.setBlendMode(name, new BlendMode(MaterialBlending));
+          }
+        }
+        MRT_CACHE.set(key, m);
+      }
+      scenePass.setMRT(m);
+    }
     // Bandwidth: 8-bit normals and material channels are plenty for AO/SSR.
     if (needsNormal) scenePass.getTexture('normal').type = UnsignedByteType;
     if (t.ssr) scenePass.getTexture('metalrough').type = UnsignedByteType;
@@ -220,7 +310,7 @@ export class StagePipeline {
       if (t.ao) {
         const aoNode: N = ao(depth, normal, camera);
         aoNode.resolutionScale = this.aoResolution * this.internalScale;
-        aoNode.samples.value = tuning.aoSamples;
+        aoNode.samples.value = t.aoSamples ?? tuning.aoSamples;
         // Human scale: a 0.4 m radius catches armpits, the gap between two
         // fighters in the clinch and the foot on the canvas, not the cage.
         aoNode.radius.value = 0.4;
@@ -258,7 +348,9 @@ export class StagePipeline {
     }
 
     // ---- the live and replay tails ---------------------------------------
-    const tail = (input: N, replay: boolean, liveDof = false): N => {
+    const tail = (input: N, replay: boolean, liveDof = false, legacy = false): N => {
+      const legacyDof = legacy || !!t.legacyDof;
+      const legacySharpen = legacy || !!t.legacySharpen;
       let c: N = input;
       if (liveDof) {
         // A thin-lens circle of confusion grows with |z - focus| / z: the
@@ -268,13 +360,17 @@ export class StagePipeline {
         // falloff (k from the shot's DoF strength, `setDepthOfField`).
         const viewDist: N = scenePass.getViewZNode().negate();
         const range: N = tslMax(viewDist.mul(this.uLiveK), 0.05);
-        const d: N = dof(c, scenePass.getViewZNode(), this.uLiveFocus, range, this.uLiveBokeh);
+        const d: N = legacyDof
+          ? dof(c, scenePass.getViewZNode(), this.uLiveFocus, range, this.uLiveBokeh)
+          : lensDof(c, scenePass.getViewZNode(), this.uLiveFocus, range, this.uLiveRadius);
         this.disposables.push(d);
         c = d;
       }
       if (replay && t.dof) {
         // Focal range: how far from the focus plane before blur is complete.
-        const d: N = dof(c, scenePass.getViewZNode(), this.uFocus, this.uFocalRange, this.uBokeh);
+        const d: N = legacyDof
+          ? dof(c, scenePass.getViewZNode(), this.uFocus, this.uFocalRange, this.uBokeh)
+          : lensDof(c, scenePass.getViewZNode(), this.uFocus, this.uFocalRange, this.uReplayRadius);
         this.disposables.push(d);
         // The node itself, not getTextureNode(): DoF's texture is a plain
         // texture() with no link back to the node, so using it alone would
@@ -284,7 +380,11 @@ export class StagePipeline {
       if (replay && t.motionBlur && vel) {
         // Motion blur samples its input at offsets, so it needs a texture: the
         // temporal resolve's output as is, or the DoF result copied to one.
-        const tex: N = c.isTextureNode ? c : rtt(c);
+        let tex: N = c;
+        if (!c.isTextureNode) {
+          tex = rtt(c);
+          this.disposables.push(tex);
+        }
         c = motionBlur(tex, vel.xy.mul(this.uBlur), int(12));
       }
       if (t.bloom) {
@@ -300,12 +400,29 @@ export class StagePipeline {
       if (t.grade && this.lutTexture) {
         ldr = lut3D(ldr, texture3D(this.lutTexture), LUT_SIZE, this.uGrade);
       }
-      if (t.aa === 'fxaa') ldr = fxaa(ldr);
-      else if (t.aa === 'smaa') ldr = smaa(ldr);
-      if (t.sharpen) {
+      if (t.aa === 'fxaa') {
+        const f: N = fxaa(ldr);
+        this.disposables.push(f);
+        ldr = f;
+      } else if (t.aa === 'smaa') {
+        const f: N = smaa(ldr);
+        this.disposables.push(f);
+        ldr = f;
+      }
+      if (t.sharpen && legacySharpen) {
         const s: N = sharpen(ldr, tuning.sharpness, true);
         this.disposables.push(s);
         ldr = s;
+      } else if (t.sharpen) {
+        // RCAS folded into the final quad: the graded picture goes to one
+        // 8-bit texture (display-referred, as RCAS expects) and the final
+        // pass sharpens, vignettes and adds grain in one go. three's
+        // SharpenNode would add a full-resolution pass of its own (~0.5 ms).
+        const tex: N = rtt(ldr);
+        tex.renderTarget.texture.type = UnsignedByteType;
+        this.disposables.push(tex);
+        ldr = rcas(tex, this.uSharpness);
+        if (!t.vignetteGrain) return ldr;
       }
       if (t.vignetteGrain) ldr = this.finish(ldr);
       return ldr;
@@ -334,7 +451,23 @@ export class StagePipeline {
     } else {
       this.liveDof = this.live;
     }
+
+    if (t.abLegacy) {
+      // QA (`?stagePost=abLegacy:1`): the pre-performance-pass tails as well,
+      // selectable per frame (`useLegacy`), for in-page A/B cost measurement.
+      this.liveLegacy = new RenderPipeline(renderer);
+      this.liveLegacy.outputColorTransform = false;
+      this.liveLegacy.outputNode = tail(hdr, false, false, true);
+      this.liveDofLegacy = new RenderPipeline(renderer);
+      this.liveDofLegacy.outputColorTransform = false;
+      this.liveDofLegacy.outputNode = tail(hdr, false, true, true);
+    }
   }
+
+  private liveLegacy: RenderPipeline | null = null;
+  private liveDofLegacy: RenderPipeline | null = null;
+  /** QA: render the legacy tails (needs `abLegacy`). */
+  useLegacy = false;
 
   /** Vignette and grain in display space: the last, cheapest touch. */
   private finish(input: N): N {
@@ -384,11 +517,22 @@ export class StagePipeline {
     this.uLiveK.value = 1.1 / Math.max(0.05, Math.min(1, strength));
     // Bokeh radius in half-resolution texels at full CoC: ~10 px on a 1080p picture at 0.35 (wider radii cost texture cache on the Arc).
     this.uLiveBokeh.value = 2 + 9 * Math.min(1, strength);
+    // The lens DoF's radius at full CoC, chosen so the out-of-focus background
+    // softens as much as with three's node (its `bokeh`-px disc plus a max
+    // filter of the same size), judged side by side
+    // (docs/screenshots/phase8-perf-cageside-detail.png).
+    this.uLiveRadius.value = 3.5 * this.uLiveBokeh.value;
     // Strength 1 ≈ a long lens at f/2.8 on a fighter 4 m away: sharp over about
     // a metre, fully soft 1.2 m beyond it.
     const s = Math.min(1, Math.max(0, strength));
     this.uFocalRange.value = 6 - 4.8 * s;
     this.uBokeh.value = 3.5 * s;
+    this.uReplayRadius.value = 3.5 * this.uBokeh.value;
+  }
+
+  /** GTAO world radius (m); see `aoRadiusFor`. */
+  setAoRadius(m: number): void {
+    if (this.aoNode) this.aoNode.radius.value = m;
   }
 
   setGradeIntensity(v: number): void {
@@ -415,6 +559,34 @@ export class StagePipeline {
     this.uGrainOffset.value.copy(grainOffset(this.frameIndex++, this.uGrainOffset.value));
     this.uBlur.value = this.cutFrames > 0 ? 0 : 0.5;
     if (this.cutFrames > 0) this.cutFrames--;
+    // three's TAAU hands the velocity node its unjittered projection from a
+    // hook it registers while the pipeline is first built, i.e. too late for
+    // the first frame: bodies first drawn then would get a program variant with
+    // the builtin projection, bodies first drawn later (or warmed by
+    // compileScene) another one — the 113 KB skin program compiled twice. Doing
+    // the same hand-over here, every frame, makes it one variant everywhere.
+    this.withUnjittered(() => this.renderPipeline(replay));
+  }
+
+  private withUnjittered(fn: () => void): void {
+    const unjittered = (this.temporal as { _originalProjectionMatrix?: { copy(m: unknown): void } } | null)?._originalProjectionMatrix;
+    const vel = velocity as unknown as { setProjectionMatrix(m: unknown): void };
+    if (unjittered) {
+      unjittered.copy(this.camera.projectionMatrix);
+      vel.setProjectionMatrix(unjittered);
+    }
+    try {
+      fn();
+    } finally {
+      if (unjittered) vel.setProjectionMatrix(null);
+    }
+  }
+
+  private renderPipeline(replay: boolean): void {
+    if (this.useLegacy && this.liveLegacy && this.liveDofLegacy && !replay) {
+      (this.liveDofOn ? this.liveDofLegacy : this.liveLegacy).render();
+      return;
+    }
     (replay ? this.replay : this.liveDofOn ? this.liveDof : this.live).render();
   }
 
@@ -435,8 +607,8 @@ export class StagePipeline {
     if (this.replayWarm) return [];
     this.replayWarm = true;
     const steps: (() => void)[] = [];
-    if (this.replay.outputNode !== this.live.outputNode) steps.push(() => this.replay.render());
-    if (this.liveDof !== this.live) steps.push(() => this.liveDof.render());
+    if (this.replay.outputNode !== this.live.outputNode) steps.push(() => this.withUnjittered(() => this.replay.render()));
+    if (this.liveDof !== this.live) steps.push(() => this.withUnjittered(() => this.liveDof.render()));
     return steps;
   }
 
@@ -457,6 +629,33 @@ export class StagePipeline {
    * blocks (~12 s on the Arc 140V); drawing objects a few at a time instead
    * only made the total longer (single draws blocked 2-8 s each).
    */
+  /**
+   * Draw the scene pass alone (its own target and MRT, the shadow map with it)
+   * without the post chain. WebGL2 warm-up: ANGLE compiles most of a
+   * program's D3D shader variants on its *first draw*, inside the GPU process.
+   * Issued on its own, followed by a non-blocking fence wait
+   * (`Stage.gpuIdle`), that compile no longer blocks the main thread; before,
+   * the first post-chain quad's synchronous link status query waited behind
+   * it (a single 28 s task on a cold driver cache).
+   */
+  drawSceneOnly(scene: Scene): void {
+    const r = this.renderer as unknown as {
+      getRenderTarget(): unknown; setRenderTarget(t: unknown): void; getMRT(): unknown; setMRT(m: unknown): void;
+      render(s: Scene, c: Camera): void;
+    };
+    const sp = this.scenePass as { renderTarget: unknown; getMRT(): unknown };
+    const prevTarget = r.getRenderTarget();
+    const prevMrt = r.getMRT();
+    r.setRenderTarget(sp.renderTarget);
+    r.setMRT(sp.getMRT());
+    try {
+      this.withUnjittered(() => r.render(scene, this.camera));
+    } finally {
+      r.setRenderTarget(prevTarget);
+      r.setMRT(prevMrt);
+    }
+  }
+
   async compileScene(scene: Scene, onProgress?: (loaded: number, total: number) => void): Promise<void> {
     const r = this.renderer as unknown as {
       getRenderTarget(): unknown; setRenderTarget(t: unknown): void; getMRT(): unknown; setMRT(m: unknown): void;
@@ -465,6 +664,11 @@ export class StagePipeline {
     const sp = this.scenePass as { renderTarget: unknown; getMRT(): unknown };
     const lifted: [Object3D, boolean, boolean][] = [];
     scene.traverse((o) => {
+      // Lights keep their state: the lighting code is part of every lit
+      // program, so warming with a light that is off in this preset (the
+      // Ultra rim spots, say) builds programs the frame never uses — measured:
+      // every lit material compiled twice, the skin 129 KB here vs 113 KB drawn.
+      if ((o as { isLight?: boolean }).isLight) return;
       lifted.push([o, o.visible, o.frustumCulled]);
       o.visible = true;
       o.frustumCulled = false;
@@ -473,6 +677,15 @@ export class StagePipeline {
     const prevMrt = r.getMRT();
     r.setRenderTarget(sp.renderTarget);
     r.setMRT(sp.getMRT());
+    // During the real scene pass the temporal resolve hands the velocity node
+    // its unjittered projection matrix, which turns the node's projection into
+    // a uniform (a different program from the builtin camera projection). The
+    // warm-up must build that same variant, with the same matrix object, or
+    // every velocity-writing material compiles twice (measured: the skin program
+    // was built once here and again on the first frame).
+    const unjittered = (this.temporal as { _originalProjectionMatrix?: unknown } | null)?._originalProjectionMatrix ?? null;
+    const vel = velocity as unknown as { setProjectionMatrix(m: unknown): void };
+    if (unjittered) vel.setProjectionMatrix(unjittered);
     try {
       let done: Promise<void>;
       try {
@@ -486,6 +699,7 @@ export class StagePipeline {
       // MRT stay bound until they finish (nothing else renders during warm-up).
       await done;
     } finally {
+      if (unjittered) vel.setProjectionMatrix(null);
       r.setRenderTarget(prevTarget);
       r.setMRT(prevMrt);
     }
@@ -495,6 +709,8 @@ export class StagePipeline {
     this.live.dispose();
     if (this.replay !== this.live) this.replay.dispose();
     if (this.liveDof !== this.live) this.liveDof.dispose();
+    this.liveLegacy?.dispose();
+    this.liveDofLegacy?.dispose();
     for (const d of this.disposables) {
       try { d.dispose(); } catch { /* already gone */ }
     }

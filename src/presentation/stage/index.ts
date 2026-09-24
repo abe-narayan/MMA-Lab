@@ -34,14 +34,17 @@ import {
 } from 'three/webgpu';
 import type { CameraState, QualitySettings } from '../contract';
 import { STAGE_TUNING, type StageTuning } from './quality';
-import { StagePipeline, scalesInsidePipeline, togglesFor, type PassToggles } from './pipeline';
-import { DynamicResolution } from './dynres';
+import { probeGpu, recommendQuality, type QualityRecommendation } from './profiles';
+import { StagePipeline, aoRadiusFor, scalesInsidePipeline, togglesFor, type PassToggles } from './pipeline';
+import { DynamicResolution, GpuDynamicResolution } from './dynres';
 import { installSkinnedVelocityFix, preparePreviousBones, snapshotPreviousBones } from './skinnedVelocity';
+import { installProgramSharing } from './programSharing';
 
 export * from './quality';
-export { StagePipeline, togglesFor, scalesInsidePipeline, createLutTexture } from './pipeline';
+export * from './profiles';
+export { StagePipeline, togglesFor, scalesInsidePipeline, createLutTexture, aoRadiusFor } from './pipeline';
 export type { PassToggles } from './pipeline';
-export { DynamicResolution, FrameMeter } from './dynres';
+export { DynamicResolution, GpuDynamicResolution, FrameMeter } from './dynres';
 export { gradeColor, buildLutData, BROADCAST_GRADE, LUT_SIZE } from './lut';
 
 export type StageBackend = 'webgpu' | 'webgl2';
@@ -80,6 +83,12 @@ export interface StageOptions {
   fixedResolution?: boolean;
   /** Timestamp queries for per-pass GPU timing (WebGPU only, dev use). */
   trackTimestamp?: boolean;
+  /**
+   * Drive dynamic resolution from the GPU's own frame time (WebGPU timestamp
+   * queries, when the adapter has them) instead of the vsync-quantised frame
+   * interval. Default true; `?gpuDynres=0` turns it off for A/B.
+   */
+  gpuTimedResolution?: boolean;
 }
 
 export class Stage {
@@ -94,6 +103,16 @@ export class Stage {
   toggles: PassToggles;
   private pipeline: StagePipeline | null = null;
   private dynres: DynamicResolution | null = null;
+  /** GPU-time controller (WebGPU with timestamps); replaces `dynres` when present. */
+  private gpuDynres: GpuDynamicResolution | null = null;
+  private readonly gpuTimed: boolean;
+  private resolving = false;
+  private framesSinceResolve = 0;
+  private lastGpuSampleAt = 0;
+  /** Phases of the last `precompile` (ms). */
+  precompileTimes: { compileAsyncMs: number; drawMs: number; gpuIdleMs: number } | null = null;
+  /** Last GPU frame time the controller saw (ms), for `window.__stats`. */
+  lastGpuMs = 0;
   private readonly container: HTMLElement;
   private fixedResolution: boolean;
   private replayOn = false;
@@ -110,6 +129,7 @@ export class Stage {
     this.overrides = { ...opts.toggles };
     this.toggles = { ...togglesFor(opts.quality), ...this.overrides };
     this.fixedResolution = opts.fixedResolution === true;
+    this.gpuTimed = opts.gpuTimedResolution !== false;
     this.scene.background = new Color(0x050608);
   }
 
@@ -119,12 +139,20 @@ export class Stage {
     // skinnedVelocity.ts). `?skinVelFix=0` leaves three's own path, for A/B.
     const noFix = typeof location !== 'undefined' && new URLSearchParams(location.search).get('skinVelFix') === '0';
     if (!noFix) installSkinnedVelocityFix();
+    // One program per material instead of one per skinned body (programSharing.ts).
+    // `?shareProgs=0` restores three's per-node buffer names for A/B.
+    if (!(typeof location !== 'undefined' && new URLSearchParams(location.search).get('shareProgs') === '0')) installProgramSharing();
     const want = opts.backend ?? requestedBackend();
+    const gpuTimed = opts.gpuTimedResolution !== false
+      && !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('gpuDynres') === '0');
+    opts = { ...opts, gpuTimedResolution: gpuTimed };
     const renderer = new WebGPURenderer({
       antialias: false,
       forceWebGL: want === 'webgl2',
       powerPreference: 'high-performance',
-      trackTimestamp: opts.trackTimestamp === true,
+      // Timestamps feed the GPU-time dynamic resolution (three keeps them off
+      // when the adapter lacks 'timestamp-query'; WebGL2 has none in Chrome).
+      trackTimestamp: opts.trackTimestamp === true || (gpuTimed && want !== 'webgl2'),
     });
     try {
       await renderer.init();
@@ -180,9 +208,12 @@ export class Stage {
     this.pipeline = new StagePipeline(this.renderer, this.scene, this.camera, this.quality, this.tuning, this.toggles);
     this.pipeline.setDepthOfField(this.lastDof.focus, this.lastDof.strength);
     const dr = this.tuning.dynamicResolution;
-    this.dynres = dr && !this.fixedResolution && scalesInsidePipeline(this.toggles)
-      ? new DynamicResolution(this.quality.renderScale, { min: Math.min(dr.min, this.quality.renderScale), max: Math.max(dr.max, this.quality.renderScale) })
+    const dynamic = !!dr && !this.fixedResolution && scalesInsidePipeline(this.toggles);
+    const range = dr ? { min: Math.min(dr.min, this.quality.renderScale), max: Math.max(dr.max, this.quality.renderScale) } : null;
+    this.gpuDynres = dynamic && range && this.gpuTimed && this.timestamps
+      ? new GpuDynamicResolution(this.quality.renderScale, { ...range, targetMs: dr!.gpuTargetMs })
       : null;
+    this.dynres = dynamic && range && !this.gpuDynres ? new DynamicResolution(this.quality.renderScale, range) : null;
     this.applyShadowPolicy(this.scene);
   }
 
@@ -232,8 +263,19 @@ export class Stage {
     }
     this.lastDof = { focus: s.focusM, strength: s.dof };
     this.pipeline?.setDepthOfField(s.focusM, s.dof);
+    if (this.aoClamp) this.pipeline?.setAoRadius(aoRadiusFor(s.focusM, s.fovDeg));
     if (s.cut) this.pipeline?.cut();
+    // A cut re-seeds the temporal history anyway: the moment to jump to the
+    // internal scale this kind of shot needed last time.
+    if (this.gpuDynres && this.pipeline && (s.cut || this.lastShotName !== s.shotName)) {
+      this.pipeline.setInternalScale(this.gpuDynres.cut(s.shotName));
+    }
+    this.lastShotName = s.shotName;
   }
+
+  private lastShotName = '';
+  /** `?aoClamp=0`: keep GTAO's fixed 0.4 m radius on every shot (A/B). */
+  aoClamp = !(typeof location !== 'undefined' && new URLSearchParams(location.search).get('aoClamp') === '0');
 
   /** Replay grammar: depth of field and motion blur only while a replay runs. */
   setReplay(on: boolean): void {
@@ -247,11 +289,21 @@ export class Stage {
 
   /** Feed the measured frame interval to dynamic resolution. */
   frameTiming(frameMs: number): void {
-    if (!this.dynres || !this.pipeline) return;
+    if (this.gpuDynres || !this.dynres || !this.pipeline) return;
     this.pipeline.setInternalScale(this.dynres.sample(frameMs));
   }
 
   render(): void {
+    // While a benchmark runs, the page's own frame loop must not interleave
+    // frames (their timestamps would mix into the measurement).
+    if (this.benching) return;
+    this.renderFrame();
+  }
+
+  /** Measurement in progress: `render()` from the page loop is a no-op. */
+  private benching = false;
+
+  private renderFrame(): void {
     if (!this.pipeline) return;
     this.renderer.info.reset();
     // One node frame per presented frame, whatever three's own rAF did in
@@ -259,6 +311,56 @@ export class Stage {
     this.advanceNodeFrame();
     snapshotPreviousBones(this.scene);
     this.pipeline.render(this.replayOn);
+    if (this.gpuDynres && !this.benching) this.sampleGpuTime();
+  }
+
+  /** Every fourth frame: resolve the GPU timestamps and feed the controller. */
+  private sampleGpuTime(): void {
+    if (this.resolving || ++this.framesSinceResolve < 4) return;
+    this.framesSinceResolve = 0;
+    this.resolving = true;
+    const pipeline = this.pipeline;
+    this.renderer.resolveTimestampsAsync('render').then((ms) => {
+      if (typeof ms !== 'number' || !(ms > 0) || !this.gpuDynres || this.pipeline !== pipeline || this.benching) return;
+      const t = performance.now();
+      const dt = this.lastGpuSampleAt > 0 ? t - this.lastGpuSampleAt : 0;
+      this.lastGpuSampleAt = t;
+      this.lastGpuMs = ms;
+      pipeline?.setInternalScale(this.gpuDynres.sample(ms, dt));
+    }).catch(() => { /* a lost device; the next frame tries again */ }).finally(() => { this.resolving = false; });
+  }
+
+  private recommendation: Promise<QualityRecommendation> | null = null;
+
+  /**
+   * The preset this machine should start on when the viewer has not chosen
+   * one (profiles.ts): adapter info plus a ~0.2 s deterministic GPU probe,
+   * run once and cached. Call before the bout is built (the probe shares the GPU).
+   */
+  recommendQuality(): Promise<QualityRecommendation> {
+    if (!this.recommendation) {
+      const b = this.renderer.backend as {
+        device?: { adapterInfo?: Record<string, string> & { isFallbackAdapter?: boolean } };
+        gl?: WebGL2RenderingContext;
+      };
+      let info: Record<string, string> & { isFallbackAdapter?: boolean } = b.device?.adapterInfo ?? {};
+      if (b.gl) {
+        const ext = b.gl.getExtension('WEBGL_debug_renderer_info');
+        info = { description: String(ext ? b.gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : b.gl.getParameter(b.gl.RENDERER)) };
+      }
+      const adapter = { isFallbackAdapter: info.isFallbackAdapter };
+      this.recommendation = probeGpu(this.renderer).then((probeMs) => recommendQuality({
+        backend: this.backend,
+        adapter: { vendor: info.vendor, architecture: info.architecture, device: info.device, description: info.description, isFallbackAdapter: adapter?.isFallbackAdapter },
+        probeMs,
+      }));
+    }
+    return this.recommendation;
+  }
+
+  /** Which dynamic-resolution controller runs: 'gpu' (timestamps), 'interval', or 'fixed'. */
+  get dynamicResolutionMode(): 'gpu' | 'interval' | 'fixed' {
+    return this.gpuDynres ? 'gpu' : this.dynres ? 'interval' : 'fixed';
   }
 
   /**
@@ -268,7 +370,45 @@ export class Stage {
    */
   async precompile(onProgress?: (loaded: number, total: number) => void): Promise<void> {
     preparePreviousBones(this.scene);
+    const t0 = performance.now();
     await this.pipeline?.compileScene(this.scene, onProgress);
+    const t1 = performance.now();
+    let t2 = t1;
+    if (this.backend === 'webgl2' && this.pipeline) {
+      // Let the driver build the scene's shader variants with the main thread
+      // free (see StagePipeline.drawSceneOnly).
+      snapshotPreviousBones(this.scene);
+      this.pipeline.drawSceneOnly(this.scene);
+      t2 = performance.now();
+      await this.gpuIdle();
+    }
+    // QA (load-timeline.mjs): where the scene warm-up spends its time.
+    this.precompileTimes = { compileAsyncMs: Math.round(t1 - t0), drawMs: Math.round(t2 - t1), gpuIdleMs: Math.round(performance.now() - t2) };
+    if (typeof window !== 'undefined') (window as unknown as { __precompile?: unknown }).__precompile = this.precompileTimes;
+  }
+
+  /**
+   * Resolve once the GPU has finished everything submitted so far, without
+   * blocking the main thread: WebGPU `onSubmittedWorkDone`; WebGL2 a fence
+   * polled every 25 ms (`getSyncParameter` never waits). Used between warm-up
+   * steps so each driver-side shader compile runs while the page stays live.
+   */
+  async gpuIdle(timeoutMs = 120000): Promise<void> {
+    const b = this.renderer.backend as { device?: { queue: { onSubmittedWorkDone(): Promise<void> } }; gl?: WebGL2RenderingContext };
+    if (b.device) { await b.device.queue.onSubmittedWorkDone(); return; }
+    const gl = b.gl;
+    if (!gl) return;
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) return;
+    gl.flush();
+    const t0 = performance.now();
+    try {
+      while (gl.getSyncParameter(sync, gl.SYNC_STATUS) !== gl.SIGNALED && performance.now() - t0 < timeoutMs) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    } finally {
+      gl.deleteSync(sync);
+    }
   }
 
   /** Compile the replay pipeline ahead of the first replay. */
@@ -306,13 +446,24 @@ export class Stage {
    * shortfall (the rAF interval cannot). Returns mean ms per frame.
    */
   async benchmark(frames = 60, onFrame?: (i: number) => void): Promise<number> {
-    if (this.timestamps) return this.gpuTime(frames, onFrame);
+    return this.exclusive(() => this.benchmarkInner(frames, onFrame));
+  }
+
+  /** Run a measurement with the page's frame loop held off. */
+  private async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.benching) return fn();
+    this.benching = true;
+    try { return await fn(); } finally { this.benching = false; }
+  }
+
+  private async benchmarkInner(frames: number, onFrame?: (i: number) => void): Promise<number> {
+    if (this.timestamps) return this.gpuTimeInner(frames, onFrame);
     await this.drain();
     const t0 = performance.now();
     for (let i = 0; i < frames; i++) {
       onFrame?.(i);
       this.advanceNodeFrame();
-      this.render();
+      this.renderFrame();
     }
     await this.drain();
     return (performance.now() - t0) / frames;
@@ -330,17 +481,85 @@ export class Stage {
    * and CPU time. The number to compare passes by.
    */
   async gpuTime(frames = 60, onFrame?: (i: number) => void): Promise<number> {
+    return this.exclusive(() => this.gpuTimeInner(frames, onFrame));
+  }
+
+  private async gpuTimeInner(frames: number, onFrame?: (i: number) => void): Promise<number> {
     await this.renderer.resolveTimestampsAsync('render');
     let sum = 0;
     let n = 0;
     for (let i = 0; i < frames; i++) {
       onFrame?.(i);
       this.advanceNodeFrame();
-      this.render();
+      this.renderFrame();
       const ms = await this.renderer.resolveTimestampsAsync('render');
       if (typeof ms === 'number' && Number.isFinite(ms) && ms > 0) { sum += ms; n++; }
     }
     return n > 0 ? sum / n : NaN;
+  }
+
+  /**
+   * Per-pass GPU time (QA, `?gpuTiming=1`): the median over `frames` frames
+   * of every render pass's timestamp duration, labelled by its render
+   * target's texture name (`output` = the scene pass, `GTAONode.AO`,
+   * `TAAUNode.resolve`, `DepthOfField.*`, `UnrealBloomPass.*`, ...; `canvas`
+   * = the final quad; `rt WxH` = an unnamed target such as the shadow map).
+   * Passes that share a label within a frame are summed.
+   */
+  async passTimes(frames = 30): Promise<{ total: number; median: number; passes: Record<string, number> } | null> {
+    if (!this.timestamps) return null;
+    return this.exclusive(() => this.passTimesInner(frames));
+  }
+
+  private async passTimesInner(frames: number): Promise<{ total: number; median: number; passes: Record<string, number> }> {
+    const backend = this.renderer.backend as unknown as {
+      timestampQueryPool: { render?: { timestamps: Map<string, number> } };
+    };
+    // The inspector hook sees every render call with its timestamp uid and
+    // target; render contexts themselves are shared between targets of one
+    // format, so the uid's call index (`r:<call>:<ctx>`) is what identifies a pass.
+    const insp = (this.renderer as unknown as { inspector: { beginRender(uid: string, s: unknown, c: unknown, rt: unknown): void; __passLabels?: Map<string, string> } }).inspector;
+    if (!insp.__passLabels) {
+      const labels = new Map<string, string>();
+      insp.__passLabels = labels;
+      const orig = insp.beginRender.bind(insp);
+      insp.beginRender = (uid, s, c, rt): void => {
+        orig(uid, s, c, rt);
+        const t = rt as { texture?: { name?: string }; width: number; height: number } | null;
+        const name = t ? (t.texture?.name || `rt ${t.width}x${t.height}`) : 'canvas';
+        labels.set(uid.replace(/:f\d+$/, ''), name);
+      };
+    }
+    const labels = insp.__passLabels;
+    await this.renderer.resolveTimestampsAsync('render');
+    const per: Record<string, number[]> = {};
+    const totals: number[] = [];
+    for (let i = 0; i < frames; i++) {
+      this.advanceNodeFrame();
+      this.renderFrame();
+      const total = await this.renderer.resolveTimestampsAsync('render');
+      const ts = backend.timestampQueryPool.render?.timestamps;
+      if (!ts || typeof total !== 'number' || !(total > 0)) continue;
+      totals.push(total);
+      const frame: Record<string, number> = {};
+      for (const [uid, ms] of ts) {
+        const id = uid.replace(/:f\d+$/, '');
+        const label = labels.get(id) ?? `ctx ${id}`;
+        frame[label] = (frame[label] ?? 0) + ms;
+      }
+      for (const [k, v] of Object.entries(frame)) (per[k] ??= []).push(v);
+    }
+    // The GPU is shared with the desktop and other processes, whose work can
+    // only add time: the 25th percentile is the robust estimate of this
+    // frame's own cost (the median is reported too).
+    const pct = (a: number[], q: number): number => {
+      const s = [...a].sort((x, y) => x - y);
+      return s.length ? s[Math.min(s.length - 1, Math.floor(s.length * q))] : NaN;
+    };
+    const r2 = (x: number): number => Math.round(x * 100) / 100;
+    const passes: Record<string, number> = {};
+    for (const [k, v] of Object.entries(per)) passes[k] = r2(pct(v, 0.25));
+    return { total: r2(pct(totals, 0.25)), median: r2(pct(totals, 0.5)), passes };
   }
 
   /**

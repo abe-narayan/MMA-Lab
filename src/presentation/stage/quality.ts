@@ -154,16 +154,21 @@ export interface StageTuning {
   grain: number;
   /** Vignette strength at the corners (0-1). */
   vignette: number;
-  /** Dynamic-resolution range, or null to hold `renderScale` fixed. */
-  dynamicResolution: { min: number; max: number } | null;
+  /**
+   * Dynamic-resolution range, or null to hold `renderScale` fixed.
+   * `gpuTargetMs`: the GPU budget per frame when the GPU-time controller runs
+   * (WebGPU timestamps), below the 16.7 ms display interval so the compositor
+   * and the browser's own GPU work still fit.
+   */
+  dynamicResolution: { min: number; max: number; gpuTargetMs?: number } | null;
   /** PCF kernel radius in shadow-map texels: 1 is crisp, 3 is a soft penumbra. */
   shadowRadius: number;
 }
 
 export const STAGE_TUNING: Readonly<Record<QualityLevel, Readonly<StageTuning>>> = Object.freeze({
   low: { aoResolution: 1, aoSamples: 8, bloomResolution: 0.5, sharpness: 2, grain: 0, vignette: 0.12, dynamicResolution: null, shadowRadius: 1 },
-  medium: { aoResolution: 1, aoSamples: 10, bloomResolution: 0.5, sharpness: 0.5, grain: 0.012, vignette: 0.14, dynamicResolution: { min: 0.5, max: 0.7 }, shadowRadius: 1.5 },
-  high: { aoResolution: 1, aoSamples: 16, bloomResolution: 0.5, sharpness: 0.45, grain: 0.015, vignette: 0.15, dynamicResolution: { min: 0.6, max: 0.8 }, shadowRadius: 2.5 },
+  medium: { aoResolution: 1, aoSamples: 10, bloomResolution: 0.5, sharpness: 0.5, grain: 0.012, vignette: 0.14, dynamicResolution: { min: 0.5, max: 0.7, gpuTargetMs: 15 }, shadowRadius: 1.5 },
+  high: { aoResolution: 1, aoSamples: 16, bloomResolution: 0.5, sharpness: 0.45, grain: 0.015, vignette: 0.15, dynamicResolution: { min: 0.6, max: 0.8, gpuTargetMs: 15 }, shadowRadius: 2.5 },
   ultra: { aoResolution: 1, aoSamples: 16, bloomResolution: 0.5, sharpness: 0.8, grain: 0.015, vignette: 0.15, dynamicResolution: null, shadowRadius: 3 },
 });
 
