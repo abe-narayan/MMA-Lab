@@ -17,12 +17,13 @@
  */
 import { B } from '../rig/skeleton';
 import {
-  DEG, add, clamp, clamp01, dirToWorld, frame as mkFrame, hash01, lerp, len, madd, noise1, qrot,
+  DEG, add, clamp, clamp01, dirToLocal, dirToWorld, frame as mkFrame, hash01, lerp, len, madd, noise1, qrot,
   qy, qypr, scale, smooth, sub, toWorld, bump, type Frame, type V3,
 } from './math';
 import type { BodySpec } from './spec';
 import { ankleOf, worldP, worldQ } from './spec';
 import type { Ctx, Delta, FighterState, FootState } from './state';
+import { CH, NCH, clipStance, sampleCurve, stepClip, stepResidual, type SwingProfile } from './capture';
 
 export interface StanceLayout {
   /** Ankle points in the stance frame (local), [left, right]. */
@@ -238,11 +239,21 @@ export function updateFeet(ctx: Ctx, lay: StanceLayout, fr: Frame, d: Delta, dtM
       toBall = madd(toBall, across, 1.35);
     }
     st.stepCount++;
+    // The captured step for this direction supplies the foot's timing curves
+    // and the upper body's weight shift over the swing.
+    let prof: SwingProfile | null = null;
+    if (st.cap) {
+      const dl = dirToLocal(fr, sub(toBall, f.ball));
+      if (Math.hypot(dl[0], dl[2]) > 0.03 * s) {
+        prof = st.cap.swingProfile(stepClip(dl[0], dl[2], clipStance(ctx.f.stance), speed > 1.6), side);
+      }
+    }
     f.swing = {
       t0: now, dur,
       fromBall: f.ball, fromYaw: f.yaw,
       toBall, toYaw: to.yaw[side],
       height: (0.028 + 0.05 * clamp01(dist0 / (0.5 * s))) * s * (t.stepTime > 1.2 ? 1.25 : 1),
+      cap: prof,
     };
   }
 
@@ -251,11 +262,12 @@ export function updateFeet(ctx: Ctx, lay: StanceLayout, fr: Frame, d: Delta, dtM
     const f = st.feet[side];
     if (f.swing) {
       const u = clamp01((now - f.swing.t0) / f.swing.dur);
-      const e = smooth(u);
-      const b = add(sub(f.swing.fromBall, f.swing.fromBall), f.swing.fromBall);
+      const cp = f.swing.cap;
+      const e = cp ? sampleCurve(cp.prog, u) : smooth(u);
+      const b = f.swing.fromBall;
       const p: V3 = [
         lerp(b[0], f.swing.toBall[0], e),
-        f.swing.height * bump(u),
+        f.swing.height * (cp ? sampleCurve(cp.height, u) : bump(u)),
         lerp(b[2], f.swing.toBall[2], e),
       ];
       const dy = Math.atan2(Math.sin(f.swing.toYaw - f.swing.fromYaw), Math.cos(f.swing.toYaw - f.swing.fromYaw));
@@ -300,24 +312,54 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
   const ph = 2 * Math.PI * fb * now + hash01(st.seed, 12) * 6.28;
   const flat = clamp01(fat.flatFeet);
   const bounceA = lay.bounce * d.bounce * (1 - 0.85 * flat) * (feet[0].planted && feet[1].planted ? 1 : 0.4);
-  const bob = bounceA * (0.5 + 0.5 * Math.sin(ph));
-  const heelBob = 0.5 + 0.5 * Math.sin(ph);
-  const swayZ = 0.022 * s * noise1(st.seed + 1, now * 0.55) * (0.5 + econ);
-  const swayX = 0.016 * s * noise1(st.seed + 2, now * 0.42) * (0.5 + econ);
+  // Capture: the performers' rhythm (normalised residuals, `capture.ts`) drives
+  // the same channels the procedural sine / noise would, at the tier's amplitudes.
+  const idle = d.idle;
+  const ci = t.capIdle;
+  const wave = idle ? clamp(idle[CH.py] / 1.4, -1, 1) : Math.sin(ph);
+  const bob = bounceA * (0.5 + 0.5 * wave);
+  const heelBob = 0.5 + 0.5 * wave;
+  const swayZ = idle ? 0.009 * s * idle[CH.pz] * (0.5 + econ) * ci : 0.022 * s * noise1(st.seed + 1, now * 0.55) * (0.5 + econ);
+  const swayX = idle ? 0.007 * s * idle[CH.px] * (0.5 + econ) * ci : 0.016 * s * noise1(st.seed + 2, now * 0.42) * (0.5 + econ);
   const hm = t.headMove;
+  // Capture: the step being taken shifts the weight, bobs and turns the torso
+  // the way the performer's did over the same step.
+  const sr = stepRes;
+  sr.fill(0);
+  if (st.cap) {
+    let stepping = false;
+    for (const side of [0, 1] as const) {
+      const sw = st.feet[side].swing;
+      if (!sw || !sw.cap || feet[side].planted) continue;
+      stepResidual(st.cap, sw.cap, feet[side].swingU, stepTmp);
+      for (let c = 0; c < NCH; c++) sr[c] += stepTmp[c];
+      stepping = true;
+    }
+    if (stepping) {
+      const k = t.capStep;
+      for (let c = 0; c < NCH; c++) {
+        const lim = c < 3 ? 0.05 * s : c < 12 ? 0.14 : 0.04 * s;
+        sr[c] = clamp(sr[c] * k, -lim, lim);
+      }
+      for (const side of [0, 1] as const) {
+        const o = side === 0 ? CH.lhx : CH.rhx;
+        d.handOff[side] = [d.handOff[side][0] + sr[o], d.handOff[side][1] + sr[o + 1], d.handOff[side][2] + sr[o + 2]];
+      }
+    }
+  }
 
   // ---- pelvis ------------------------------------------------------------
   const localOff: V3 = [
-    d.pelvisOff[0] + swayX,
+    d.pelvisOff[0] + swayX + sr[CH.px],
     0,
-    d.pelvisOff[2] + swayZ - t.heelsBackCm / 100 * s,
+    d.pelvisOff[2] + swayZ + sr[CH.pz] - t.heelsBackCm / 100 * s,
   ];
   // Weight moves over the planted foot while the other swings.
   for (const side of [0, 1] as const) {
     if (!feet[side].planted) {
       const o = feet[1 - side].ball;
       const toward = sub([o[0], 0, o[2]], [fr.ox, 0, fr.oz]);
-      const w = 0.28 * bump(feet[side].swingU);
+      const w = (st.feet[side].swing?.cap ? 0.18 : 0.28) * bump(feet[side].swingU);
       const lw = [toward[0] * fr.c - toward[2] * fr.s, 0, toward[0] * fr.s + toward[2] * fr.c];
       localOff[0] += lw[0] * w;
       localOff[2] += lw[2] * w;
@@ -330,12 +372,13 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
   const pw = toWorld(fr, localOff);
   const pelvis: V3 = [
     pw[0] + lagX * 0.2 + d.pelvisWorld[0],
-    rig.hipsY - lay.kneeBend - bounceA + bob + d.pelvisOff[1],
+    rig.hipsY - lay.kneeBend - bounceA + bob + d.pelvisOff[1] + sr[CH.py],
     pw[2] + lagZ * 0.2 + d.pelvisWorld[2],
   ];
-  spec.pelvisYaw = lay.blade + d.pelvisYaw + 2.5 * DEG * noise1(st.seed + 3, now * 0.5) * econ;
-  spec.pelvisPitch = lay.lean * 0.35 + d.pelvisPitch;
-  spec.pelvisRoll = d.pelvisRoll + (swayX / (0.2 * s)) * 3 * DEG;
+  spec.pelvisYaw = lay.blade + d.pelvisYaw + sr[CH.pYaw]
+    + (idle ? 2.2 * DEG * idle[CH.pYaw] * ci : 2.5 * DEG * noise1(st.seed + 3, now * 0.5) * econ);
+  spec.pelvisPitch = lay.lean * 0.35 + d.pelvisPitch + sr[CH.pPitch] + (idle ? 1.2 * DEG * idle[CH.pPitch] * ci : 0);
+  spec.pelvisRoll = d.pelvisRoll + (swayX / (0.2 * s)) * 3 * DEG + sr[CH.pRoll] + (idle ? 1.2 * DEG * idle[CH.pRoll] * ci : 0);
 
   // ---- feet -> spec, and keep them reachable -----------------------------
   const hipsQ = qypr(yaw + spec.pelvisYaw, spec.pelvisPitch, spec.pelvisRoll);
@@ -350,7 +393,7 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
       : fo.lift;
     fs.ball = [fo.ball[0], fo.ball[1], fo.ball[2]];
     fs.yaw = fo.yaw + ctl.pivot;
-    fs.lift = lerp(heel, ctl.lift, clamp01(ctl.liftW));
+    fs.lift = lerp(heel, ctl.lift, clamp01(ctl.liftW)) + (fo.planted ? ctl.liftAdd : 0);
     fs.airPitch = fo.airPitch + ctl.airPitch;
     fs.toeFlat = fo.planted ? 1 : 0.3;
     fs.ankle = null;
@@ -376,19 +419,23 @@ export function buildBody(ctx: Ctx, d: Delta, spec: BodySpec, dtMs: number, snap
   if (!spec.free) clampPelvis(spec, st);
 
   // ---- torso, shoulders, head ----------------------------------------------
-  spec.spineYaw = d.spineYaw + (-ctx.sd * 4 * lay.qb) * DEG + 3 * DEG * noise1(st.seed + 4, now * 0.6) * (0.4 + econ);
-  spec.spinePitch = lay.lean * 0.65 + d.spinePitch;
-  spec.spineRoll = d.spineRoll + 3.5 * DEG * hm * noise1(st.seed + 5, now * 0.7);
+  spec.spineYaw = d.spineYaw + (-ctx.sd * 4 * lay.qb) * DEG + sr[CH.sYaw]
+    + (idle ? 2.5 * DEG * idle[CH.sYaw] * ci : 3 * DEG * noise1(st.seed + 4, now * 0.6) * (0.4 + econ));
+  spec.spinePitch = lay.lean * 0.65 + d.spinePitch + sr[CH.sPitch] + (idle ? 1.5 * DEG * idle[CH.sPitch] * ci : 0);
+  spec.spineRoll = d.spineRoll + sr[CH.sRoll] + (idle ? 2 * DEG * hm * idle[CH.sRoll] * ci : 3.5 * DEG * hm * noise1(st.seed + 5, now * 0.7));
   const raise = (4 + 5 * lay.qb) * DEG;
   spec.clavRaise = [raise + d.clavRaise[0], raise + d.clavRaise[1]];
   spec.clavFwd = [(3 + 6 * lay.qb) * DEG + d.clavFwd[0], (3 + 6 * lay.qb) * DEG + d.clavFwd[1]];
   spec.head.lookAt = ctx.opp ? oppHeadEstimate(ctx) : null;
   spec.head.lookW = clamp01(d.lookW) * (ctx.opp ? 0.85 : 0);
-  spec.head.yaw = d.headYaw + 3 * DEG * hm * noise1(st.seed + 6, now * 0.8);
-  spec.head.pitch = lay.chinPitch + d.headPitch;
-  spec.head.roll = d.headRoll + 2.5 * DEG * hm * noise1(st.seed + 7, now * 0.65);
+  spec.head.yaw = d.headYaw + sr[CH.hYaw] * 0.6 + (idle ? 3 * DEG * hm * idle[CH.hYaw] * ci : 3 * DEG * hm * noise1(st.seed + 6, now * 0.8));
+  spec.head.pitch = lay.chinPitch + d.headPitch + sr[CH.hPitch] * 0.6 + (idle ? 2 * DEG * hm * idle[CH.hPitch] * ci : 0);
+  spec.head.roll = d.headRoll + sr[CH.hRoll] * 0.6 + (idle ? 2 * DEG * hm * idle[CH.hRoll] * ci : 2.5 * DEG * hm * noise1(st.seed + 7, now * 0.65));
   spec.face.set(d.face);
 }
+
+const stepRes = new Float64Array(NCH);
+const stepTmp = new Float64Array(NCH);
 
 /** Lower the pelvis until every planted foot is within reach (the IK then lands it exactly). */
 export function clampPelvis(spec: BodySpec, st: FighterState): void {
@@ -509,9 +556,18 @@ export function guardHands(ctx: Ctx, spec: BodySpec, d: Delta): GuardPose {
     l[2] += drop * 0.12;
     // Idle: the lead hand paws, the rear hand breathes with the shoulders.
     const paw = isLead ? 0.025 * (0.6 + 0.6 * t.headMove) : 0.008;
-    l[2] += paw * s * noise1(st.seed + 20 + side, now * (isLead ? 1.6 : 0.7));
-    l[1] += 0.012 * s * noise1(st.seed + 22 + side, now * 0.9) * (0.5 + econ);
-    l[0] += 0.01 * s * noise1(st.seed + 24 + side, now * 1.1) * econ;
+    if (d.idle) {
+      // The performer's hands around his head, at the tier's amplitude.
+      const o = side === 0 ? CH.lhx : CH.rhx;
+      const ci = t.capIdle;
+      l[0] += 0.007 * s * d.idle[o] * ci;
+      l[1] += 0.01 * s * d.idle[o + 1] * ci;
+      l[2] += paw * 0.6 * s * d.idle[o + 2] * ci;
+    } else {
+      l[2] += paw * s * noise1(st.seed + 20 + side, now * (isLead ? 1.6 : 0.7));
+      l[1] += 0.012 * s * noise1(st.seed + 22 + side, now * 0.9) * (0.5 + econ);
+      l[0] += 0.01 * s * noise1(st.seed + 24 + side, now * 1.1) * econ;
+    }
     l = [l[0] * s, l[1] * s, l[2] * s];
     const ho = d.handOff[side];
     l = [l[0] + ho[0], l[1] + ho[1], l[2] + ho[2]];

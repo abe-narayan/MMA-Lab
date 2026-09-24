@@ -46,6 +46,11 @@ import {
 import { classify, legPass, strikeBody, strikeHands, strikeRootOffset } from './strikes';
 import { fighterTiers } from './tier';
 import { strikeTiming, type ActionTiming } from './timing';
+import type { MotionLibrary } from '../assets/motionLibrary';
+import { CapRig, NCH, idleResidual, registeredMotionLibrary } from './capture';
+import {
+  capActionFor, capDefenceBody, capDefenceFor, capLegPass, capStrikeBody, capStrikeHands, type CapAction,
+} from './capStrikes';
 
 /** Displayed centre-to-centre distance for a recorded one (1v1). */
 export function displaySeparation(d: number): number {
@@ -62,6 +67,14 @@ export interface AnimatorOptions {
   tierOverride?: (index: number) => number | undefined;
   /** Disable the display range compression (tests of raw placement). */
   noCompression?: boolean;
+  /**
+   * Motion-capture library. Omitted: whatever `registerMotionLibrary` holds
+   * (the presenter loads it; until it arrives the animator is procedural and
+   * crossfades when it does). `null`: procedural only.
+   */
+  motion?: MotionLibrary | null;
+  /** Dev: force the clip used for a technique id (clip id), when it fits the limb. */
+  captureClip?: (techId: string) => string | undefined;
 }
 
 interface FighterFrame {
@@ -81,6 +94,7 @@ export class StandingAnimator implements Animator {
   private readonly scratchWorld: [WorldPose, WorldPose] = [createWorldPose(), createWorldPose()];
   private readonly tmpPose: Pose = createPose();
   private debugInfo: AnimDebug[] = [];
+  private lib: MotionLibrary | null = null;
 
   constructor(private readonly opts: AnimatorOptions = {}) {}
 
@@ -92,6 +106,8 @@ export class StandingAnimator implements Animator {
       const seed = hashStr(`${bout.cosmeticSeed}:${f.id}:${i}`);
       return createFighterState(i, i, rigInfo(rests[i]), tiers, seed);
     });
+    this.lib = this.motionLibrary();
+    for (const st of this.st) st.cap = this.lib ? new CapRig(this.lib, st.rig) : null;
     this.reset();
   }
 
@@ -113,6 +129,8 @@ export class StandingAnimator implements Animator {
       st.lastSpec = null;
       st.feet[0].swing = null;
       st.feet[1].swing = null;
+      st.capAction = null;
+      st.capDefence = null;
     }
     this.lastNow = -Infinity;
     grappleSolver()?.reset();
@@ -120,6 +138,16 @@ export class StandingAnimator implements Animator {
 
   debug(fighter: number): AnimDebug {
     return this.debugInfo[fighter] ?? { layer: 'none', technique: null, phase: 0, ikTargets: [], tierRules: [] };
+  }
+
+  /** The capture library in use (null: procedural). */
+  motionLibrary(): MotionLibrary | null {
+    return this.opts.motion !== undefined ? this.opts.motion : registeredMotionLibrary();
+  }
+
+  /** True when this animator is currently driven by motion capture. */
+  get captureActive(): boolean {
+    return this.lib !== null;
   }
 
   /** Internal state, for the dev viewer and tests. */
@@ -133,6 +161,20 @@ export class StandingAnimator implements Animator {
     const jump = !Number.isFinite(this.lastNow) || now < this.lastNow - 1 || now - this.lastNow > 600;
     const snap = input.discontinuity || jump;
     if (snap) this.reset();
+    // The capture library arrived (or went): rebuild the samplers and crossfade.
+    const lib = this.motionLibrary();
+    if (lib !== this.lib) {
+      this.lib = lib;
+      for (const st of this.st) {
+        st.cap = lib ? new CapRig(lib, st.rig) : null;
+        st.capAction = null;
+        st.capDefence = null;
+        if (!snap && st.lastSpec) {
+          st.fade = { from: createPose(), t0: now, dur: 350 };
+          copyPose(st.fade.from, st.pose);
+        }
+      }
+    }
     const dtMs = snap ? 0 : clamp(now - this.lastNow, 0, 100);
     this.lastNow = now;
     const F0 = input.frame;
@@ -270,7 +312,12 @@ export class StandingAnimator implements Animator {
       if (!tm) continue;
       const info = classify(tm.id, ctx.lead);
       const g = (st as unknown as { guard: ReturnType<typeof guardHands> }).guard;
-      const aim = strikeHands(ctx, tm, info, st.spec, g);
+      const plan = this.plan(ctx, tm, info);
+      const cap = st.cap;
+      const hands = (): V3 | null => (plan && cap
+        ? capStrikeHands(cap, ctx, tm, info, st.spec, g, plan)
+        : strikeHands(ctx, tm, info, st.spec, g));
+      const aim = hands();
       solveSpec(st.spec, st.rig, st.pose, st.world, true);
       if (aim && info.hand !== -1) {
         const elbow = info.kind === 'elbow';
@@ -278,14 +325,16 @@ export class StandingAnimator implements Animator {
         const w = elbow ? windowW(ctx.nowMs - tm.contact, -170, -15, act, act + 170) : 1;
         if (w > 0) {
           this.reachAssist(ctx, tm, info.hand as 0 | 1, elbow ? aim : null, w, () => {
-            strikeHands(ctx, tm, info, st.spec, g);
+            hands();
             solveSpec(st.spec, st.rig, st.pose, st.world, true);
           });
         }
       }
       this.headClearance(ctx, info.hand === 0 ? -1 : 1);
       if (info.leg !== -1) {
-        const T = legPass(ctx, tm, info, st.spec, st.delta, false);
+        const T = plan && cap
+          ? capLegPass(cap, ctx, tm, info, st.spec, st.delta, false, plan)
+          : legPass(ctx, tm, info, st.spec, st.delta, false);
         if (T) st.ikTargets.push({ name: 'kick', pos: T });
       }
       if (aim) st.ikTargets.push({ name: 'aim', pos: aim });
@@ -389,18 +438,31 @@ export class StandingAnimator implements Animator {
     const d = st.delta;
     st.debugLayer = 'L0';
     const tm = ctx.my;
+    const cap = st.cap;
     if (tm) {
       const info = classify(tm.id, ctx.lead);
-      strikeBody(ctx, tm, info, d);
-      st.debugLayer = 'L1 strike';
+      const plan = this.plan(ctx, tm, info);
+      if (plan && cap) {
+        capStrikeBody(cap, ctx, tm, info, d, plan);
+        st.debugLayer = `L1 strike [mocap ${plan.clip.id}]`;
+      } else {
+        strikeBody(ctx, tm, info, d);
+        st.debugLayer = 'L1 strike';
+      }
       // The lunge is a pure function of time, so the feet can step ahead of it.
       d.rootFns.push((ms) => strikeRootOffset(ctx, tm, info, ms));
     }
     const ad = activeDefence(ctx);
     if (ad) {
-      defenceBody(ctx, ad, d);
+      const dp = cap ? capDefenceFor(cap, ctx, ad) : null;
+      const captured = !!(dp && cap && capDefenceBody(cap, ctx, ad, d, dp));
+      if (!captured) defenceBody(ctx, ad, d);
       d.rootFns.push((ms) => defenceRootOffset(ctx, ad, ms));
-      st.debugLayer = `L1 ${ad.motion}`;
+      st.debugLayer = `L1 ${ad.motion}${captured ? ' [mocap]' : ''}`;
+    }
+    if (cap) {
+      d.idle = idleResidual(cap, st.tiers.guardStyle, ctx.f.stance, st.seed, ctx.nowMs / 1000, new Float64Array(NCH));
+      if (d.idle && st.debugLayer === 'L0') st.debugLayer = 'L0 [mocap]';
     }
     for (const fn of d.rootFns) {
       const o = fn(ctx.nowMs);
@@ -428,6 +490,13 @@ export class StandingAnimator implements Animator {
     buildBody(ctx, d, spec, dtMs, snap);
     for (const h of spec.hands) h.w = 0;
     solveSpec(spec, st.rig, st.pose, st.world, false);
+  }
+
+  /** The capture plan for this action, or null (procedural). */
+  private plan(ctx: Ctx, tm: ActionTiming, info: ReturnType<typeof classify>): CapAction | null {
+    const cap = ctx.st.cap;
+    if (!cap) return null;
+    return capActionFor(cap, ctx, tm, info, this.opts.captureClip?.(tm.id));
   }
 
   /**

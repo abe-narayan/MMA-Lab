@@ -884,60 +884,7 @@ export function legPass(
     ball: st.feet[kf].ball, yaw: st.feet[kf].yaw, lift: 0, airPitch: 0, pole: [0, 0, 0], toeFlat: 1, ankle: null,
   });
   const fwd = dirToWorld(fr, [0, 0, 1]);
-  const up: V3 = [0, 1, 0];
-  const outward = dirToWorld(fr, [ks, 0, 0]);
-  const toT = norm(sub(T, hipJ));
-
-  // Contact configuration.
-  let ankleC: V3;
-  let poleC: V3;
-  let chamber: V3;
-  let poleCh: V3;
-  const knee = info.kind === 'knee';
-  const footLead = info.weapon === 'ball_of_foot' || info.weapon === 'heel' || info.weapon === 'instep';
-  if (knee) {
-    const K = madd(hipJ, toT, rig.thigh);
-    const kC = dist(T, hipJ) < rig.thigh ? T : K;
-    const shinDir = norm(add(scale(toT, -0.35), [0, -1, 0]));
-    ankleC = madd(kC, shinDir, rig.shin);
-    poleC = madd(kC, toT, 0.4);
-    chamber = madd(hipJ, norm(add(scale(fwd, 0.4), [0, -0.9, 0])), L * 0.55);
-    poleCh = madd(hipJ, add(fwd, [0, 0.3, 0]), 0.6);
-  } else if (info.kind === 'teep' || info.kind === 'side' || info.kind === 'spinBack' || info.kind === 'oblique') {
-    const reach = Math.min(dist(T, hipJ) - (footLead ? 0.035 * s : 0), L * 0.99);
-    ankleC = madd(hipJ, toT, reach);
-    poleC = add(madd(hipJ, toT, L * 0.5), [0, 0.35, 0]);
-    const chDir = norm(add(scale(toT, 0.55), [0, -0.55, 0]));
-    chamber = madd(hipJ, chDir, L * 0.42);
-    poleCh = madd(hipJ, norm(add(toT, [0, 0.6, 0])), 0.7);
-    if (info.kind === 'oblique') poleCh = madd(hipJ, norm(add(outward, [0, 0.4, 0])), 0.7);
-  } else if (info.kind === 'axe') {
-    ankleC = madd(hipJ, toT, Math.min(dist(T, hipJ), L * 0.985));
-    poleC = madd(hipJ, add(toT, [0, 0.5, 0]), 0.6);
-    chamber = madd(hipJ, norm(add(scale(fwd, 0.35), [0, 1, 0])), L * 0.97);
-    poleCh = madd(hipJ, fwd, 0.6);
-  } else {
-    // Round kick (low / body / head, wheel): straight leg through the target; shin on target.
-    const dT = dist(T, hipJ);
-    ankleC = madd(hipJ, toT, Math.max(dT, Math.min(L * 0.993, dT + rig.shin * 0.35)));
-    if (info.weapon === 'instep') ankleC = madd(hipJ, toT, Math.min(L * 0.993, dT + 0.05));
-    poleC = madd(madd(hipJ, toT, L * 0.5), up, 0.3);
-    // In range with a bent knee: put the knee just above the line so the SHIN
-    // (not a straight-leg approximation) passes through the target.
-    const K = madd(hipJ, norm(add(toT, [0, 0.22, 0])), rig.thigh);
-    const kT = dist(T, K);
-    if (info.weapon === 'shin' && kT < rig.shin * 0.92 && kT > rig.shin * 0.3) {
-      ankleC = madd(K, norm(sub(T, K)), rig.shin * 0.999);
-      poleC = madd(K, norm(sub(K, hipJ)), 0.3);
-    }
-    // Chamber: the knee up and pointing at the target, the heel folded back
-    // beside the hip on the kicking side (the hip is turning over).
-    const sideDir = scale(norm(cross(up, toT)), ks);
-    const lift = tm.region === 'head' ? 0.25 : tm.region === 'body' ? 0.02 : -0.2;
-    chamber = madd(hipJ, norm(add(add(scale(sideDir, 0.85), scale(toT, 0.12)), [0, lift, 0])), L * 0.5);
-    poleCh = madd(hipJ, norm(add(toT, [0, 0.35 + lift, 0])), 0.8);
-    if (info.kind === 'wheel') chamber = madd(hipJ, norm(add(scale(fwd, -0.3), scale(outward, -0.8))), L * 0.8);
-  }
+  const { ankleC, poleC, chamber, poleCh } = kickGeometry(ctx, tm, info, hipJ, T);
 
   // Timeline: planted -> chamber -> contact -> (follow-through) -> re-chamber -> planted.
   let ank: V3;
@@ -1004,6 +951,79 @@ export function legPass(
     return T;
   }
   return T;
+}
+
+/**
+ * Contact configuration of a kick / knee for a hip joint and a target: where
+ * the ankle and knee pole must be at contact (the shin / ball / heel on the
+ * target), and the chamber. Shared by the procedural and the capture paths.
+ */
+export function kickGeometry(
+  ctx: Ctx, tm: ActionTiming, info: StrikeInfo, hipJ: V3, T: V3,
+): { ankleC: V3; poleC: V3; chamber: V3; poleCh: V3 } {
+  const rig = ctx.st.rig;
+  const s = rig.scale;
+  const kf = info.leg as 0 | 1;
+  const ks = kf === 0 ? 1 : -1;
+  const fr = ctx.frame;
+  const L = rig.legLen;
+  const fwd = dirToWorld(fr, [0, 0, 1]);
+  const up: V3 = [0, 1, 0];
+  const outward = dirToWorld(fr, [ks, 0, 0]);
+  const toT = norm(sub(T, hipJ));
+
+  // Contact configuration.
+  let ankleC: V3;
+  let poleC: V3;
+  let chamber: V3;
+  let poleCh: V3;
+  const knee = info.kind === 'knee';
+  const footLead = info.weapon === 'ball_of_foot' || info.weapon === 'heel' || info.weapon === 'instep';
+  if (knee) {
+    const K = madd(hipJ, toT, rig.thigh);
+    const kC = dist(T, hipJ) < rig.thigh ? T : K;
+    const shinDir = norm(add(scale(toT, -0.35), [0, -1, 0]));
+    ankleC = madd(kC, shinDir, rig.shin);
+    poleC = madd(kC, toT, 0.4);
+    chamber = madd(hipJ, norm(add(scale(fwd, 0.4), [0, -0.9, 0])), L * 0.55);
+    poleCh = madd(hipJ, add(fwd, [0, 0.3, 0]), 0.6);
+  } else if (info.kind === 'teep' || info.kind === 'side' || info.kind === 'spinBack' || info.kind === 'oblique') {
+    const reach = Math.min(dist(T, hipJ) - (footLead ? 0.035 * s : 0), L * 0.99);
+    ankleC = madd(hipJ, toT, reach);
+    poleC = add(madd(hipJ, toT, L * 0.5), [0, 0.35, 0]);
+    const chDir = norm(add(scale(toT, 0.55), [0, -0.55, 0]));
+    chamber = madd(hipJ, chDir, L * 0.42);
+    poleCh = madd(hipJ, norm(add(toT, [0, 0.6, 0])), 0.7);
+    if (info.kind === 'oblique') poleCh = madd(hipJ, norm(add(outward, [0, 0.4, 0])), 0.7);
+  } else if (info.kind === 'axe') {
+    ankleC = madd(hipJ, toT, Math.min(dist(T, hipJ), L * 0.985));
+    poleC = madd(hipJ, add(toT, [0, 0.5, 0]), 0.6);
+    chamber = madd(hipJ, norm(add(scale(fwd, 0.35), [0, 1, 0])), L * 0.97);
+    poleCh = madd(hipJ, fwd, 0.6);
+  } else {
+    // Round kick (low / body / head, wheel): straight leg through the target; shin on target.
+    const dT = dist(T, hipJ);
+    ankleC = madd(hipJ, toT, Math.max(dT, Math.min(L * 0.993, dT + rig.shin * 0.35)));
+    if (info.weapon === 'instep') ankleC = madd(hipJ, toT, Math.min(L * 0.993, dT + 0.05));
+    poleC = madd(madd(hipJ, toT, L * 0.5), up, 0.3);
+    // In range with a bent knee: put the knee just above the line so the SHIN
+    // (not a straight-leg approximation) passes through the target.
+    const K = madd(hipJ, norm(add(toT, [0, 0.22, 0])), rig.thigh);
+    const kT = dist(T, K);
+    if (info.weapon === 'shin' && kT < rig.shin * 0.92 && kT > rig.shin * 0.3) {
+      ankleC = madd(K, norm(sub(T, K)), rig.shin * 0.999);
+      poleC = madd(K, norm(sub(K, hipJ)), 0.3);
+    }
+    // Chamber: the knee up and pointing at the target, the heel folded back
+    // beside the hip on the kicking side (the hip is turning over).
+    const sideDir = scale(norm(cross(up, toT)), ks);
+    const lift = tm.region === 'head' ? 0.25 : tm.region === 'body' ? 0.02 : -0.2;
+    chamber = madd(hipJ, norm(add(add(scale(sideDir, 0.85), scale(toT, 0.12)), [0, lift, 0])), L * 0.5);
+    poleCh = madd(hipJ, norm(add(toT, [0, 0.35 + lift, 0])), 0.8);
+    if (info.kind === 'wheel') chamber = madd(hipJ, norm(add(scale(fwd, -0.3), scale(outward, -0.8))), L * 0.8);
+  }
+
+  return { ankleC, poleC, chamber, poleCh };
 }
 
 /** Interpolate between two points around a centre (hip): directions slerp, radius lerps. */

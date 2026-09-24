@@ -63,6 +63,21 @@ const TABLE = {
   stepTime: [1.45, 1.25, 1.1, 1.0, 0.92, 0.9],
   /** Head movement amplitude in the idle (trained fighters keep it moving). */
   headMove: [0.2, 0.4, 0.7, 0.9, 1.0, 1.0],
+  // --- CAPTURE FILTER [E]: how much of the (trained) performers' motion each
+  // tier keeps. The stance geometry above stays the tier's own; these scale
+  // what `capture.ts` / `capStrikes.ts` add on top of it.
+  /** Share of a captured punch's hip / torso / shoulder rotation kept (novices punch with the arm). */
+  capTorque: [0.2, 0.45, 0.8, 1.0, 1.0, 1.0],
+  /** Amplitude of the captured idle micro-motion (novices are stiff, not rhythmic). */
+  capIdle: [0.45, 0.6, 0.8, 0.95, 1.0, 1.0],
+  /** Captured heel lifts and ball-of-foot pivots kept (novices stay flat-footed). */
+  capHeel: [0.1, 0.35, 0.75, 1.0, 1.0, 1.0],
+  /** Extra outward loop on captured punch paths, metres (novices swing wide). */
+  capArc: [0.11, 0.07, 0.025, 0, 0, 0],
+  /** Share of a captured punch's backswing (the wind-up behind the chord to the target) kept: novices telegraph. */
+  capWindup: [1.3, 1.1, 0.8, 0.55, 0.45, 0.45],
+  /** Captured weight shift / bob while stepping. */
+  capStep: [0.75, 0.85, 0.95, 1, 1, 1],
 } satisfies Record<string, Row>;
 
 export type TierParams = { [K in keyof typeof TABLE]: number };

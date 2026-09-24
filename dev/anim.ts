@@ -11,12 +11,15 @@
  *   bout      a real simulated bout (&a=arch.x&b=arch.y&seed=1&bt=12.5 seconds), live or &ev=N strip
  *               around the N-th landed strike (&evkind=knockdown for knockdowns)
  *
+ * Motion capture: cap=1 (default, the shipped library) | cap=0 (procedural only); cmp=1 renders
+ *   strips twice, procedural row above the capture-driven row; clip=<clip id> forces the clip for `tech`.
  * Other params: tech, result, def, ta, tb (tier overrides), stance, dist (recorded metres), speed,
  * view=side|front|iso|back|top, panel=0, t (ms) for a still, size (strip cell px).
  * `window.__ready` turns true once the first picture is drawn (for scripts/dev/shot.mjs --until).
  */
 import * as THREE from 'three';
 import { StandingAnimator } from '../src/presentation/anim/animator';
+import { loadMotionLibrary, type MotionLibrary } from '../src/presentation/assets/motionLibrary';
 import {
   archetype, buildScenario, frameAt, presentationFor, restFor, runtimeOf,
   type Scenario, type SynthAction, type SynthBout,
@@ -50,6 +53,10 @@ let dist = num('dist', 1.3);
 let speed = num('speed', 1);
 let view = str('view', 'side');
 const cellPx = num('size', 0);
+let capOn = str('cap', '1') !== '0';
+const cmp = P.get('cmp') === '1';
+const forceClip = P.get('clip') ?? '';
+let motion: MotionLibrary | null = null;
 
 // ---------------------------------------------------------------------------
 // Scene
@@ -295,15 +302,19 @@ function boutSource(): Source {
   return src;
 }
 
-function makeAnimator(src: Source): StandingAnimator {
-  const an = new StandingAnimator({ tierOverride: (i) => src.tiers[i] });
+function makeAnimator(src: Source, capture = capOn): StandingAnimator {
+  const an = new StandingAnimator({
+    tierOverride: (i) => src.tiers[i],
+    motion: capture ? motion : null,
+    captureClip: forceClip ? (id) => (id === tech ? forceClip : undefined) : undefined,
+  });
   an.setBout(src.bout, src.rests);
   return an;
 }
 
 /** Run the animator continuously from 0 and capture poses at the requested times. */
-function sample(src: Source, times: number[], startMs = 0): Sampled[] {
-  const an = makeAnimator(src);
+function sample(src: Source, times: number[], startMs = 0, capture = capOn): Sampled[] {
+  const an = makeAnimator(src, capture);
   const out = [createPose(), createPose()];
   const sorted = [...times].map((t, i) => ({ t, i })).sort((a, b) => a.t - b.t);
   const res: Sampled[] = new Array(times.length);
@@ -417,7 +428,11 @@ function stripTimes(src: Source): number[] {
   return out;
 }
 
-function renderStrip(rows: { src: Source; title: string }[]): void {
+function renderStrip(rows0: { src: Source; title: string; cap?: boolean }[]): void {
+  // Compare: every row twice, procedural above capture-driven.
+  const rows = cmp
+    ? rows0.flatMap((r) => [{ ...r, cap: false, title: `${r.title}  ·  PROCEDURAL` }, { ...r, cap: true, title: `${r.title}  ·  MOTION CAPTURE` }])
+    : rows0.map((r) => ({ ...r, cap: r.cap ?? capOn, title: `${r.title}  ·  ${(r.cap ?? capOn) && motion ? 'MOTION CAPTURE' : 'PROCEDURAL'}` }));
   labels.innerHTML = '';
   const W = innerWidth, H = innerHeight;
   renderer.setScissor(0, 0, W, H);
@@ -436,7 +451,7 @@ function renderStrip(rows: { src: Source; title: string }[]): void {
     yy += 22;
     const times = stripTimes(r.src);
     const startMs = mode === 'bout' ? Math.max(0, r.src.contactMs - 3000) : 0;
-    const samples = sample(r.src, times, startMs);
+    const samples = sample(r.src, times, startMs, r.cap);
     samples.forEach((s, i) => {
       const cx = (i % cols) * cw;
       const cy = yy + Math.floor(i / cols) * ch;
@@ -578,11 +593,17 @@ $<HTMLInputElement>('scrub').oninput = (e) => {
   seekLive(Number((e.target as HTMLInputElement).value) / 1000 * live.src.endMs);
 };
 if (P.get('panel') === '0') $('panel').classList.add('hidden');
+const capChk = $<HTMLInputElement>('capChk');
+capChk.checked = capOn;
+capChk.onchange = () => { capOn = capChk.checked; build(); };
 window.__seek = (ms: number) => { if (live) { live.playing = false; seekLive(ms); drawLive(); } };
 addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); if (!live) build(); });
 
-build();
-requestAnimationFrame(tick);
+// The capture library loads first (the page stays procedural if it cannot).
+loadMotionLibrary()
+  .then((lib) => { motion = lib; })
+  .catch((e: unknown) => { console.warn('motion library unavailable', e); })
+  .finally(() => { build(); requestAnimationFrame(tick); });
 void B;
 void BONE_PARENT;
 void ARCHETYPES;

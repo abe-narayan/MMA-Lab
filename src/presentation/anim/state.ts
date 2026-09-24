@@ -16,6 +16,8 @@ import type { BodySpec, RigInfo } from './spec';
 import { createFoot, createHand } from './spec';
 import type { FighterTiers } from './tier';
 import type { ActionTiming } from './timing';
+import type { CapRig, SwingProfile } from './capture';
+import type { CapAction, CapDefence } from './capStrikes';
 
 export interface Swing {
   t0: number;
@@ -25,6 +27,8 @@ export interface Swing {
   toBall: V3;
   toYaw: number;
   height: number;
+  /** Captured step this swing follows (foot progress / height curves, upper-body residual), if any. */
+  cap: SwingProfile | null;
 }
 
 export interface FootState {
@@ -41,6 +45,8 @@ export interface FootCtl {
   /** Heel lift override (radians) and its weight. */
   lift: number;
   liftW: number;
+  /** Additive heel lift (captured heel rise on top of the stance's). */
+  liftAdd: number;
   /** Direct ankle target (kicks, knees, checks) and its weight. */
   ankle: V3 | null;
   ankleW: number;
@@ -54,7 +60,7 @@ export interface FootCtl {
 }
 
 export function createFootCtl(): FootCtl {
-  return { pivot: 0, lift: 0, liftW: 0, ankle: null, ankleW: 0, pole: null, airPitch: 0, hold: false, land: null, landYaw: null };
+  return { pivot: 0, lift: 0, liftW: 0, liftAdd: 0, ankle: null, ankleW: 0, pole: null, airPitch: 0, hold: false, land: null, landYaw: null };
 }
 
 export interface Delta {
@@ -93,6 +99,11 @@ export interface Delta {
   guardDown: number;
   /** Additive hand offsets (local frame) from reactions/conditions. */
   handOff: [V3, V3];
+  /**
+   * Normalised idle residuals from the capture (`capture.ts` CH order), or null
+   * for the procedural idle noise.
+   */
+  idle: Float64Array | null;
 }
 
 export function createDelta(): Delta {
@@ -107,6 +118,7 @@ export function createDelta(): Delta {
     face: new Float32Array(FACE_CHANNELS.length),
     evade: [0, 0, 0], guardDrop: 0, guardDown: 0,
     handOff: [[0, 0, 0], [0, 0, 0]],
+    idle: null,
   };
 }
 
@@ -174,6 +186,11 @@ export interface FighterState {
   displayVel: V3;
   /** Previous-frame guard targets for idle smoothing. */
   ikTargets: { name: string; pos: [number, number, number] }[];
+  /** Motion capture as seen by this body (null: procedural only). */
+  cap: CapRig | null;
+  /** Capture plans of the current strike / defence (keyed so a seek rebuilds them). */
+  capAction: { key: string; plan: CapAction | null } | null;
+  capDefence: { key: string; plan: CapDefence | null } | null;
 }
 
 export function createFighterState(index: number, id: number, rig: RigInfo, tiers: FighterTiers, seed: number): FighterState {
@@ -189,6 +206,7 @@ export function createFighterState(index: number, id: number, rig: RigInfo, tier
     lastYaw: 0, initialised: false, planted: [true, true], debugLayer: 'L0',
     delta: createDelta(), spec: createSpec({ ox: 0, oz: 0, yaw: 0, c: 1, s: 0 }), lastSpec: null,
     displayRoot: [0, 0, 0], displayVel: [0, 0, 0], ikTargets: [],
+    cap: null, capAction: null, capDefence: null,
   };
 }
 
