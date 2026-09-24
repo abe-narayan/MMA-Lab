@@ -28,7 +28,13 @@ export type RefereeGesture =
   /** Over a downed fighter, hands out, ready to dive in. */
   | 'ready'
   /** Holding the winner's arm up at the end. */
-  | 'raise';
+  | 'raise'
+  /** The end (finish staging): waving the bout off, arms sweeping over the loser. */
+  | 'waveOff'
+  /** Down beside the loser, checking on him. */
+  | 'attend'
+  /** In the centre holding both fighters by the wrist, before the announcement. */
+  | 'present';
 
 /**
  * What the referee is doing on screen. The sim's display state

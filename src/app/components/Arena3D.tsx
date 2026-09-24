@@ -31,7 +31,7 @@ import type { SimEvent, TickSnapshot } from '../../sim';
 import type {
   BoutPresentation, CameraRequest, CameraState, FrameInput, QualityLevel,
 } from '../../presentation/contract';
-import type { ReplayState } from '../../presentation/camera';
+import type { ReplayState, ShotKind } from '../../presentation/camera';
 import { createPresenter, type Presenter } from '../../presentation/presenter';
 import { SeekDetector } from '../replay/broadcast';
 
@@ -82,6 +82,13 @@ export interface Arena3DProps {
   onUnavailable?: (reason: string) => void;
   /** The loading card has lifted and the broadcast is on screen. */
   onLive?: () => void;
+  /**
+   * Manual camera in broadcast mode (the Watch screen's camera keys): one of
+   * the director's operators, or null for the director's own edit.
+   */
+  cameraOverride?: ShotKind | null;
+  /** Transient status for the host (e.g. "GPU device lost, rebuilding"). */
+  onNotice?: (message: string | null) => void;
   /** DOM overlays drawn over the picture (broadcast graphics); a function gets the camera shot. */
   children?: ReactNode | ((ctx: { shot: CameraState | null }) => ReactNode);
 }
@@ -137,10 +144,19 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
   const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [shot, setShot] = useState<CameraState | null>(null);
+  // Bumped to rebuild the presenter from scratch (after a GPU device loss).
+  const [generation, setGeneration] = useState(0);
+  const lossesRef = useRef(0);
 
   const playhead = (): Arena3DProps & Playhead => {
     const p0 = propsRef.current;
     return p0.getPlayhead ? { ...p0, ...p0.getPlayhead() } : p0;
+  };
+
+  /** Give up on 3D: the host shows the 2D board with this reason. */
+  const fail = (reason: string): void => {
+    setStatus('failed');
+    propsRef.current.onUnavailable?.(reason);
   };
 
   // ---- mount / dispose ----------------------------------------------------
@@ -152,6 +168,25 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
     presenterRef.current = presenter;
     presenter.setQuality(propsRef.current.quality, propsRef.current.renderScale);
     ttffRef.current = { mountMs: now() };
+    if (generation > 0) {
+      setStatus('starting');
+      setPhase('idle');
+      setRevealed(false);
+    }
+
+    // Device / context loss (review M5): rebuild the renderer once; a second
+    // loss (or a failed rebuild) falls back to the 2D board with the reason.
+    const offLost = presenter.onDeviceLost((reason) => {
+      if (disposed) return;
+      lossesRef.current += 1;
+      console.warn(`[Arena3D] ${reason}`);
+      if (lossesRef.current <= 1) {
+        propsRef.current.onNotice?.('The graphics device was reset; rebuilding the 3D view…');
+        setGeneration((g) => g + 1);
+      } else {
+        fail(`${reason}; the device was lost twice`);
+      }
+    });
 
     presenter.mount(host).then(({ backend: b }) => {
       // Unmounted while the device was being created (React StrictMode mounts
@@ -164,21 +199,22 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
       propsRef.current.onBackend?.(b);
     }).catch((err: unknown) => {
       if (disposed) return;
-      setStatus('failed');
-      propsRef.current.onUnavailable?.(err instanceof Error ? err.message : String(err));
+      fail(err instanceof Error ? err.message : String(err));
     });
 
     const ro = new ResizeObserver(() => presenter.resize());
     ro.observe(host);
     return () => {
       disposed = true;
+      offLost();
       ro.disconnect();
       presenter.dispose();
       presenterRef.current = null;
       const w = window as unknown as { __presenter?: Presenter };
       if (w.__presenter === presenter) delete w.__presenter;
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generation]);
 
   // ---- bout: build, pose the first frame, compile, then go live -----------
   useEffect(() => {
@@ -191,9 +227,12 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
     const t = ttffRef.current;
     const t0 = now();
     const rec = propsRef.current.recording;
+    // setBout first: its synchronous part drops the old director, so the
+    // recording is planned once, against the new arena (review L7).
+    const building = presenter.setBout(props.bout);
     if (rec) presenter.setRecording(rec.frames, rec.events);
-    presenter.setBout(props.bout).then(async () => {
-      if (cancelled) return;
+    building.then(async () => {
+      if (cancelled || presenterRef.current !== presenter) return;
       t.boutMs = Math.round(now() - t0);
       setPhase('compiling');
       // Pose the opening frame so the camera, bodies and referee are where the
@@ -211,9 +250,14 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
       publishTtff(t);
       setPhase('ready');
     }).catch((err: unknown) => {
+      // Review M3: a throw while building or compiling used to leave the
+      // loading card up for good. Show the 2D board with the reason instead.
       console.error('[Arena3D] setBout failed', err);
+      if (cancelled || presenterRef.current !== presenter) return;
+      fail(`the 3D scene could not be built (${err instanceof Error ? err.message : String(err)})`);
     });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.bout, status]);
 
   // A new recording for the same presentation (rare) goes straight through.
@@ -223,17 +267,23 @@ export function Arena3D(props: Arena3DProps): JSX.Element {
   }, [props.recording, status]);
 
   // ---- settings -----------------------------------------------------------
+  // `status` is a dependency so a rebuilt presenter (device loss) gets them too.
   useEffect(() => {
     presenterRef.current?.setQuality(props.quality, props.renderScale);
-  }, [props.quality, props.renderScale]);
+  }, [props.quality, props.renderScale, status]);
 
   useEffect(() => {
     presenterRef.current?.setCamera(props.camera);
-  }, [props.camera.mode, props.camera.followId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.camera.mode, props.camera.followId, status]);
+
+  useEffect(() => {
+    presenterRef.current?.setCameraOverride(props.cameraOverride ?? null);
+  }, [props.cameraOverride, status]);
 
   useEffect(() => {
     presenterRef.current?.setFlags({ debug: props.debug, labels: props.labels });
-  }, [props.debug, props.labels]);
+  }, [props.debug, props.labels, status]);
 
   // Free and orbit cameras: drag to orbit, right/shift-drag to pan, wheel to zoom.
   useEffect(() => {

@@ -28,11 +28,11 @@ import type { FighterDefinition, SimEvent } from '../../sim';
 import { RefereeTracker, type RefereePlacement } from '../arena/referee';
 import { DebugSkeletonActor } from '../placeholders/debugSkeleton';
 import { B, defaultRest, type Pose, type RestSkeleton, type WorldPose } from '../rig/skeleton';
-import { RefereeAnimator } from './pose';
+import { RefereeAnimator, type RefereeExtras } from './pose';
 import { dressReferee, type RefereeClothes } from './clothing';
 
 export { RefereeAnimator, STRIDE_M } from './pose';
-export type { RefereeFrame } from './pose';
+export type { RefereeFrame, RefereeExtras } from './pose';
 export { classifyVertices, dressReferee } from './clothing';
 
 /** A neutral official: 1.80 m, black shirt and trousers. */
@@ -215,9 +215,25 @@ export class RefereeActor {
     return this.placement ? this.animator.world : null;
   }
 
-  update(input: FrameInput, arena: ArenaSet, fighters: readonly WorldPose[], realDt: number): RefereePlacement | null {
+  /**
+   * `script` (the end of the bout, `finish/`): a placement to use instead of
+   * the set's, and scripted hands/legs on top of the gesture.
+   */
+  update(
+    input: FrameInput, arena: ArenaSet, fighters: readonly WorldPose[], realDt: number,
+    script?: { placement: RefereePlacement; extra: RefereeExtras } | null,
+  ): RefereePlacement | null {
     const rate = Math.max(0, input.playbackRate);
-    const simDt = input.discontinuity ? 0 : Math.max(0, realDt) * rate;
+    const simDt = input.discontinuity ? 0 : Math.max(0, realDt) * (script ? 1 : rate);
+    if (script && arenaReferee(arena) !== null) {
+      this.placement = script.placement;
+      this.body.setVisible(true);
+      const pose = this.animator.evaluate({
+        placement: script.placement, fighters, realDt, simDt, snap: input.discontinuity, extra: script.extra,
+      });
+      this.body.applyPose(pose);
+      return this.placement;
+    }
     let place = arenaReferee(arena);
     if (place === undefined) {
       // TickSnapshot satisfies the tracker's RefereeScene (it reads, never writes).

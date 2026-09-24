@@ -33,11 +33,15 @@ export interface LoadOptions {
   /** How often to sample the game plan, in simulated seconds. Default 1 s. */
   intentEverySeconds?: number;
   maxTicks?: number;
+  /** Called every `progressEveryTicks` simulated ticks (the worker reports it). */
+  onProgress?: (tick: number, round: number) => void;
+  progressEveryTicks?: number;
 }
 
 export function loadWatchBout(config: SimConfig, opts: LoadOptions = {}): WatchBout {
   const every = Math.max(1, Math.round((opts.intentEverySeconds ?? 1) * 10));
   const sim = createSim(config, { maxTicks: opts.maxTicks });
+  const progressEvery = Math.max(1, Math.round(opts.progressEveryTicks ?? 200));
   // Compact columnar frames (09 §4.5, sim/record/frames.ts); `run.frames`
   // is a read-only TickSnapshot[] view over them.
   const store = new FrameStore();
@@ -55,6 +59,7 @@ export function loadWatchBout(config: SimConfig, opts: LoadOptions = {}): WatchB
     // step, so a pre-step reading would report "no plan at all" for every
     // fighter and the panel would open on a lie.
     if (sim.tick === 1 || sim.tick % every === 0) sample();
+    if (opts.onProgress && sim.tick % progressEvery === 0) opts.onProgress(sim.tick, sim.round);
   }
   store.push(sim.snapshot());
   sample();
@@ -74,13 +79,31 @@ export function loadWatchBout(config: SimConfig, opts: LoadOptions = {}): WatchB
     frames,
   };
 
+  return watchBoutFromRun(config, run, intents);
+}
+
+/** A Watch bout from parts already computed (the worker sends the commentary). */
+export function assembleWatchBout(
+  config: SimConfig, run: WatchBout['run'], intents: IntentSample[], commentary: CommentaryLine[],
+): WatchBout {
   const params = resolveParams(config.paramOverrides);
   return {
     config,
     run,
     intents,
-    commentary: generateCommentary(run, { intents }),
+    commentary,
     fighters: config.fighters,
     runtimes: config.fighters.map((f) => deriveRuntime(f, params, { explain: false })),
   };
+}
+
+/**
+ * The Watch bout for a run that already has its frames (a freshly simulated
+ * one above, or a saved replay's frame cache, replay/archive.ts): the
+ * commentary and the fighters' runtimes are derived the same way either way.
+ */
+export function watchBoutFromRun(
+  config: SimConfig, run: WatchBout['run'], intents: IntentSample[],
+): WatchBout {
+  return assembleWatchBout(config, run, intents, generateCommentary(run, { intents }));
 }

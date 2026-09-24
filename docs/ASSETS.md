@@ -330,3 +330,15 @@ No CC0 skin-detail normal map exists in the Poly Haven catalogue (no skin textur
   street lot, 3 m tiles, darkened and overlaid with procedural paint, oil and damp patches.
 - The Poly Haven HDRIs are **not** used by the arena: its image-based lighting is painted from the
   set's own geometry (see docs/design/PHASE8_NOTES.md, "Arena").
+
+### finish-and-corner — referee and cornermen outfits, chest patch (runtime-generated)
+- **What**: the referee's shirt (collar, chest patch), slacks, belt and buckle, shoes and nitrile gloves,
+  and the cornermen's team shirts, track pants and sneakers (`src/presentation/referee/clothing.ts`,
+  `src/presentation/corner/crew.ts`). All geometry is cut at runtime from the wearer's own body mesh
+  (the character module's MakeHuman-derived body, recorded above) and tailored procedurally; colours and
+  fold shading are procedural materials. The chest patch is a canvas texture drawn at runtime with the text
+  "BOUT LAB" (this project's own name) in Barlow Condensed (`font.barlow-condensed`, OFL, recorded above).
+- **Licence id**: MIT (this repository). **Files**: none (runtime-generated). No new downloaded assets.
+- **Real marks**: none. No promotion's referee uniform, patch, logo or wording is reproduced.
+- **Motion capture**: the post-fight and corner staging uses no clips (procedural poses); the library is
+  unchanged.

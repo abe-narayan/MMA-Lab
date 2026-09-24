@@ -48,12 +48,17 @@ function config(seed: string): SimConfig {
  * ticks" breaks every time the AI improves.
  */
 function longRun(): ReturnType<typeof simulate> {
-  let best = simulate(config('transport-0'), { record: true });
-  for (let i = 1; i < 24 && best.ticks < 1500; i++) {
+  // Phase 9: the bout must also contain something the replay planner airs (a
+  // knockdown or a finish); after calibration a long bout is often a clean
+  // decision with neither, which left the replay tests nothing to offer.
+  const airable = (r: ReturnType<typeof simulate>): boolean => r.events.some((e) =>
+    (e.kind === 'knockdown' || e.kind === 'reversal' || e.kind === 'slam') && e.tick + 20 < r.ticks - 1);
+  let best: ReturnType<typeof simulate> | null = null;
+  for (let i = 0; i < 40 && (best === null || best.ticks < 1500); i++) {
     const next = simulate(config(`transport-${i}`), { record: true });
-    if (next.ticks > best.ticks) best = next;
+    if (airable(next) && (best === null || next.ticks > best.ticks)) best = next;
   }
-  return best;
+  return best ?? simulate(config('transport-0'), { record: true });
 }
 
 const RUN = longRun();

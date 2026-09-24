@@ -79,7 +79,8 @@ export function advanceBroadcast(
   const wasReplay = player.inInstantReplay;
   const key = replayKey(seq?.state);
   player.advance(dt);
-  seq?.update(player);
+  // The clock lets a due finish replay wait for the live post-fight picture.
+  seq?.update(player, dt);
   const jumped = player.frame < before
     || player.inInstantReplay !== wasReplay
     || replayKey(seq?.state) !== key;
@@ -140,4 +141,70 @@ export function manualReplayPlan(req: InstantReplayRequest, events: readonly Sim
     }],
     eventIndex: req.eventIndex,
   };
+}
+
+/** How much each kind of moment is worth replaying (higher first). */
+function momentScore(e: SimEvent): number {
+  switch (e.kind) {
+    case 'knockdown': return 100;
+    case 'submissionFinish': case 'refereeStoppage': return 90;
+    case 'slam': return 70;
+    case 'rocked': return 60;
+    case 'takedown': return (e as { detail?: { result?: string } }).detail?.result === 'success' ? 50 : 0;
+    case 'reversal': return 30;
+    case 'strike': {
+      const d = (e as { detail?: { result?: string; forceN?: number } }).detail;
+      return d?.result === 'landed' ? Math.min(45, (d.forceN ?? 0) / 60) : 0;
+    }
+    default: return 0;
+  }
+}
+
+/**
+ * The viewer's "replay the last N seconds" (R): the replay camera frames the
+ * moment that matters in that window rather than the pair at random — the
+ * knockdown, the slam, the takedown or the hardest landed shot — focusing on
+ * the man it happened to, then a second, wider angle of the same moment
+ * (overhead on the ground, the reverse platform standing). With nothing
+ * notable in the window it is a single slow cageside angle of the pair.
+ * Slow motion either way. Pure: reads the events (and the frame at the
+ * moment, for the ground check); never writes.
+ */
+export function lastSecondsReplayPlan(
+  fromTick: number, toTick: number, events: readonly SimEvent[],
+  frameAt?: (tick: number) => TickSnapshot | null | undefined,
+  speed = 0.3,
+): ReplayPlan {
+  const seconds = Math.round((toTick - fromTick) / 10);
+  let best = -1;
+  let bestScore = 0;
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (e.tick <= fromTick) continue;
+    if (e.tick > toTick) break;
+    const s = momentScore(e);
+    // Later wins ties: the most recent big moment.
+    if (s > 0 && s >= bestScore) {
+      best = i;
+      bestScore = s;
+    }
+  }
+  const req: InstantReplayRequest = { fromTick, toTick, speed, label: `Last ${seconds}s`, eventIndex: best };
+  const plan = manualReplayPlan(req, events, `LAST ${seconds} SECONDS`);
+  if (best < 0) return plan;
+  const e = events[best];
+  const key = e.tick;
+  const onGround = frameAt?.(key)?.engagements.some((g) => g.kind === 'ground') ?? false;
+  const strikeLike = e.kind === 'strike' || e.kind === 'knockdown' || e.kind === 'rocked';
+  plan.keyTick = key;
+  plan.keyTime = key * 0.1;
+  plan.label = `${req.label}: ${e.text || e.kind}`;
+  plan.segments = [
+    { shot: 'cageside', fromTick, toTick, speed, dof: 0.7, focus: strikeLike ? 'target' : 'pair', pushIn: 0.18 },
+    {
+      shot: onGround ? 'overhead' : 'reverse', fromTick: Math.max(fromTick, key - 12), toTick: Math.min(toTick, key + 10),
+      speed: Math.max(0.1, speed - 0.05), dof: 0.5, focus: 'pair', pushIn: 0.1,
+    },
+  ];
+  return plan;
 }

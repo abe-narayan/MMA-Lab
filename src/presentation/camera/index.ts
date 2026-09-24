@@ -30,7 +30,7 @@ export {
 } from './planner';
 export type { ShotPlan, ShotPlanEntry, BlockedCut, CutReason, Situation } from './planner';
 export {
-  planReplays, replayDuration, segmentRequest, ReplaySequencer, REPLAY_RULES,
+  planReplays, replayDuration, segmentRequest, ReplaySequencer, REPLAY_RULES, FINISH_REPLAY_DELAY_S,
 } from './replay';
 export type {
   ReplayPlan, ReplaySegment, ReplayState, ReplayTransport, ReplayRequest, ReplayTrigger,

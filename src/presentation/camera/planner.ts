@@ -13,6 +13,7 @@
  * finished recording and a bout being streamed.
  */
 import type { SimEvent, TickSnapshot } from '../../sim';
+import { finishResult, finishTimeline, postShots, type PostShot } from '../finish/timeline';
 import { RefereeTracker } from '../arena/referee';
 import {
   type CameraArena, insideWall, nearestPanelCentre, panelCentres, postClearance, wallDistanceAt,
@@ -837,8 +838,38 @@ export class ShotPlanner {
    * the post-roll (the shots shown while the playhead rests on the final
    * frame): the winner, then a sweeping jib wide.
    */
-  finish(): ShotPlan {
+  finish(post: readonly PostShot[] | null = null): ShotPlan {
     const frame = this.lastFrame;
+    if (frame && post && post.length > 0) {
+      // The post-fight staging's own beats (`finish/timeline.ts`): the winner,
+      // the wide as they regroup, the announcement on the hard camera, the
+      // winner close, the closing wide.
+      let t = this.lastTick + 1;
+      const p = this.pending;
+      if (p) {
+        const cur = this.cur;
+        t = Math.max(t, p.earliest);
+        if (!p.forced && cur) t = Math.max(t, cur.startTick + MIN_SHOT_TICKS);
+        while (this.strikes.near(t)) t++;
+        this.commit(p, frame, t);
+        this.pending = null;
+      }
+      const end = this.lastTick;
+      const first = this.entries.length;
+      for (const shot of post) {
+        const tick = Math.max(end + Math.round(shot.t / TICK_S), (this.cur?.startTick ?? 0) + MIN_SHOT_TICKS);
+        this.commit({
+          kind: shot.kind, reason: 'post', forced: false, priority: 0, earliest: 0, deadline: Infinity,
+          subjects: shot.subjects,
+        }, frame, tick);
+      }
+      // A wide lasts until the next beat (the last one its usual 24 s).
+      for (let i = first; i < this.entries.length - 1; i++) {
+        const e = this.entries[i]!;
+        if (e.kind === 'jib') e.durationS = Math.max(3, this.entries[i + 1]!.startT - e.startT);
+      }
+      return { entries: this.entries, lastTick: this.lastTick, blocked: this.blocked };
+    }
     if (frame) {
       let t = this.lastTick + 1;
       const p = this.pending;
@@ -897,7 +928,9 @@ export function planShots(
     first = false;
     planner.step(frame, byTick, ref);
   }
-  return planner.finish();
+  // The post-roll follows the post-fight staging when the bout ended in the recording.
+  const result = opts.arena.shape === 'unbounded' ? null : finishResult(frames, events);
+  return planner.finish(result ? postShots(result, finishTimeline(result)) : null);
 }
 
 /** Index of the plan entry on air at tick-time `t` (seconds). */

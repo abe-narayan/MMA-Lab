@@ -415,6 +415,9 @@ export function segmentRequest(plan: ReplayPlan, i: number): ReplayRequest {
  * animation frame, right after the transport has advanced, so a finished
  * angle hands straight to the next without a live frame in between.
  */
+/** Live seconds of post-fight picture before the finish replay airs (`finish/timeline.ts` replayAt). */
+export const FINISH_REPLAY_DELAY_S = 9;
+
 export class ReplaySequencer {
   private active: { plan: ReplayPlan; index: number } | null = null;
   private lastTick = -1;
@@ -422,8 +425,22 @@ export class ReplaySequencer {
   private wipes = 0;
   /** Air replays automatically when the playhead crosses their air tick. */
   auto = true;
+  /**
+   * Live seconds the finish replay waits at the end before airing (the
+   * post-fight staging shows the wave-off and the celebration first, and its
+   * clock pauses while the replay plays: `finish/timeline.ts` `replayAt`).
+   * Only when the host passes its clock to `update`; 0 airs it at once.
+   */
+  finishDelayS = FINISH_REPLAY_DELAY_S;
+  /** The finish replay, due and waiting out `finishDelayS` at the last frame. */
+  private held: { plan: ReplayPlan; waited: number; tick: number } | null = null;
 
   constructor(readonly plans: readonly ReplayPlan[]) {}
+
+  /** True while a due finish replay waits for its moment (the host keeps calling `update`). */
+  get holding(): boolean {
+    return this.held !== null;
+  }
 
   get state(): ReplayState | null {
     const a = this.active;
@@ -455,11 +472,25 @@ export class ReplaySequencer {
   /** Forget what has aired (after a seek backwards the replays air again). */
   reset(tick: number): void {
     this.active = null;
+    this.held = null;
     this.lastTick = tick;
     for (const p of this.plans) if (p.airTick > tick) this.aired.delete(p.id);
   }
 
-  update(t: ReplayTransport): void {
+  update(t: ReplayTransport, dtS?: number): void {
+    const held = this.held;
+    if (held) {
+      if (t.inInstantReplay || t.tick !== held.tick || !this.auto) {
+        this.held = null;
+      } else {
+        held.waited += Math.max(0, dtS ?? 0);
+        if (held.waited >= this.finishDelayS) {
+          this.held = null;
+          this.play(held.plan, t);
+        }
+        return;
+      }
+    }
     const a = this.active;
     if (a) {
       if (t.inInstantReplay) return;
@@ -487,6 +518,13 @@ export class ReplaySequencer {
       return;
     }
     const due = this.plans.find((p) => !this.aired.has(p.id) && p.airTick > prev && p.airTick <= tick);
-    if (due) this.play(due, t);
+    if (!due) return;
+    if (due.airReason === 'boutEnd' && dtS !== undefined && this.finishDelayS > 0) {
+      // Live first: the wave-off and the celebration, then the replay.
+      this.aired.add(due.id);
+      this.held = { plan: due, waited: 0, tick };
+      return;
+    }
+    this.play(due, t);
   }
 }

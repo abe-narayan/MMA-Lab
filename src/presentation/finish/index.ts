@@ -1,0 +1,580 @@
+/**
+ * THE POST-FIGHT STAGING — the bodies after the bout, from the script.
+ *
+ * `timeline.ts` says who goes where and when (pure). This module turns it
+ * into pictures while the playhead rests on the last recorded frame:
+ *
+ *   - the post clock: seconds of live picture at the end. It runs while the
+ *     playhead rests on the last frame, pauses while an instant replay is on
+ *     air (the finish replay airs part-way through, `timeline.replayAt`) and
+ *     starts again from zero after any seek;
+ *   - the fighters: the animator keeps evaluating the last frame with its
+ *     clock advanced by the post clock (so breathing, blinks and the lying
+ *     pose carry on), and this layer blends scripted poses over it
+ *     (`people/figure.ts`: walking away with the fighter gait, arms up to the
+ *     crowd, sitting up and getting up off the canvas, standing on the marks,
+ *     the raised arm);
+ *   - the referee: a scripted placement (handed to the arena set so his
+ *     contact shadow follows) and scripted hands: waving it off, down on a knee
+ *     beside the loser, then the wrists — palm centres solved exactly onto the
+ *     fighters' wrist joints (`grip.ts`), low, then the winner's raised.
+ *
+ * Deterministic: the paths, marks and timing are pure functions of the
+ * recording and the post clock. What the layer captures when the post-roll
+ * starts (where the loser's body lies, where the referee was standing) comes
+ * from poses that are themselves functions of the recording. Presentation
+ * only: nothing here reads or writes sim state.
+ */
+import type { SimEvent, TickSnapshot } from '../../sim';
+import type { BoutPresentation, FrameInput } from '../contract';
+import {
+  B, blendPose, copyPose, createPose, createWorldPose, forwardKinematics,
+  type Pose, type RestSkeleton, type WorldPose,
+} from '../rig/skeleton';
+import type { RefereeGesture, RefereePlacement } from '../arena/referee';
+import type { RefereeExtras } from '../referee/pose';
+import { FigurePoser, floorSitPose, type FigureCue, type HandGoal, type V3 } from '../people/figure';
+import { makeCameraArena } from '../camera/geometry';
+import { palmTargetFor } from './grip';
+import {
+  RAISE_S, celebrationSpot, ceremonyMarks, displayedEnd, finishResult, finishTimeline, keepInside,
+  samplePath, separatePoints, smooth, toward,
+  type CeremonyMarks, type FinishResult, type FinishTimeline, type Leg, type P2,
+} from './timeline';
+
+export * from './timeline';
+export * from './grip';
+
+/** The referee's rest when none is given (a 1.80 m official). */
+const REF_K = 1.8 / 1.733;
+
+interface Lying {
+  hips: P2;
+  chest: P2;
+  /** Where his legs point (hips to feet). */
+  facing: number;
+  points: P2[];
+}
+
+interface Script {
+  /** Fighter indices: `a` stands on the winner's mark (fighter 0 when nobody won). */
+  a: number;
+  b: number;
+  marks: CeremonyMarks;
+  aLegs: Leg[];
+  bLegs: Leg[];
+  refLegs: Leg[];
+  /** The winner's celebration spot (stoppage) or where `a` goes to (decision). */
+  cel: P2;
+  lying: Lying | null;
+  /** Where the loser stands up. */
+  up: P2;
+  attend: P2 | null;
+  /** The downed / hurt fighter's chest (what the referee reaches toward). */
+  chest: P2;
+}
+
+export interface FinishRefereeScript {
+  placement: RefereePlacement;
+  extra: RefereeExtras;
+}
+
+const outward = (p: P2): number => (Math.hypot(p[0], p[1]) > 0.05 ? Math.atan2(p[0], p[1]) : 0);
+
+export class FinishStage {
+  result: FinishResult | null = null;
+  timeline: FinishTimeline | null = null;
+  /** Seconds of live post-roll so far, or null outside it. */
+  postTime: number | null = null;
+  private lastTick = Infinity;
+  private frames: readonly TickSnapshot[] = [];
+  private clockS = 0;
+  private wasReplay = false;
+  private atEndBefore = false;
+  private script: Script | null = null;
+  private refStart: RefereePlacement | null = null;
+  private readonly posers: FigurePoser[];
+  private readonly scratch: Pose[];
+  private readonly worlds: WorldPose[];
+  private readonly sit: Pose;
+  private readonly sitWorld: WorldPose;
+  private refPlacement: RefereePlacement | null = null;
+  private refGesture: RefereeGesture = 'watch';
+  /** How far the fighters' held hands are on their wrist goals this frame (0..1). */
+  private gripW = 0;
+  private readonly ca;
+  readonly hardCamera: V3;
+
+  constructor(private readonly bout: BoutPresentation, private readonly rests: readonly RestSkeleton[], private readonly refRest: RestSkeleton | null = null) {
+    this.posers = rests.map((r) => new FigurePoser(r));
+    this.scratch = rests.map(() => createPose());
+    this.worlds = rests.map(() => createWorldPose());
+    this.sit = createPose();
+    this.sitWorld = createWorldPose();
+    this.ca = makeCameraArena(bout.arena, null);
+    const az = this.ca.mainAzimuth;
+    const r = this.ca.mainRadius || 8;
+    this.hardCamera = [Math.sin(az) * r, 4.3, Math.cos(az) * r];
+  }
+
+  /** Once per bout: the result and the timing of the script. */
+  setRecording(frames: readonly TickSnapshot[], events: readonly SimEvent[]): void {
+    this.frames = frames;
+    const oneOnOne = this.bout.fighters.length === 2 && this.rests.length === 2 && this.bout.arena.shape !== 'unbounded';
+    this.result = oneOnOne ? finishResult(frames, events) : null;
+    this.timeline = this.result ? finishTimeline(this.result) : null;
+    this.lastTick = frames.length ? frames[frames.length - 1]!.tick : Infinity;
+    this.script = null;
+    this.clockS = 0;
+    this.postTime = null;
+  }
+
+  /**
+   * Advance the post clock for this frame. Returns the post time (seconds of
+   * live picture since the end) or null when the post-roll is not showing.
+   */
+  clock(input: FrameInput, realDt: number): number | null {
+    if (!this.timeline) { this.postTime = null; return null; }
+    if (input.replay) {
+      this.wasReplay = true;
+      this.postTime = null;
+      return null;
+    }
+    const atEnd = input.frame.tick >= this.lastTick;
+    if (!atEnd) {
+      this.clockS = 0;
+      this.atEndBefore = false;
+      this.wasReplay = false;
+      this.script = null;
+      this.postTime = null;
+      return null;
+    }
+    if (!this.atEndBefore || (input.discontinuity && !this.wasReplay)) {
+      // Arrived at the end (by playing or seeking): the post-roll starts.
+      this.clockS = 0;
+      this.script = null;
+    } else {
+      this.clockS += Math.max(0, Math.min(0.25, realDt));
+    }
+    this.atEndBefore = true;
+    this.wasReplay = false;
+    this.postTime = this.clockS;
+    return this.clockS;
+  }
+
+  /** The animator's input during the post-roll: the last frame, its clock advanced. */
+  animatorInput(input: FrameInput): FrameInput {
+    const t = this.postTime;
+    if (t === null) return input;
+    return { ...input, next: null, alpha: 0, simTime: input.simTime + t };
+  }
+
+  /**
+   * Overwrite the animator's `poses` for the post-roll. `referee` is where the
+   * official stands right now (before this frame's script), used once as the
+   * start of his path.
+   */
+  apply(poses: Pose[], referee: RefereePlacement | null): boolean {
+    const t = this.postTime;
+    const tl = this.timeline;
+    const r = this.result;
+    this.refPlacement = null;
+    this.gripW = 0;
+    if (t === null || !tl || !r || poses.length < 2) return false;
+    if (!this.script) this.script = this.build(poses, referee);
+    const sc = this.script;
+    if (!sc) return false;
+
+    const stoppage = tl.kind === 'stoppage';
+    // ---- where everyone is -------------------------------------------------
+    const pa = samplePath(sc.aLegs, t);
+    const pb = samplePath(sc.bLegs, t);
+    const pr = samplePath(sc.refLegs, t);
+    const holding = t >= tl.hold - 0.25;
+    const bStanding = !sc.lying || (tl.standUp !== null && t >= tl.standUp[1]);
+    const attending = !!tl.attend && t >= tl.attend[0] && t <= tl.attend[1];
+    const pts: P2[] = [[pr.x, pr.z], [pa.x, pa.z]];
+    const fixed = [holding || attending, holding];
+    if (bStanding) { pts.push([pb.x, pb.z]); fixed.push(holding); }
+    const obstacles = sc.lying && !bStanding ? sc.lying.points.map((p) => ({ p, r: 0.42 })) : [];
+    const sep = separatePoints(pts, fixed, 0.58, obstacles);
+    // The referee may kneel close to the downed man; the obstacles keep the others off him.
+    const refXZ = attending ? pts[0]! : sep[0]!;
+    const aXZ = sep[1]!;
+    const bXZ = bStanding ? sep[2]! : [pb.x, pb.z] as P2;
+
+    // ---- the grips (hold and raise) ---------------------------------------------
+    const m = sc.marks;
+    const F: V3 = [Math.sin(m.facing), 0, Math.cos(m.facing)];
+    const raiseE = tl.raises ? smooth((t - tl.raise) / RAISE_S) : 0;
+    const gripW = smooth((t - (tl.hold - 0.6)) / 0.6);
+    this.gripW = t >= tl.hold - 0.6 ? gripW : 0;
+    const drawRaise = r.kind === 'decision' && r.winner < 0;
+    const G = (fighter: number, side: 1 | -1, up: boolean): V3 => {
+      const lo = this.gripLow(fighter, side);
+      if (!up || raiseE <= 0) return lo;
+      const hi = this.gripHigh(fighter, side);
+      const bulge = Math.sin(Math.PI * raiseE) * 0.12;
+      return [
+        lo[0] + (hi[0] - lo[0]) * raiseE + F[0] * bulge,
+        lo[1] + (hi[1] - lo[1]) * raiseE,
+        lo[2] + (hi[2] - lo[2]) * raiseE + F[2] * bulge,
+      ];
+    };
+    // `a` holds his inner (referee-side) hand on side s (body-left terms), `b` on -s.
+    const s = m.side;
+    const aRaised = tl.raises && (r.winner >= 0 || drawRaise);
+    const bRaised = drawRaise;
+
+    // ---- fighter a: the winner (or fighter 0) --------------------------------------
+    {
+      const i = sc.a;
+      const cue = this.baseCue(pa, aXZ, t);
+      let w = smooth(t / 0.8);
+      const hands: [HandGoal | null, HandGoal | null] = [null, null];
+      const cel = tl.celebrate;
+      const upW = smooth((t - (tl.walkOff[0] + 0.4)) / 0.9) * (1 - smooth((t - (cel[1] - 0.2)) / 0.7));
+      if (upW > 0) {
+        const amp = t > cel[0] ? 0.5 + 0.5 * Math.sin(1.3 * (t - cel[0]) - Math.PI / 2) : 0;
+        const ph = 5.2 * t;
+        hands[0] = { kind: 'up', w: upW, spread: 0.45, pump: amp * (0.5 + 0.5 * Math.sin(ph)) };
+        hands[1] = { kind: 'up', w: upW, spread: 0.45, pump: amp * (0.5 + 0.5 * Math.sin(ph + Math.PI)) };
+        if (t > cel[0] && t < cel[1]) {
+          // Turn to the crowd: a slow sweep either side of facing out.
+          const u = (t - cel[0]) / (cel[1] - cel[0]);
+          cue.facing = outward(sc.cel) + 0.75 * Math.sin(2 * Math.PI * u) * smooth((t - cel[0]) / 0.8);
+          cue.look = [sc.cel[0] + Math.sin(cue.facing) * 9, 3.6, sc.cel[1] + Math.cos(cue.facing) * 9];
+        }
+      }
+      if (t >= tl.hold - 0.6) {
+        const inner = s > 0 ? 0 : 1;
+        hands[inner] = { kind: 'at', p: G(i, s, aRaised), w: gripW, pole: this.innerPole(aXZ, m, s) };
+        const outer = 1 - inner;
+        const outW = aRaised && !drawRaise ? smooth((t - (tl.raise + 0.3)) / 0.6) : 0;
+        hands[outer] = outW > 0 ? { kind: 'up', w: outW, spread: 0.35, pump: 0.15 } : null;
+        cue.look = raiseE > 0.5 && aRaised ? [aXZ[0] + F[0] * 6, 2.6, aXZ[1] + F[2] * 6] : [aXZ[0] + F[0] * 8, 1.75, aXZ[1] + F[2] * 8];
+      }
+      cue.hands = hands;
+      if (!stoppage && t < 0.8) w = smooth(t / 0.8);
+      this.pose(i, cue, poses, w);
+      if (stoppage || aRaised) poses[i]!.face[3] = 0.25 + 0.25 * Math.sin(t * 2.3); // breathing hard, mouth open
+    }
+
+    // ---- fighter b: the loser (or fighter 1) ------------------------------------------
+    {
+      const i = sc.b;
+      const cue = this.baseCue(pb, bXZ, t);
+      cue.look = [bXZ[0] + Math.sin(cue.facing) * 1.6, 0.2, bXZ[1] + Math.cos(cue.facing) * 1.6];
+      cue.bend = 0.12;
+      const hands: [HandGoal | null, HandGoal | null] = [null, null];
+      let w = smooth(t / 0.8);
+      if (!stoppage) {
+        // A decision: he celebrates too (he thinks he won), then walks in.
+        const cel = tl.celebrate;
+        const upW = smooth((t - (tl.walkOff[0] + 0.5)) / 0.9) * (1 - smooth((t - (cel[1] - 0.3)) / 0.7));
+        if (upW > 0) {
+          hands[0] = { kind: 'up', w: upW * 0.9, spread: 0.5, pump: 0.2 };
+          hands[1] = { kind: 'up', w: upW * 0.9, spread: 0.5, pump: 0.2 };
+          cue.look = [bXZ[0] + Math.sin(cue.facing) * 9, 3.4, bXZ[1] + Math.cos(cue.facing) * 9];
+        }
+        cue.bend = 0;
+      } else if (tl.bentOver) {
+        // Hurt on his feet: bent over, hands on his knees, then straightens.
+        const bo = smooth((t - tl.bentOver[0]) / 0.8) * (1 - smooth((t - (tl.bentOver[1] - 0.9)) / 0.9));
+        cue.bend = 0.12 + 0.7 * bo;
+        cue.crouch = 0.22 * bo;
+        hands[0] = { kind: 'knee', w: bo };
+        hands[1] = { kind: 'knee', w: bo };
+        w = smooth((t - 0.2) / 0.8);
+      } else if (bStanding && tl.standUp && t < tl.regroup[1] - 1.5) {
+        // Up, catching his breath: hands on hips.
+        const hw = smooth((t - tl.standUp[1]) / 0.6) * (1 - smooth((t - (tl.regroup[1] - 2.6)) / 0.8));
+        hands[0] = { kind: 'hips', w: hw * 0.9 };
+        hands[1] = { kind: 'hips', w: hw * 0.9 };
+      }
+      if (t >= tl.hold - 0.6) {
+        const inner = s > 0 ? 1 : 0;
+        hands[inner] = { kind: 'at', p: G(i, (-s) as 1 | -1, bRaised), w: gripW, pole: this.innerPole(bXZ, m, (-s) as 1 | -1) };
+        cue.look = bRaised ? [bXZ[0] + F[0] * 8, 1.75, bXZ[1] + F[2] * 8] : [bXZ[0] + F[0] * 3, 0.9, bXZ[1] + F[2] * 3];
+        cue.bend = bRaised ? 0 : 0.08;
+      }
+      cue.hands = hands;
+      if (sc.lying && stoppage && tl.sitUp && tl.standUp && t < tl.standUp[1]) {
+        this.poseGettingUp(i, sc, tl, t, cue, poses);
+      } else {
+        this.pose(i, cue, poses, w);
+      }
+    }
+
+    // ---- the referee -------------------------------------------------------------
+    let gesture: RefereeGesture = 'watch';
+    let focusId = -1;
+    let crouch = 0;
+    if (tl.wave && t < tl.wave[1]) { gesture = 'waveOff'; focusId = sc.b; crouch = sc.lying ? 0.25 : 0.05; }
+    else if (attending) { gesture = 'attend'; focusId = sc.b; }
+    if (t >= tl.hold - 0.3) { gesture = raiseE > 0 ? 'raise' : 'present'; focusId = raiseE > 0 ? sc.a : -1; }
+    this.refGesture = gesture;
+    const facing = attending || gesture === 'waveOff' ? pr.facing : pr.facing;
+    this.refPlacement = {
+      present: true, x: refXZ[0], z: refXZ[1], facing, crouch, gesture, focusId, count: 0,
+    };
+    return true;
+  }
+
+  /** The referee's scripted placement this frame (after `apply`), or null. */
+  refereePlacement(): RefereePlacement | null {
+    return this.refPlacement;
+  }
+
+  /**
+   * The referee's script for this frame, from the fighters' final world poses
+   * (after `apply` and forward kinematics): his placement, the wave, the knee,
+   * the hand on the loser and the grips on both wrists.
+   */
+  refereeScript(worlds: readonly WorldPose[]): FinishRefereeScript | null {
+    const t = this.postTime;
+    const tl = this.timeline;
+    const sc = this.script;
+    const place = this.refPlacement;
+    if (t === null || !tl || !sc || !place) return null;
+    const extra: RefereeExtras = { time: t };
+    if (tl.wave) extra.wave = smooth(t / 0.25) * (1 - smooth((t - (tl.wave[1] - 0.45)) / 0.45));
+    const fwd: V3 = [Math.sin(place.facing), 0, Math.cos(place.facing)];
+    const left: V3 = [Math.cos(place.facing), 0, -Math.sin(place.facing)];
+    if (tl.attend && t >= tl.attend[0] - 0.3 && t <= tl.attend[1] + 0.3) {
+      const lw = worlds[sc.b];
+      if (sc.lying) {
+        extra.kneel = smooth((t - (tl.attend[0] + 0.3)) / 0.6) * (1 - smooth((t - (tl.attend[1] - 0.5)) / 0.5));
+      }
+      if (lw) {
+        // One hand on him: his near shoulder once he is up on his seat, over his chest while he is down.
+        const sat = !sc.lying || (tl.sitUp !== null && t >= tl.sitUp[1] - 0.2);
+        const target = this.nearShoulder(lw, place, sat);
+        const near = (target[0] - place.x) * left[0] + (target[2] - place.z) * left[2] > 0 ? 0 : 1;
+        const reach: [V3 | null, V3 | null] = [null, null];
+        reach[near] = target;
+        // The other hand on his own knee (kneeling) or in front of him.
+        reach[1 - near] = [
+          place.x + fwd[0] * 0.3 + left[0] * (near === 0 ? -0.18 : 0.18),
+          sc.lying ? 0.55 : 0.95,
+          place.z + fwd[2] * 0.3 + left[2] * (near === 0 ? -0.18 : 0.18),
+        ];
+        extra.reach = reach;
+      }
+    }
+    // In the centre he looks out at the hard camera (the crowd), not at his feet.
+    if (t >= tl.regroup[1] - 0.6) extra.look = [this.hardCamera[0], 1.7, this.hardCamera[2]];
+    if (t >= tl.hold - 0.8) {
+      // The wrists: reached for (smoothed) while the fighters' hands come in,
+      // then held exactly (palm centre on the wrist) from the hold on.
+      const m = sc.marks;
+      const s = m.side;
+      const palms: [V3 | null, V3 | null] = [null, null];
+      // Referee hand toward a (the winner's side: his body side -s), toward b (side s).
+      for (const [fi, refSide, fighterSide] of [[sc.a, (-s) as 1 | -1, s], [sc.b, s, (-s) as 1 | -1]] as const) {
+        const w = worlds[fi];
+        if (!w) continue;
+        const hand = fighterSide > 0 ? B.lHand : B.rHand;
+        const wrist: V3 = [w.pos[hand * 3], w.pos[hand * 3 + 1], w.pos[hand * 3 + 2]];
+        palms[refSide > 0 ? 0 : 1] = palmTargetFor(wrist, this.refShoulder(refSide));
+      }
+      if (this.gripW >= 0.999) extra.grips = palms;
+      else extra.reach = palms;
+    }
+    return { placement: place, extra };
+  }
+
+  // -------------------------------------------------------------------------
+
+  private baseCue(p: { x: number; z: number; facing: number; walked: number; speed: number }, xz: P2, t: number): FigureCue {
+    return { x: xz[0], z: xz[1], facing: p.facing, walked: p.walked, speed: p.speed, time: t, style: 'fighter' };
+  }
+
+  private pose(i: number, cue: FigureCue, poses: Pose[], w: number): void {
+    const out = poses[i];
+    if (!out || w <= 0) return;
+    const face = new Float32Array(out.face);
+    this.posers[i]!.evaluate(cue, this.scratch[i]!, this.worlds[i]!);
+    this.scratch[i]!.face.set(face);
+    blendPose(out, out, this.scratch[i]!, Math.min(1, w));
+  }
+
+  /** The loser from the canvas to his feet: lying (the animator) → sitting → a knee → standing. */
+  private poseGettingUp(i: number, sc: Script, tl: FinishTimeline, t: number, cue: FigureCue, poses: Pose[]): void {
+    const out = poses[i]!;
+    const ly = sc.lying!;
+    const sitUp = tl.sitUp!;
+    const up = tl.standUp!;
+    const rest = this.rests[i]!;
+    if (t < sitUp[0]) return; // still down: the animator's lying pose
+    const breath = Math.sin(t * 2.2);
+    const slump = 1 - 0.6 * smooth((t - sitUp[1]) / 2);
+    floorSitPose(this.sit, this.sitWorld, rest, ly.hips[0], ly.hips[1], ly.facing, slump, breath);
+    this.sit.face.set(out.face);
+    if (this.result?.ko) this.sit.face[5] = Math.max(this.sit.face[5]!, 0.4 * slump);
+    if (t < up[0]) {
+      blendPose(out, out, this.sit, smooth((t - sitUp[0]) / (sitUp[1] - sitUp[0])));
+      return;
+    }
+    // Up: over a knee, then standing.
+    const kneelEnd = up[0] + 0.8;
+    const k = t < kneelEnd ? 1 : 1 - smooth((t - kneelEnd) / (up[1] - kneelEnd));
+    const c: FigureCue = {
+      ...cue, x: sc.up[0], z: sc.up[1], facing: ly.facing, walked: 0, speed: 0, kneel: k, bend: 0.35 * k + 0.12,
+      hands: [{ kind: 'knee', w: k }, { kind: 'knee', w: 0.6 * k }],
+    };
+    this.posers[i]!.evaluate(c, this.scratch[i]!, this.worlds[i]!);
+    this.scratch[i]!.face.set(out.face);
+    if (t < kneelEnd) {
+      copyPose(out, this.sit);
+      blendPose(out, out, this.scratch[i]!, smooth((t - up[0]) / 0.8));
+    } else {
+      copyPose(out, this.scratch[i]!);
+    }
+  }
+
+  /** Where the referee's hand goes on the loser: his near shoulder (up) or over his chest (down). */
+  private nearShoulder(w: WorldPose, place: RefereePlacement, up: boolean): V3 {
+    if (!up) {
+      const c = B.spine2 * 3;
+      return [w.pos[c] + (place.x - w.pos[c]) * 0.2, w.pos[c + 1] + 0.28, w.pos[c + 2] + (place.z - w.pos[c + 2]) * 0.2];
+    }
+    const l = B.lArm * 3;
+    const r = B.rArm * 3;
+    const dl = Math.hypot(w.pos[l] - place.x, w.pos[l + 2] - place.z);
+    const dr = Math.hypot(w.pos[r] - place.x, w.pos[r + 2] - place.z);
+    const j = dl < dr ? l : r;
+    return [w.pos[j], w.pos[j + 1] + 0.07, w.pos[j + 2]];
+  }
+
+  /** Estimated shoulder (upper-arm head) of the referee standing on the centre mark; side +1 = his left. */
+  private refShoulder(side: 1 | -1): V3 {
+    const m = this.script!.marks;
+    const rr = this.refRest;
+    const k = rr ? rr.statureM / 1.733 : REF_K;
+    const x = rr ? Math.abs(rr.head[B.lArm * 3]) : 0.175 * k;
+    const y = (rr ? rr.head[B.lArm * 3 + 1] : 1.403 * k) - 0.03 * k;
+    const f = m.facing;
+    return [m.centre[0] + Math.cos(f) * side * x + Math.sin(f) * 0.02, y, m.centre[1] - Math.sin(f) * side * x + Math.cos(f) * 0.02];
+  }
+
+  /** Estimated shoulder of fighter `i` standing on his mark, arm on body side `side`. */
+  private fighterShoulder(i: number, side: 1 | -1): V3 {
+    const m = this.script!.marks;
+    const rest = this.rests[i]!;
+    const at = i === this.script!.a ? m.winner : m.loser;
+    const x = Math.abs(rest.head[B.lArm * 3]);
+    const k = rest.statureM / 1.733;
+    const y = rest.head[B.lArm * 3 + 1] - 0.04 * k;
+    const f = m.facing;
+    return [at[0] + Math.cos(f) * side * x + Math.sin(f) * 0.05 * k, y, at[1] - Math.sin(f) * side * x + Math.cos(f) * 0.05 * k];
+  }
+
+  private armOf(rest: RestSkeleton | null, k = REF_K): number {
+    return rest ? rest.length[B.lArm] + rest.length[B.lForeArm] : 0.486 * k;
+  }
+
+  /** The wrist point held low (hanging hands, between the referee and fighter `i`). */
+  private gripLow(i: number, side: 1 | -1): V3 {
+    const A = this.refShoulder((-side) as 1 | -1);
+    const Bs = this.fighterShoulder(i, side);
+    const reach = 0.9 * Math.min(this.armOf(this.refRest), this.armOf(this.rests[i]!));
+    const f = this.script!.marks.facing;
+    const half = Math.hypot(A[0] - Bs[0], A[2] - Bs[2]) / 2;
+    const dy = Math.sqrt(Math.max(0.01, reach * reach - half * half - 0.1 * 0.1));
+    return [(A[0] + Bs[0]) / 2 + Math.sin(f) * 0.1, Math.min(A[1], Bs[1]) - dy, (A[2] + Bs[2]) / 2 + Math.cos(f) * 0.1];
+  }
+
+  /** The wrist point raised overhead between the referee's shoulder and fighter `i`'s. */
+  private gripHigh(i: number, side: 1 | -1): V3 {
+    const A = this.refShoulder((-side) as 1 | -1);
+    const Bs = this.fighterShoulder(i, side);
+    const reach = 0.9 * Math.min(this.armOf(this.refRest), this.armOf(this.rests[i]!));
+    const f = this.script!.marks.facing;
+    const half = Math.hypot(A[0] - Bs[0], A[2] - Bs[2]) / 2;
+    const dy = Math.sqrt(Math.max(0.01, reach * reach - half * half - 0.08 * 0.08));
+    return [(A[0] + Bs[0]) / 2 + Math.sin(f) * 0.08, Math.min(A[1], Bs[1]) + dy, (A[2] + Bs[2]) / 2 + Math.cos(f) * 0.08];
+  }
+
+  /** Elbow pole for a fighter's held arm: out from his side, a little back. */
+  private innerPole(at: P2, m: CeremonyMarks, side: 1 | -1): V3 {
+    const f = m.facing;
+    return [at[0] + Math.cos(f) * side * 0.9 - Math.sin(f) * 0.3, 1.0, at[1] - Math.sin(f) * side * 0.9 - Math.cos(f) * 0.3];
+  }
+
+  /** Build the script once, when the post-roll starts. */
+  private build(poses: Pose[], referee: RefereePlacement | null): Script | null {
+    const r = this.result!;
+    const tl = this.timeline!;
+    const arena = this.bout.arena;
+    const ends = displayedEnd(this.frames);
+    if (!ends) return null;
+    const a = r.winner >= 0 ? r.winner : 0;
+    const b = r.winner >= 0 ? r.loser : 1;
+    const A0 = ends[a]!;
+    const B0 = ends[b]!;
+    const marks = ceremonyMarks(arena, A0, B0);
+    // The downed fighter as the animator lays him (it keeps evaluating the last frame).
+    let lying: Lying | null = null;
+    if (tl.kind === 'stoppage' && r.loserDown) {
+      const w = this.worlds[b]!;
+      forwardKinematics(w, poses[b]!, this.rests[b]!);
+      const P = (bone: number): P2 => [w.pos[bone * 3], w.pos[bone * 3 + 2]];
+      const hips = P(B.hips);
+      const feet: P2 = [(w.pos[B.lFoot * 3] + w.pos[B.rFoot * 3]) / 2, (w.pos[B.lFoot * 3 + 2] + w.pos[B.rFoot * 3 + 2]) / 2];
+      const head = P(B.head);
+      const legDir = Math.hypot(feet[0] - hips[0], feet[1] - hips[1]) > 0.15 ? toward(hips, feet) : toward(head, hips);
+      lying = { hips, chest: P(B.spine2), facing: legDir, points: [hips, head, feet, P(B.spine2)] };
+    }
+    const chest: P2 = lying ? lying.chest : B0;
+    const refFrom: P2 = referee ? [referee.x, referee.z] : [(A0[0] + B0[0]) / 2 + 0.8, (A0[1] + B0[1]) / 2];
+    const refFace0 = referee ? referee.facing : toward(refFrom, chest);
+    const aLegs: Leg[] = [];
+    const bLegs: Leg[] = [];
+    const refLegs: Leg[] = [];
+    let cel: P2;
+    let up: P2 = B0;
+    let attend: P2 | null = null;
+    if (tl.kind === 'stoppage') {
+      cel = celebrationSpot(arena, A0, lying ? lying.hips : B0, marks);
+      aLegs.push({ t0: tl.walkOff[0], t1: tl.walkOff[1], from: A0, to: cel, face0: toward(A0, B0), face1: outward(cel) });
+      aLegs.push({ t0: tl.regroup[0], t1: tl.regroup[1], from: cel, to: marks.winner, face0: outward(cel), face1: marks.facing });
+      if (lying) {
+        up = keepInside(arena, [lying.hips[0] + Math.sin(lying.facing) * 0.32, lying.hips[1] + Math.cos(lying.facing) * 0.32], 0.7);
+        const go = Math.max(tl.standUp![1], tl.regroup[0]) + 0.15;
+        bLegs.push({ t0: go, t1: Math.max(go + 1.8, tl.hold - 0.3), from: up, to: marks.loser, face0: lying.facing, face1: marks.facing });
+      } else {
+        bLegs.push({ t0: tl.regroup[0] + 0.3, t1: tl.regroup[1] + 0.2, from: B0, to: marks.loser, face0: toward(B0, A0), face1: marks.facing });
+      }
+      // Referee: in between (wave), then beside the loser, then the centre.
+      const dx = A0[0] - chest[0];
+      const dz = A0[1] - chest[1];
+      const dl = Math.hypot(dx, dz) || 1;
+      const wave = keepInside(arena, [chest[0] + (dx / dl) * 0.85 + (-dz / dl) * 0.12, chest[1] + (dz / dl) * 0.85 + (dx / dl) * 0.12], 0.5);
+      // Beside his chest, on the side away from where the winner celebrates.
+      const axis = lying ? lying.facing : toward(B0, A0);
+      const px = Math.cos(axis);
+      const pz = -Math.sin(axis);
+      const sideAway = (px * (cel[0] - chest[0]) + pz * (cel[1] - chest[1])) > 0 ? -1 : 1;
+      attend = keepInside(arena, [chest[0] + px * sideAway * (lying ? 0.6 : 0.72), chest[1] + pz * sideAway * (lying ? 0.6 : 0.72)], 0.5);
+      refLegs.push({ t0: 0, t1: 0.7, from: refFrom, to: wave, face0: refFace0, face1: toward(wave, chest) });
+      refLegs.push({ t0: tl.wave![1], t1: tl.attend![0] + 0.3, from: wave, to: attend, face0: toward(wave, chest), face1: toward(attend, chest) });
+      refLegs.push({ t0: tl.attend![1] + 0.1, t1: tl.regroup[1] - 0.2, from: attend, to: marks.centre, face0: toward(attend, chest), face1: marks.facing });
+    } else {
+      const away = (p: P2, q: P2): P2 => {
+        const d = Math.hypot(p[0] - q[0], p[1] - q[1]) || 1;
+        return keepInside(arena, [p[0] + ((p[0] - q[0]) / d) * 1.2, p[1] + ((p[1] - q[1]) / d) * 1.2]);
+      };
+      cel = away(A0, B0);
+      const bcel = away(B0, A0);
+      aLegs.push({ t0: tl.walkOff[0], t1: tl.walkOff[1], from: A0, to: cel, face0: toward(A0, B0), face1: outward(cel) });
+      aLegs.push({ t0: tl.regroup[0], t1: tl.regroup[1], from: cel, to: marks.winner, face0: outward(cel), face1: marks.facing });
+      bLegs.push({ t0: tl.walkOff[0] + 0.1, t1: tl.walkOff[1] + 0.1, from: B0, to: bcel, face0: toward(B0, A0), face1: outward(bcel) });
+      bLegs.push({ t0: tl.regroup[0] + 0.1, t1: tl.regroup[1] + 0.1, from: bcel, to: marks.loser, face0: outward(bcel), face1: marks.facing });
+      refLegs.push({ t0: tl.regroup[0] - 0.4, t1: tl.regroup[1] - 0.6, from: refFrom, to: marks.centre, face0: refFace0, face1: marks.facing });
+    }
+    this.refStart = referee;
+    return { a, b, marks, aLegs, bLegs, refLegs, cel, lying, up, attend, chest };
+  }
+}
+

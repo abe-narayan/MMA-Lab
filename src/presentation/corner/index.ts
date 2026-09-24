@@ -11,33 +11,39 @@
  *     roundStart), with where each fighter stood when it began and where he
  *     stands when the next round starts;
  *   - `CornerRest` overwrites the animator's poses during a break: walk to the
- *     corner (the referee's gait on the fighter's own skeleton), sit down,
- *     sit (leaning back, forearms on the thighs, breathing), stand up ~7 s
- *     before the bell, walk to the next round's start mark, hand back to the
- *     animator with a crossfade;
- *   - stools (a padded seat on four legs) appear in the red and blue corners
- *     for the break only.
+ *     corner (a fighter's gait, `people/figure.ts`: loose arms, rolling
+ *     shoulders, heel-to-toe steps planted along the path), sit down, sit
+ *     (leaning back, forearms on the thighs, breathing), stand up ~7 s before
+ *     the bell, walk to the next round's start mark, hand back to the animator
+ *     with a crossfade;
+ *   - the cornermen (`crew.ts`): the cutman brings the stool in and puts it
+ *     down as his fighter walks back, the coach kneels in front of him; both
+ *     get up at the warning and leave with the stool before the bell. Without
+ *     a crew the stools simply appear for the break.
  *
  * Where: the painted corners of the octagon (the red and blue post caps,
  * `arena/octagon.ts`) and of the ring (`arena/ring.ts`); mats and the street
  * have no corners and no stools. 1v1 only (fighter 0 red, fighter 1 blue).
  *
- * Deterministic: every position is a function of the recording and the sim
- * time; only the walking gait keeps phase state, which snaps on a seek.
+ * Deterministic: every position, the gait phase included, is a function of
+ * the recording and the sim time.
  */
 import * as THREE from 'three/webgpu';
 import type { Arena, SimEvent, TickSnapshot } from '../../sim';
-import type { BoutPresentation, FrameInput } from '../contract';
+import type { BoutPresentation, CharacterFactory, FrameInput, QualitySettings } from '../contract';
 import {
-  B, blendPose, copyPose, createPose, createWorldPose, forwardKinematics, mulQuat,
+  B, blendPose, createPose, createWorldPose, forwardKinematics, mulQuat,
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
 import { LIMBS, axisAngle, conjugateInto, solveTwoBone } from '../rig/ik';
-import { RefereeAnimator } from '../referee/pose';
+import { FigurePoser } from '../people/figure';
 import { cornerSpots, type CornerSpot } from './spots';
+import { CornerCrew, type BreakTiming } from './crew';
 
 export { cornerSpots, STOOL_INSET_M } from './spots';
 export type { CornerSpot } from './spots';
+export { CornerCrew, crewCue, crewSpots, crewDefinition } from './crew';
+export type { BreakTiming, CrewCue, CrewRole } from './crew';
 
 type V3 = [number, number, number];
 
@@ -110,6 +116,9 @@ export interface RestState {
   seat: number;
   /** 0..1 weight of this module's pose over the animator's. */
   weight: number;
+  /** Distance walked on this break's paths so far (drives the gait), and the speed now. */
+  walked: number;
+  speed: number;
 }
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * t;
@@ -128,15 +137,21 @@ export function restState(w: BreakWindow, i: number, spot: CornerSpot, t: number
   const front: [number, number] = [spot.stool[0] + Math.sin(spot.facing) * 0.42, spot.stool[1] + Math.cos(spot.facing) * 0.42];
   const outD = Math.hypot(front[0] - e[0], front[1] - e[1]);
   const backD = Math.hypot(s[0] - front[0], s[1] - front[1]);
-  const walkOut = Math.max(1.2, outD / WALK_MPS);
+  const tm = breakTiming(w, i, spot);
+  const walkOut = tm.arrive;
   const walkBack = Math.max(1.2, backD / WALK_MPS);
-  const riseAt = Math.max(walkOut + SIT_S + 1, len - RISE_BEFORE_BELL_S);
+  const riseAt = tm.rise;
   const weight = Math.min(ease(t / FADE_S), ease((len - t) / FADE_S));
   const toward = (a: [number, number], b: [number, number]): number => Math.atan2(b[0] - a[0], b[1] - a[1]);
-  if (t < 0 || t > len) return { phase: 'none', x: e[0], z: e[1], facing: spot.facing, seat: 0, weight: 0 };
+  const speedOf = (d: number, dur: number, u: number): number => (d * 6 * u * (1 - u)) / Math.max(1e-3, dur);
+  if (t < 0 || t > len) return { phase: 'none', x: e[0], z: e[1], facing: spot.facing, seat: 0, weight: 0, walked: 0, speed: 0 };
   if (t < walkOut) {
-    const u = ease(t / walkOut);
-    return { phase: 'toCorner', x: lerp(e[0], front[0], u), z: lerp(e[1], front[1], u), facing: toward(e, front), seat: 0, weight };
+    const r = t / walkOut;
+    const u = ease(r);
+    return {
+      phase: 'toCorner', x: lerp(e[0], front[0], u), z: lerp(e[1], front[1], u), facing: toward(e, front), seat: 0, weight,
+      walked: outD * u, speed: speedOf(outD, walkOut, r),
+    };
   }
   if (t < walkOut + SIT_S) {
     // Turn round and sit: from the stool's front to over the stool.
@@ -144,25 +159,39 @@ export function restState(w: BreakWindow, i: number, spot: CornerSpot, t: number
     return {
       phase: 'sitting', x: lerp(front[0], spot.stool[0], u), z: lerp(front[1], spot.stool[1], u),
       facing: angleLerp(toward(e, front), spot.facing, ease((t - walkOut) / (SIT_S * 0.5))), seat: u, weight,
+      walked: outD, speed: 0,
     };
   }
-  if (t < riseAt) return { phase: 'seated', x: spot.stool[0], z: spot.stool[1], facing: spot.facing, seat: 1, weight };
+  if (t < riseAt) return { phase: 'seated', x: spot.stool[0], z: spot.stool[1], facing: spot.facing, seat: 1, weight, walked: outD, speed: 0 };
   if (t < riseAt + SIT_S) {
     const u = ease((t - riseAt) / SIT_S);
     return {
       phase: 'rising', x: lerp(spot.stool[0], front[0], u), z: lerp(spot.stool[1], front[1], u),
-      facing: spot.facing, seat: 1 - u, weight,
+      facing: spot.facing, seat: 1 - u, weight, walked: outD, speed: 0,
     };
   }
   const tb = t - riseAt - SIT_S;
   if (tb < walkBack) {
-    const u = ease(tb / walkBack);
+    const r = tb / walkBack;
+    const u = ease(r);
     return {
       phase: 'toCentre', x: lerp(front[0], s[0], u), z: lerp(front[1], s[1], u),
       facing: angleLerp(spot.facing, toward(front, s), ease(tb / 0.5)), seat: 0, weight,
+      walked: outD + backD * u, speed: speedOf(backD, walkBack, r),
     };
   }
-  return { phase: 'waiting', x: s[0], z: s[1], facing: w.startFacing[i] ?? spot.facing, seat: 0, weight };
+  return { phase: 'waiting', x: s[0], z: s[1], facing: w.startFacing[i] ?? spot.facing, seat: 0, weight, walked: outD + backD, speed: 0 };
+}
+
+/** When fighter `i` arrives at his corner, sits, rises and is off the stool in break `w`. Pure. */
+export function breakTiming(w: BreakWindow, i: number, spot: CornerSpot): BreakTiming {
+  const len = (w.toTick - w.fromTick) * TICK_S;
+  const e = w.endPos[i] ?? [0, 0];
+  const front: [number, number] = [spot.stool[0] + Math.sin(spot.facing) * 0.42, spot.stool[1] + Math.cos(spot.facing) * 0.42];
+  const outD = Math.hypot(front[0] - e[0], front[1] - e[1]);
+  const arrive = Math.max(1.2, outD / WALK_MPS);
+  const rise = Math.max(arrive + SIT_S + 1, len - RISE_BEFORE_BELL_S);
+  return { len, arrive, seated: arrive + SIT_S, rise, risen: rise + SIT_S };
 }
 
 /**
@@ -252,31 +281,55 @@ function buildStools(spots: readonly CornerSpot[]): THREE.Group {
     ring.position.y = 0.2;
     stool.add(ring);
     stool.traverse((o) => { o.castShadow = true; o.receiveShadow = true; });
+    stool.rotation.y = s.facing;
     g.add(stool);
   }
   g.visible = false;
   return g;
 }
 
+export interface CornerOptions {
+  /** The character module's factory (after `preload`) for real cornermen; null: capsule stand-ins; omitted: no crew. */
+  factory?: CharacterFactory | null;
+  quality?: QualitySettings | null;
+}
+
 export class CornerRest {
   readonly object3d: THREE.Group;
   readonly spots: [CornerSpot, CornerSpot] | null;
+  /** The cornermen (null: none staged). */
+  readonly crew: CornerCrew | null = null;
+  private readonly stools: THREE.Group;
   private windows: BreakWindow[] = [];
-  private readonly walkers: RefereeAnimator[];
+  private readonly walkers: FigurePoser[];
   private readonly scratch: Pose[];
   private readonly worlds: WorldPose[];
-  private readonly seated: Pose[];
+  private readonly seated: Pose;
+  private readonly finals: WorldPose[];
   /** The rest state per fighter after the last `apply` (debug, camera). */
   readonly state: RestState[] = [];
 
-  constructor(bout: BoutPresentation, private readonly rests: readonly RestSkeleton[]) {
+  constructor(bout: BoutPresentation, private readonly rests: readonly RestSkeleton[], opts: CornerOptions = {}) {
     const oneOnOne = bout.fighters.length === 2 && (bout.teamOf[0] ?? 0) !== (bout.teamOf[1] ?? 1);
     this.spots = oneOnOne ? cornerSpots(bout.arena) : null;
-    this.object3d = this.spots ? buildStools(this.spots) : new THREE.Group();
-    this.walkers = rests.map((r) => new RefereeAnimator(r));
+    this.object3d = new THREE.Group();
+    this.object3d.name = 'corner';
+    this.stools = this.spots ? buildStools(this.spots) : new THREE.Group();
+    this.stools.visible = false;
+    this.object3d.add(this.stools);
+    if (this.spots && opts.factory !== undefined) {
+      try {
+        this.crew = new CornerCrew(bout, this.spots, opts.factory ?? null, opts.quality ?? null);
+        this.object3d.add(this.crew.object3d);
+      } catch (err) {
+        console.warn('[corner] crew failed, stools only:', err);
+      }
+    }
+    this.walkers = rests.map((r) => new FigurePoser(r));
     this.scratch = rests.map(() => createPose());
-    this.seated = rests.map(() => createPose());
+    this.seated = createPose();
     this.worlds = rests.map(() => createWorldPose());
+    this.finals = rests.map(() => createWorldPose());
   }
 
   setRecording(frames: readonly TickSnapshot[], events: readonly SimEvent[]): void {
@@ -291,42 +344,77 @@ export class CornerRest {
 
   /** Overwrite `poses` (the animator's) during a rest period. Returns true while one is on. */
   apply(input: FrameInput, poses: Pose[], realDt: number): boolean {
+    void realDt;
     this.state.length = 0;
     const w = this.spots ? this.windowAt(input.simTime) : null;
-    this.object3d.visible = !!w;
-    if (!w || !this.spots) return false;
+    this.stools.visible = !!w;
+    if (!w || !this.spots) {
+      this.crew?.apply(null, [], [], input.simTime);
+      return false;
+    }
     const t = input.simTime - w.fromTick * TICK_S;
-    const simDt = input.discontinuity ? 0 : Math.max(0, realDt) * Math.max(0, input.playbackRate);
     for (let i = 0; i < poses.length && i < 2; i++) {
       const spot = this.spots[i]!;
       const st = restState(w, i, spot, t);
       this.state.push(st);
       if (st.weight <= 0) continue;
       const rest = this.rests[i]!;
-      const standing = this.walkers[i]!.evaluate({
-        placement: {
-          present: true, x: st.x, z: st.z, facing: st.facing, crouch: 0, gesture: 'neutral', focusId: -1, count: 0,
-        },
-        fighters: [], realDt, simDt, snap: input.discontinuity,
-      });
       const target = this.scratch[i]!;
+      // Walking: a fighter's gait, arms loose, head a little down.
+      this.walkers[i]!.evaluate({
+        x: st.x, z: st.z, facing: st.facing, walked: st.walked, speed: st.speed, style: 'fighter', time: input.simTime,
+      }, target, this.worlds[i]!);
       if (st.seat > 0) {
         const breath = Math.sin(input.simTime * 2.4 + i) * 0.5 + 0.5;
-        seatedPose(this.seated[i]!, this.worlds[i]!, rest, st.x, st.z, st.facing, breath);
-        blendPose(target, standing, this.seated[i]!, st.seat);
-      } else {
-        copyPose(target, standing);
+        seatedPose(this.seated, this.worlds[i]!, rest, st.x, st.z, st.facing, breath);
+        blendPose(target, target, this.seated, st.seat);
       }
       // The animator's face (breathing, fatigue) stays.
       target.face.set(poses[i]!.face);
       blendPose(poses[i]!, poses[i]!, target, st.weight);
     }
+    const spots = this.spots;
+    if (this.crew) {
+      for (let i = 0; i < poses.length && i < 2; i++) forwardKinematics(this.finals[i]!, poses[i]!, this.rests[i]!);
+      const timing = [0, 1].map((i) => breakTiming(w, i, spots[i]!));
+      const stools = this.crew.apply(t, timing, this.finals, input.simTime);
+      this.stools.children.forEach((g, i) => {
+        const s = stools[i];
+        g.visible = !!s;
+        if (s) {
+          g.position.set(s.x, s.y, s.z);
+          g.rotation.y = s.yaw;
+        }
+      });
+    } else {
+      this.stools.children.forEach((g, i) => {
+        const sp = spots[i]!;
+        g.visible = true;
+        g.position.set(sp.stool[0], 0, sp.stool[1]);
+      });
+    }
     return true;
   }
 
+  /** Contact-shadow spheres for the arena (cornermen, stools on the canvas). */
+  occluders(): [number, number, number, number][] {
+    if (!this.stools.visible) return [];
+    const out = this.crew ? this.crew.occluders() : [];
+    for (const g of this.stools.children) {
+      if (g.visible) out.push([g.position.x, g.position.y + 0.3, g.position.z, 0.2]);
+    }
+    return out;
+  }
+
+  /** Cornermen level of detail from the camera (the presenter's distance rule). */
+  setLOD(cam: readonly number[], lodFor: (d: number) => 0 | 1 | 2 | 3): void {
+    this.crew?.setLOD(cam, lodFor);
+  }
+
   dispose(): void {
+    this.crew?.dispose();
     this.object3d.removeFromParent();
-    this.object3d.traverse((o) => {
+    this.stools.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.isMesh) { m.geometry.dispose(); (m.material as THREE.Material).dispose(); }
     });

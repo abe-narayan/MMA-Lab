@@ -48,7 +48,7 @@ function boutFor(cfg: SimConfig): BoutPresentation {
   });
 }
 
-/** The demonstration bout's first `n` ticks (it takes the fight down at ~tick 430). */
+/** The demonstration bout's first `n` ticks (it takes the fight down at ~tick 340). */
 function record(cfg: SimConfig, n: number): { frames: TickSnapshot[]; events: SimEvent[] } {
   const sim = createSim(cfg);
   const frames = [sim.snapshot()];
@@ -101,7 +101,10 @@ function fakeArena(): ArenaSet {
   };
 }
 
-const cfg = config();
+// 'watch-demo-5' (Phase 9, engine 5.0.0): the calibrated sim takes this
+// demonstration bout down at ~tick 340; the old 'watch-demo' seed now ends by
+// a standing KO before any ground frame.
+const cfg = config('watch-demo-5');
 const bout = boutFor(cfg);
 const rec = record(cfg, 520);
 const groundIdx = rec.frames.findIndex((f) => f.engagements.some((e) => e.kind === 'ground'));

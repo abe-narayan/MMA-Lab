@@ -30,8 +30,9 @@
 
 import {
   computeStats, createSim,
-  type BoutRun, type SimConfig,
+  type BoutRun, type CommentaryLine, type IntentSample, type SimConfig,
 } from '../../sim';
+import { assembleWatchBout, loadWatchBout, type WatchBout } from '../replay/bout';
 import { FrameStore, isPackedFrames, packFrames, unpackFrames, type PackedFrames } from '../../sim/record/frames';
 
 export interface RunMessage {
@@ -166,4 +167,51 @@ export function createRunner(host: RunnerHost): Runner {
       await run(message);
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Watch bouts (Watch/replay pass)
+// ---------------------------------------------------------------------------
+
+/**
+ * `{ type: 'watch' }` builds everything the Watch screen needs — the run with
+ * every frame, the game-plan samples and the commentary — off the main thread
+ * (`loadWatchBout`, the very function the main thread would run), and sends
+ * the frames as transferred typed-array columns. The page stays responsive
+ * and shows progress instead of freezing for the seconds a long bout takes.
+ */
+export interface WatchMessage {
+  type: 'watch';
+  id: string;
+  config: SimConfig;
+  progressEveryTicks: number;
+}
+
+export type WatchWire =
+  | { type: 'progress'; id: string; tick: number; round: number }
+  | {
+    type: 'watchDone'; id: string; run: Omit<BoutRun, 'frames'>; packedFrames: PackedFrames;
+    intents: IntentSample[]; commentary: CommentaryLine[];
+  }
+  | { type: 'error'; id: string; message: string };
+
+/** Worker side: run a watch job, posting progress and the result (with its transfer list). */
+export function runWatchJob(msg: WatchMessage, post: (m: WatchWire, transfer?: ArrayBuffer[]) => void): void {
+  try {
+    const bout = loadWatchBout(msg.config, {
+      progressEveryTicks: msg.progressEveryTicks,
+      onProgress: (tick, round) => post({ type: 'progress', id: msg.id, tick, round }),
+    });
+    const { frames, ...run } = bout.run;
+    const { packed, transfer } = packFrames(frames);
+    post({ type: 'watchDone', id: msg.id, run, packedFrames: packed, intents: bout.intents, commentary: bout.commentary }, transfer);
+  } catch (err) {
+    post({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** Main-thread side: the Watch bout from a `watchDone` message. */
+export function watchBoutFromWire(msg: Extract<WatchWire, { type: 'watchDone' }>, config: SimConfig): WatchBout {
+  const frames = unpackFrames(msg.packedFrames);
+  return assembleWatchBout(config, { ...msg.run, config, frames }, msg.intents, msg.commentary);
 }

@@ -33,6 +33,18 @@ export const INSTANT_REPLAY_BUFFER_FRAMES = 200;
 export const INSTANT_REPLAY_LEAD_TICKS = 40;
 export const INSTANT_REPLAY_TAIL_TICKS = 20;
 export const INSTANT_REPLAY_SPEED = 0.25;
+/** The playback speeds the Watch screen offers (J/K/L step through them). */
+export const SPEED_STEPS = [0.1, 0.25, 0.5, 1, 2, 4] as const;
+/** Fractional-frame tolerance of the playback clock (see `advance`). */
+const CARRY_EPSILON = 1e-6;
+
+/** The next speed step up (+1) or down (-1) from . */
+export function stepSpeed(speed: number, dir: 1 | -1): number {
+  const steps = SPEED_STEPS as readonly number[];
+  if (dir > 0) return steps.find((s) => s > speed + 1e-9) ?? steps[steps.length - 1];
+  for (let i = steps.length - 1; i >= 0; i--) if (steps[i] < speed - 1e-9) return steps[i];
+  return steps[0];
+}
 
 /** The event kinds that earn an instant replay (09 §4.5). */
 export const REPLAY_WORTHY: ReadonlySet<string> = new Set([
@@ -327,9 +339,13 @@ export class BoutPlayer {
     if (!Number.isFinite(dtSeconds) || dtSeconds <= 0) return this.carry;
 
     this.carry += (dtSeconds * this.speedValue) / tickSeconds;
-    const whole = Math.floor(this.carry);
+    // A frame boundary reached by a sum of display intervals (6 x 1/60 s at
+    // 1x, 24 x 1/240 s...) can land a rounding error short of it; snapping
+    // within CARRY_EPSILON makes the frame shown at a given playback time the
+    // same at every display refresh rate.
+    const whole = Math.floor(this.carry + CARRY_EPSILON);
     if (whole <= 0) return this.carry;
-    this.carry -= whole;
+    this.carry = Math.max(0, this.carry - whole);
     let target = this.frame + whole;
 
     const r = this.replay;

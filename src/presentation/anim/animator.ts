@@ -46,6 +46,7 @@ import {
 import { classify, legPass, strikeBody, strikeHands, strikeRootOffset } from './strikes';
 import { fighterTiers } from './tier';
 import { strikeTiming, type ActionTiming } from './timing';
+import { separatePair } from './clearance';
 import type { MotionLibrary } from '../assets/motionLibrary';
 import { CapRig, NCH, idleResidual, registeredMotionLibrary } from './capture';
 import {
@@ -338,6 +339,19 @@ export class StandingAnimator implements Animator {
         if (T) st.ikTargets.push({ name: 'kick', pos: T });
       }
       if (aim) st.ikTargets.push({ name: 'aim', pos: aim });
+    }
+
+    // ---- pass 2c: standing pairs keep their heads and chests apart ----------------------
+    const free = (i: number): boolean => {
+      const m = this.st[i].mode;
+      return (m === 'standing' || m === 'getup') && !engagedPair.has(i);
+    };
+    for (let i = 0; i < n; i++) {
+      if (!free(i)) continue;
+      for (let j = i + 1; j < n; j++) {
+        if (!free(j)) continue;
+        separatePair(ctxs[i]!, ctxs[j]!);
+      }
     }
 
     // ---- engaged pairs -------------------------------------------------------------------

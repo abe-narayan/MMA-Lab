@@ -27,6 +27,8 @@ import {
   type Pose, type RestSkeleton, type WorldPose,
 } from '../rig/skeleton';
 import { LIMBS, axisAngle, conjugateInto, solveTwoBone } from '../rig/ik';
+import { curlFingers, kneelLegs } from '../people/figure';
+import { gripArm } from '../finish/grip';
 
 type V3 = [number, number, number];
 
@@ -42,6 +44,24 @@ export interface RefereeFrame {
   simDt: number;
   /** First frame after a seek: every filter snaps. */
   snap: boolean;
+  /** Scripted extras (the end of the bout, `finish/`): override the gesture's hands and legs. */
+  extra?: RefereeExtras;
+}
+
+/** Scripted hands and legs for the post-fight staging. Index 0 = left hand, 1 = right. */
+export interface RefereeExtras {
+  /** Palm centres placed exactly (hand-to-wrist contact); not smoothed. */
+  grips?: [V3 | null, V3 | null];
+  /** Soft wrist targets (a hand on a shoulder, hovering over a chest); smoothed like gestures. */
+  reach?: [V3 | null, V3 | null];
+  /** 0..1 down on one knee. */
+  kneel?: number;
+  /** 0..1 waving the bout off (arms crossing over the loser). */
+  wave?: number;
+  /** Seconds (the wave's rhythm). */
+  time?: number;
+  /** Where he looks (overrides the attended fighter / the pair's middle). */
+  look?: V3;
 }
 
 const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v);
@@ -113,7 +133,7 @@ export class RefereeAnimator {
     for (const b of [B.spine, B.spine1, B.spine2]) pose.local.set(sp, b * 4);
 
     // Gaze: eyes on the focus over the lean.
-    const focus = this.focusPoint(p, f.fighters, fwd);
+    const focus = f.extra?.look ?? this.focusPoint(p, f.fighters, fwd);
     const eyeY = pose.rootPos[1] + 0.72 * (1 - c * 0.25);
     const horiz = Math.max(0.3, Math.hypot(focus[0] - p.x, focus[2] - p.z));
     const wantPitch = Math.atan2(eyeY - focus[1], horiz);
@@ -155,17 +175,34 @@ export class RefereeAnimator {
       pose.local.set(this.q2, foot * 4);
     }
     forwardKinematics(world, pose, rest);
+    const ex = f.extra;
+    if (ex?.kneel && ex.kneel > 0) kneelLegs(pose, world, rest, face, clamp(ex.kneel, 0, 1));
 
     // ---- arms -----------------------------------------------------------------
     const armLen = rest.length[B.lArm] + rest.length[B.lForeArm];
     const k = snap ? 1 : Math.min(1, Math.max(0, f.realDt) * 7);
+    const wave = clamp(ex?.wave ?? 0, 0, 1);
     for (const s of [1, -1] as const) {
       const chain = s > 0 ? LIMBS.lArm : LIMBS.rArm;
       const sh: V3 = [world.pos[chain.upper * 3], world.pos[chain.upper * 3 + 1], world.pos[chain.upper * 3 + 2]];
-      const t = this.handTarget(g, s, c, sh, focus, fwd, left, armLen, world);
+      let t = this.handTarget(g, s, c, sh, focus, fwd, left, armLen, world);
+      const soft = ex?.reach?.[s > 0 ? 0 : 1];
+      if (soft) t = soft;
+      if (wave > 0) {
+        // Waving it off: both arms scissor across in front of the chest, over the loser.
+        const ph = (ex?.time ?? 0) * Math.PI * 2 * 1.35 + (s > 0 ? 0 : Math.PI);
+        const across = Math.sin(ph) * 0.34;
+        const wv: V3 = [
+          sh[0] + fwd[0] * 0.42 + left[0] * (across - s * 0.12),
+          sh[1] - 0.12 + Math.cos(ph) * 0.06,
+          sh[2] + fwd[2] * 0.42 + left[2] * (across - s * 0.12),
+        ];
+        t = [t[0] + (wv[0] - t[0]) * wave, t[1] + (wv[1] - t[1]) * wave, t[2] + (wv[2] - t[2]) * wave];
+      }
       const h = this.hands[s > 0 ? 0 : 1];
       const lx = t[0] - p.x, ly = t[1], lz = t[2] - p.z;
-      h[0] += (lx - h[0]) * k; h[1] += (ly - h[1]) * k; h[2] += (lz - h[2]) * k;
+      const kk = wave > 0 ? Math.min(1, k * 3) : k;
+      h[0] += (lx - h[0]) * kk; h[1] += (ly - h[1]) * kk; h[2] += (lz - h[2]) * kk;
       const target: V3 = [p.x + h[0], h[1], p.z + h[2]];
       const pole: V3 = [
         sh[0] - fwd[0] * 0.3 + left[0] * s * 0.45,
@@ -173,6 +210,30 @@ export class RefereeAnimator {
         sh[2] - fwd[2] * 0.3 + left[2] * s * 0.45,
       ];
       solveTwoBone(pose, world, rest, chain, target, pole);
+    }
+    forwardKinematics(world, pose, rest);
+    // Exact grips last (hand-to-wrist contact), fingers closed round the wrist.
+    const grips = ex?.grips;
+    if (grips && (grips[0] || grips[1])) {
+      for (const s of [1, -1] as const) {
+        const palm = grips[s > 0 ? 0 : 1];
+        if (!palm) continue;
+        const chain = s > 0 ? LIMBS.lArm : LIMBS.rArm;
+        const sh: V3 = [world.pos[chain.upper * 3], world.pos[chain.upper * 3 + 1], world.pos[chain.upper * 3 + 2]];
+        // Elbow out to the side and a little back (up and out when the arm is raised).
+        const up = palm[1] > sh[1] ? 1 : 0;
+        const pole: V3 = [
+          sh[0] + left[0] * s * 0.5 - fwd[0] * 0.25,
+          sh[1] - 0.6 + up * 0.5,
+          sh[2] + left[2] * s * 0.5 - fwd[2] * 0.25,
+        ];
+        gripArm(pose, world, rest, chain, palm, pole);
+        const hnd = this.hands[s > 0 ? 0 : 1];
+        const e = chain.end * 3;
+        hnd[0] = world.pos[e] - p.x; hnd[1] = world.pos[e + 1]; hnd[2] = world.pos[e + 2] - p.z;
+      }
+      curlFingers(pose, [grips[0] ? 0.75 : 0.2, grips[1] ? 0.75 : 0.2]);
+      forwardKinematics(world, pose, rest);
     }
     this.primed = true;
     return pose;

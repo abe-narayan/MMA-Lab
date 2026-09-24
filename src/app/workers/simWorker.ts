@@ -12,11 +12,13 @@
  * typecheck inside the app as well.
  */
 
-import { createRunner, toWire, type FromWorkerWire, type ToWorker } from './simProtocol';
+import {
+  createRunner, runWatchJob, toWire, type FromWorkerWire, type ToWorker, type WatchMessage, type WatchWire,
+} from './simProtocol';
 
 interface WorkerScope {
-  postMessage(message: FromWorkerWire, transfer?: Transferable[]): void;
-  onmessage: ((event: { data: ToWorker }) => void) | null;
+  postMessage(message: FromWorkerWire | WatchWire, transfer?: Transferable[]): void;
+  onmessage: ((event: { data: ToWorker | WatchMessage }) => void) | null;
 }
 
 const scope = self as unknown as WorkerScope;
@@ -29,5 +31,11 @@ const runner = createRunner({
 });
 
 scope.onmessage = (event): void => {
-  void runner.handle(event.data);
+  const data = event.data;
+  // The Watch screen's bouts (frames + game plan + commentary), built here.
+  if (data.type === 'watch') {
+    runWatchJob(data, (m, transfer) => scope.postMessage(m, transfer));
+    return;
+  }
+  void runner.handle(data);
 };

@@ -206,6 +206,22 @@ export class BroadcastCameraDirector implements CameraDirector {
     this.refereePose = pose;
   }
 
+  /**
+   * The post-fight staging's clock (seconds of live picture since the end,
+   * `finish/FinishStage.postTime`), or null. While set, the post-roll plan
+   * (the winner, the wide as they regroup, the announcement) follows it.
+   */
+  setPostClock(t: number | null): void {
+    this.postClock = t;
+  }
+
+  /** Other people in the cage the operators work around (the cornermen between rounds). */
+  setExtraBodies(poses: readonly WorldPose[]): void {
+    this.extraBodies = poses;
+  }
+  private extraBodies: readonly WorldPose[] = [];
+  private postClock: number | null = null;
+
   /** Force one shot kind in broadcast mode (dev tools, tests); null to release. */
   lockShot(kind: ShotKind | null): void {
     this.locked = kind;
@@ -257,7 +273,11 @@ export class BroadcastCameraDirector implements CameraDirector {
     this.lastSimTime = input.simTime;
     if (holding) this.holdClock += Math.max(0, realDt);
     else this.holdClock = 0;
-    const timeline = atLast ? input.simTime + this.holdClock : atFirst ? this.holdClock : input.simTime;
+    // The post-fight staging (`finish/`) keeps its own post clock (it pauses
+    // through the finish replay instead of restarting), so the post-roll edit
+    // cuts on its beats; without one, the hold clock.
+    const post = atLast && this.postClock !== null ? this.postClock : this.holdClock;
+    const timeline = atLast ? input.simTime + post : atFirst ? this.holdClock : input.simTime;
     const dt = holding ? clamp(realDt, 0, 0.25) : clamp(simDt, 0, 0.25);
 
     // Bodies.
@@ -536,6 +556,7 @@ export class BroadcastCameraDirector implements CameraDirector {
       else occluders.push(...fighterCapsules(p));
     }
     if (this.refereePose) occluders.push(...bodyCapsules(this.refereePose));
+    for (const w of this.extraBodies) occluders.push(...bodyCapsules(w));
     return { samples, occluders };
   }
 
@@ -611,6 +632,28 @@ export class BroadcastCameraDirector implements CameraDirector {
     return null;
   }
 
+  /**
+   * Hands raised above their owner's head (fighters' `poses`, plus the
+   * referee's head and raised hands when `referee`): framing points for the
+   * post-fight shots, so a raised arm is never cropped.
+   */
+  private raisedPoints(poses: readonly WorldPose[], referee: boolean): V3[] {
+    const out: V3[] = [];
+    const bodies = referee && this.refereePose ? [...poses, this.refereePose] : poses;
+    for (const w of bodies) {
+      const headY = w.tip[B.head * 3 + 1];
+      for (const hand of [B.lHand, B.rHand]) {
+        const y = w.tip[hand * 3 + 1];
+        if (Number.isFinite(y) && y > headY) out.push([w.tip[hand * 3], y + 0.06, w.tip[hand * 3 + 2]]);
+      }
+    }
+    if (referee && this.refereePose) {
+      const r = this.refereePose;
+      out.push([r.tip[B.head * 3], r.tip[B.head * 3 + 1], r.tip[B.head * 3 + 2]]);
+    }
+    return out;
+  }
+
   /** The post-fight handheld walks into the cage (a bounded arena with a wall). */
   private handheldInside(ca: CameraArena, entry: ShotPlanEntry): boolean {
     return ca.shape !== 'unbounded' && entry.reason === 'post';
@@ -682,7 +725,9 @@ export class BroadcastCameraDirector implements CameraDirector {
         if (kind === 'mainTight' || (seg && kind === 'reverse')) {
           const spread = subjects.length > 1 ? dist(subjects[0].hips, subjects[1].hips) : 0;
           const set = spread > 3.4 ? 'full' : setFor(subjects, 'torso');
-          const g = framed(pos, subjects, set, seg ? 0.7 : spec.safe);
+          // The announcement: the referee between them and every raised hand in frame.
+          const extra = entry.reason === 'post' ? this.raisedPoints(poses, true) : [];
+          const g = framed(pos, subjects, set, seg ? 0.7 : spec.safe, extra, entry.reason === 'post' ? [0, 0.05] : [0, 0]);
           return { ...g, keepSafe: 0.86 };
         }
         const g = framed(pos, all, 'full', spec.safe, [lead]);
@@ -740,6 +785,9 @@ export class BroadcastCameraDirector implements CameraDirector {
               if (y > r.tip[B.head * 3 + 1]) extra.push([r.tip[hand * 3], y, r.tip[hand * 3 + 2]]);
             }
           }
+          // The winner's own raised fists.
+          const wi = input.frame.fighters.findIndex((f) => f.id === w.id);
+          if (wi >= 0 && poses[wi]) extra.push(...this.raisedPoints([poses[wi]!], false));
           const g = framed(pos, [w], 'torso', 0.62, extra, [0, 0.06]);
           return { ...g, posOmega: 1.2, keepSafe: 0.9, allowInside: true };
         }

@@ -1028,3 +1028,103 @@ benchmark) and `scripts/dev/load-timeline.mjs` (long tasks and frame gaps while 
   live dodge then corrects it).
 - Sim issue (not fixed here): the referee display state stays `separating` after a doctor/foul pause
   while the bout continues (`src/sim/core/bind.ts`, `pauseKind`).
+
+### Finish and corner pass
+
+Fixes for the broadcast polish pass's "Still wrong" list (the finish, the referee's clothes, the empty
+corner) and the mocap pass's head clash. Code: `finish/` (new: `timeline.ts` the script, `index.ts` the
+staging, `grip.ts` hand-to-wrist contact), `people/figure.ts` (new: a pose generator for people who are not
+fighting), `corner/crew.ts` (new: cornermen), `corner/index.ts`, `referee/clothing.ts` (rewritten),
+`referee/pose.ts` + `referee/index.ts` (scripted extras), `anim/clearance.ts` (new) + a pass in
+`anim/animator.ts`, `arena/index.ts` (`setRefereeOverride`, `setExtraOccluders`), `arena/referee.ts` (three
+gestures), `camera/director.ts` (`setPostClock`, raised hands kept in frame), `camera/planner.ts` (post-roll
+beats), `camera/replay.ts` (the finish replay waits), `app/replay/broadcast.ts` + `app/screens/Watch.tsx`
+(the sequencer is stepped while it waits at the end), presenter wiring (`window.__stats.finish` has the
+post clock). Tests: `tests/presentation.finish.test.ts` (10). Captures:
+`docs/screenshots/phase8-finish-{ko,raise,corner,outfit}.png` (`?demo=watch-demo-4:1:3`, which at capture time ended in
+a round-2 TKO with the loser on his feet; High, WebGPU, cropped to the picture). Capture spec: seek away from the end and
+back (the post clock restarts on a seek), then wait (ko ~6 s, raise ~18 s).
+
+**What changed.**
+1. *The post-fight sequence.* The recording ends on the stoppage tick, so the whole sequence lives in the
+   post-roll. `FinishStage` keeps a *post clock* (seconds of live picture at the last frame; it pauses while
+   a replay is on air and restarts after any seek) and drives, from the recorded result (`finishResult`:
+   stoppage / decision / draw / no result, winner, whether the loser is on the canvas): the referee waves it
+   off between them (0-1.7 s, arms scissoring over the loser), then goes down on a knee beside the loser (a
+   hand over his chest while he is down, on his shoulder once he sits up; standing beside him with a hand on
+   his back if he is hurt on his feet); the winner turns away at 0.9 s, walks to open canvas with his arms
+   coming up and celebrates to the crowd (arms up and pumping, a slow turn either side of facing out); the
+   loser stays down (KO 4.4 s, TKO 2 s), sits up, gets up over a knee, or stays bent over, hands on his
+   knees, if he was stopped on his feet; at 9 s the finish replay airs (the sequencer now holds it for
+   `FINISH_REPLAY_DELAY_S` of live picture); from 9 s all three walk to the centre marks (referee in the
+   middle facing the hard camera, the winner on the side he is already on, 0.62 m apart); at 13 s the referee
+   takes both wrists; at 16 s he raises the winner's arm (a 0.7 s arc) and the winner puts his other fist up.
+   Decisions: both walk apart with their arms up, regroup by 7.6 s, wrists at 8.2 s, raise at 12 s; a draw
+   raises both; a no-result raises neither. The animator keeps evaluating the last frame with its clock
+   advanced by the post clock (breathing, blinks, the lying pose) and the script blends over it. Walkers
+   are kept 0.58 m apart and off the body on the canvas by a pure projection.
+2. *Hand-to-wrist contact.* The referee's grip is solved last: his palm centre (half way along the Hand
+   bone) is placed exactly `GRIP_DISTANCE_M` (wrist radius 3 cm + half a palm 1.5 cm) from the fighter's
+   wrist joint, on his side of it, by iterating the two-bone IK against the hand's own direction
+   (`gripArm`); the fighter's arm is IK'd to a grip point both arms can reach (low at hip height, high above
+   the gap between their shoulders, the raise an arc between them). Over the hold and the raise every frame
+   is within 2 cm (the test bound); the winner's fists are above his head for every frame after the raise.
+3. *The edit.* The post-roll plan now follows the script (`postShots`): the forced cageside on the
+   stoppage, the winner's in-cage handheld at 4 s, the jib as they regroup, MAIN TIGHT on the three for the
+   announcement (the referee's head and every raised hand kept in frame), the winner close at 19.5 s, the
+   closing jib. The director's post-roll timeline is the post clock, so the edit resumes where it was after
+   the replay instead of restarting.
+4. *Referee clothes.* Rewritten as a tailoring pass on the body-cut garments: trouser legs hang as tubes
+   round the leg bones (straight slacks, a pressed crease front and back, compression folds behind the knee,
+   a break over the shoe) with a looser seat; the shirt stands off the body, blouses over the waistband (tuck
+   pleats), pulls from the armpits, flares at the short sleeves; one midpoint subdivision carries the folds as
+   real geometry, with a per-vertex cavity term darkening the valleys; a stand-and-fall collar and a leather
+   belt with a buckle built from the garments' own hems (resampled by angle so the zigzag cut does not show);
+   a small "BOUT LAB" chest patch (charcoal, gold keyline, a canvas texture in the already-recorded Barlow
+   Condensed); black nitrile gloves; shoes with a toe box. About 25 k triangles and five or six draw calls
+   per dressed body; one material per garment kind.
+5. *Cornermen.* One or two per corner between rounds (two at High/Ultra: a cutman and a coach; one at
+   Low/Medium doing both jobs): real bodies from the character factory's `create()`, dressed by the same
+   generator (`cornerOutfit`: a team shirt in the corner's colour with a crew-neck band, black track pants
+   with a side stripe, sneakers with a white sole; the cutman in blue nitrile gloves). The cutman comes in
+   at the post with the stool and sets it down before his fighter sits, then kneels beside him (hands on his
+   shoulder and thigh); the coach comes round the outside of the fighter's feet and kneels in front (a hand
+   on his knee, the other talking). They stand at the ten-second mark, the cutman takes the stool once the
+   fighter is off it, and everyone is out 1.5 s before the bell (tested). Positions stay at least 0.3 m from
+   the fence (tested) and clear of the fighter and each other; bodies and stools feed the arena's contact
+   shadows; the director treats them as occluders (`setExtraBodies`); LOD from the camera like the fighters.
+6. *Fighter gait.* Walking to and from the corner (and after the bout) uses `FigurePoser`'s fighter gait,
+   not the referee's: a stance/swing cycle whose planted foot stays put (heel strike, roll, toe-off), pelvis
+   turn and sway, chest counter-rotation, rolling shoulders, loose arms. It is pure in the distance walked,
+   so the corner staging no longer keeps any gait state.
+7. *Head clearance.* A last pass over every standing, unengaged pair (`anim/clearance.ts`): head centres
+   (10 cm spheres at mid Head bone) kept 23.5 cm apart by leaning both trunks apart along the heads' line (the
+   fighter just hit takes 75 %), guard hands carried with the head, a weapon hand left on its target; chests
+   kept 30 cm apart by sliding the pelvises. Close hooks at 0.55-0.85 m, landed and blocked: the minimum
+   head-centre distance went from 0.149 m (capture rear body hook: heads inside each other) to 0.225 m.
+
+**Tests** (`presentation.finish`, 10/10): the result and the order of the beats (stoppage, standing TKO,
+decision, draw); the post-roll edit on the script's beats; the finish replay held for the live picture; palm
+on wrist within 2 cm through the hold and the raise, the winner's fists overhead; decisions on their marks, a
+draw raises both; nobody walks through anybody (standing bodies at least 0.45 m apart, heads at least two
+radii, the winner never over the man on the canvas); determinism; no head interpenetration after close
+hooks; cornermen in with the stool, kneeling, clear of the fence, out (stool too) before the bell; planted
+feet in the fighter gait slide less than 1 cm per frame. `presentation.polish` 11/11, `presentation.anim`
+12/12 and `presentation.mocap-anim` 21/21 still pass. `presentation.camera` and `presentation.integration`
+fail 6 tests that depend on the demo bouts' outcomes (the sim was retuned: the "DECISION" demo no longer
+goes to a decision, the capture bout's ground frames moved, the polish pass's in-cage corner handheld trips
+the wide-shot check); none of them involves the post-roll. `tsc` is clean except a sim test
+(`tests/phase9.bugs.test.ts`, the calibration agent's).
+
+**Still wrong.**
+- The first second after the stoppage is the animator's last pose blending out, so a stoppage in a clinch
+  starts chest to chest for about 0.8 s before the referee is between them.
+- Getting up off the canvas is a pose blend (lying, sitting, a knee, standing), not a capture; the
+  `ground.get_up_*` and `celebrate.*` clips are still unused.
+- The cornermen appear and disappear at the corner post (no cage door is modelled); the stool is carried
+  level; nobody wipes, greases or ices; the broadcast corner handheld can frame the coach's back.
+- The clothes are a body-derived shell with fixed geometric folds: no cloth dynamics, the folds do not
+  change with the pose, and the shirt's shoulders read a little boxy.
+- The post clock is real time at the last frame; seeking to the same end tick does not restart the
+  ceremony (seek away and back).
+- Gaze during the ceremony is a simple look-at; no facial reactions beyond breathing and the KO slack jaw.

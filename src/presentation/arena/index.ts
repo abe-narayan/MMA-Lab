@@ -73,6 +73,10 @@ export interface VenueSet extends ArenaSet {
   readonly crowd: CrowdState;
   /** Static triangle count and draw calls of the set (excluding shadow passes). */
   stats(): { triangles: number; drawCalls: number; crowdFigures: number };
+  /** Scripted referee placement (post-fight staging); null hands him back to the placement logic. */
+  setRefereeOverride(p: RefereePlacement | null): void;
+  /** Extra contact-shadow bodies (x, y, z, radius): cornermen and stools. */
+  setExtraOccluders(list: readonly (readonly [number, number, number, number])[]): void;
 }
 
 interface Built {
@@ -462,8 +466,35 @@ class Venue implements VenueSet {
     }
     const r = this.tracker.update(s, simTime, realDt * Math.max(0.05, input.playbackRate), input.discontinuity,
       { events: input.events as readonly SimEvent[] });
-    this.referee = r.present ? r : null;
+    const o = this.refereeOverride;
+    if (o && r.present) {
+      // Scripted (the end of the bout): he is where the script puts him, and
+      // the follower continues from there when the script lets go.
+      this.tracker.x = o.x; this.tracker.z = o.z; this.tracker.facing = o.facing; this.tracker.crouch = o.crouch;
+      this.referee = o;
+    } else {
+      this.referee = r.present ? r : null;
+    }
   }
+
+  /**
+   * Put the referee somewhere else than the placement logic would (the
+   * post-fight staging, `finish/`); null hands him back to it. Applies from
+   * the next `update` (his contact shadow follows).
+   */
+  setRefereeOverride(p: RefereePlacement | null): void {
+    this.refereeOverride = p;
+  }
+  private refereeOverride: RefereePlacement | null = null;
+
+  /**
+   * Extra bodies on the canvas for the contact shadows, as (x, y, z, radius)
+   * spheres (cornermen and their stools between rounds). Replaced each call.
+   */
+  setExtraOccluders(list: readonly (readonly [number, number, number, number])[]): void {
+    this.extraOccluders = list;
+  }
+  private extraOccluders: readonly (readonly [number, number, number, number])[] = [];
 
   private feedOccluders(input: FrameInput, fighters: readonly WorldPose[]): void {
     const d = this.occluders.data;
@@ -492,6 +523,8 @@ class Venue implements VenueSet {
       put(this.referee.x, 0.95 - this.referee.crouch * 0.3, this.referee.z, 0.17);
       put(this.referee.x, 0.1, this.referee.z, 0.12);
     }
+    // Other people and props in the cage (cornermen, stools between rounds).
+    for (const o of this.extraOccluders) put(o[0], o[1], o[2], o[3]);
     const used = k;
     while (k < OCCLUDER_COUNT) d[k++]!.set(0, -100, 0, 0);
     this.occluders.commit(used);
@@ -507,6 +540,8 @@ class Venue implements VenueSet {
 
   dispose(): void {
     this.built.rig.dispose();
+    const nodeTextures = new Set<THREE.Texture>();
+    const seenNodes = new Set<unknown>();
     this.object3d.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.isMesh) {
@@ -515,6 +550,9 @@ class Venue implements VenueSet {
         for (const mat of mats) {
           for (const v of Object.values(mat as unknown as Record<string, unknown>)) {
             if (v instanceof THREE.Texture) v.dispose();
+            // Textures sampled through TSL nodes (floor canvas, LED boards,
+            // loaded photo maps) are not material properties (review M2a).
+            else collectNodeTextures(v, nodeTextures, seenNodes);
           }
           mat.dispose();
         }
@@ -522,9 +560,25 @@ class Venue implements VenueSet {
     });
     this.built.env.dispose();
     for (const t of this.extraTextures) t.dispose();
+    // Shared module-level textures (the slope noise) are disposed too: three
+    // re-uploads a disposed texture on its next use, so the next venue is fine.
+    for (const t of nodeTextures) t.dispose();
     // Freed resources alone leave the venue in the scene graph, where the next
     // bout's venue would render alongside it (doubled lights and shadows).
     this.object3d.removeFromParent();
+  }
+}
+
+/** Every texture a TSL node graph samples (`texture(t)` nodes), walked through the node children. */
+function collectNodeTextures(node: unknown, out: Set<THREE.Texture>, seen: Set<unknown>): void {
+  const n = node as { isNode?: boolean; isTextureNode?: boolean; value?: unknown; getChildren?: () => Iterable<unknown> } | null;
+  if (!n || typeof n !== 'object' || !n.isNode || seen.has(n)) return;
+  seen.add(n);
+  if (n.isTextureNode && n.value instanceof THREE.Texture) out.add(n.value);
+  try {
+    for (const child of n.getChildren?.() ?? []) collectNodeTextures(child, out, seen);
+  } catch {
+    // A node whose children cannot be enumerated holds no texture we made.
   }
 }
 
