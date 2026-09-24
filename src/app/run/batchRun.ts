@@ -150,6 +150,9 @@ export function runBatch(spec: BatchSpec, opts: BatchRunOptions = {}): BatchHand
 
   // ---- main-thread fallback: the same runner, yielding between bouts ----
   let mainRunning = false;
+  // The fallback runner, while one is live, so `cancel()` can stop it between
+  // bouts instead of letting it finish its current chunk.
+  let mainRunner: { handle(m: ToBatchWorker): Promise<void> } | null = null;
   const runOnMain = async (): Promise<void> => {
     if (mainRunning) return;
     mainRunning = true;
@@ -158,11 +161,13 @@ export function runBatch(spec: BatchSpec, opts: BatchRunOptions = {}): BatchHand
       post: accept,
       yieldControl: () => new Promise((done) => setTimeout(done, 0)),
     });
+    mainRunner = runner;
     while (!cancelled && queue.length > 0) {
       const chunk = queue.shift() as number[];
       await runner.handle({ type: 'chunk', jobId, template: spec.template, master: spec.master, indices: chunk });
     }
     mainRunning = false;
+    mainRunner = null;
     if (cancelled || complete()) finish();
   };
 
@@ -239,6 +244,9 @@ export function runBatch(spec: BatchSpec, opts: BatchRunOptions = {}): BatchHand
       for (const s of slots) {
         try { s.w.postMessage({ type: 'cancel', jobId }); } catch { /* ignore */ }
       }
+      // The runner checks its cancel set between bouts, so the chunk in
+      // progress on the main thread stops after the current bout.
+      if (mainRunner) void mainRunner.handle({ type: 'cancel', jobId });
       finish();
     },
   };

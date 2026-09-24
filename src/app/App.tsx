@@ -12,38 +12,67 @@
  * the aggregate analytics, and "About the model" shows the v4 rulebook summary
  * and the live parameter registry (see docs/design/UI_PASS.md).
  *
+ * Code splitting (UI pass 2): the shell, Match setup and the simulation load
+ * with the page; Watch (and, inside it, the 3D broadcast), Batch, Tournaments,
+ * History, the fighter editor and About are separate chunks fetched the first time the
+ * page is opened (or prefetched when the pointer or focus reaches its nav
+ * item), behind the design system's loading state.
+ *
  * This is also the one file that knows the concrete store module. The screens
  * are written against `FighterStoreApi`, so the mapping from that interface
  * onto `src/app/store` lives in `bindStore` below and nowhere else. If the
  * store's shape changes, exactly one function has to follow it.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import type { FighterDefinition } from '../sim';
 import {
-  allFighters, createFighter, deleteFighter, duplicateFighter, getFighter, updateFighter,
+  allFighters, createFighter, deleteFighter, duplicateFighter, getFighter, nextFighterId, updateFighter,
   validateFighter, blankFighter, randomFighter, exportRecords, toJson, importAll,
 } from './store';
 import type { FighterRecord } from './store/types';
 import type { FighterStoreApi, ImportOutcome } from './storeApi';
 import { FighterDatabase } from './screens/FighterDatabase';
-import { FighterCreator } from './screens/FighterCreator';
 import { MatchSetup } from './screens/MatchSetup';
-import { Tournaments } from './screens/Tournaments';
-import { History } from './screens/History';
 import { BoutResultScreen } from './screens/BoutResult';
-import { BatchSim } from './screens/BatchSim';
-import { About } from './screens/About';
 import { bindMatchStore } from './run/matchStore';
 import { defaultDraft, newSeed, type MatchDraft } from './model/matchModel';
 import type { BoutRunOutcome } from './run/runBout';
 import type { BoutRun, SimConfig } from '../sim';
-import { Watch } from './screens/Watch';
+import { devParams } from './devFlags';
 import {
-  Button, EmptyState, Segmented, ToastProvider, useConfirm,
+  Button, EmptyState, LoadingState, Segmented, ToastProvider, useConfirm,
   IconBatch, IconBook, IconEdit, IconHistory, IconMatch, IconMonitor, IconMoon, IconPlay,
   IconPlus, IconDice, IconResult, IconSidebar, IconSun, IconTrophy, IconUsers,
 } from './ui';
+
+// ---- lazily loaded screens ---------------------------------------------------
+// One loader per chunk, shared by React.lazy and the nav prefetch (a dynamic
+// import is fetched once, whichever asks first).
+const LOADERS = {
+  watch: () => import('./screens/Watch'),
+  batch: () => import('./screens/BatchSim'),
+  tournaments: () => import('./screens/Tournaments'),
+  creator: () => import('./screens/FighterCreator'),
+  model: () => import('./screens/About'),
+  history: () => import('./screens/History'),
+} as const;
+const Watch = lazy(() => LOADERS.watch().then((m) => ({ default: m.Watch })));
+const BatchSim = lazy(() => LOADERS.batch().then((m) => ({ default: m.BatchSim })));
+const Tournaments = lazy(() => LOADERS.tournaments().then((m) => ({ default: m.Tournaments })));
+const FighterCreator = lazy(() => LOADERS.creator().then((m) => ({ default: m.FighterCreator })));
+const About = lazy(() => LOADERS.model().then((m) => ({ default: m.About })));
+const History = lazy(() => LOADERS.history().then((m) => ({ default: m.History })));
+
+function prefetch(id: string): void {
+  const load = (LOADERS as Record<string, (() => Promise<unknown>) | undefined>)[id];
+  if (load) void load().catch(() => { /* the lazy boundary reports it when the page opens */ });
+}
+
+/** The first bout a new user sees: two contrasting built-in fighters, ready to run. */
+// Same weight class and level, striker against grappler: no size or skill
+// warning on the first screen, and a fight that shows both games.
+const DEFAULT_MATCHUP = ['arch.counter_striker', 'arch.judoka'] as const;
 
 type TabId =
   | 'match' | 'batch' | 'tournaments' | 'watch' | 'result' | 'history'
@@ -57,36 +86,42 @@ interface NavItem {
   title: string;
   hint: string;
   icon: JSX.Element;
+  /**
+   * The page draws its own title (a page header with an h1). The top bar then
+   * shows only the model notice, so the name is not printed twice; pages
+   * without one (Watch, the editor) get their name in the top bar.
+   */
+  ownHeader?: boolean;
 }
 
 const NAV: readonly { group: string; items: readonly NavItem[] }[] = [
   {
     group: 'Simulate',
     items: [
-      { id: 'match', label: 'Match setup', title: 'Match setup', hint: 'Build one bout: mode, fighters, ruleset, arena, settings and seed', icon: <IconMatch /> },
-      { id: 'batch', label: 'Batch simulation', title: 'Batch simulation', hint: 'Run hundreds or thousands of seeded bouts in parallel and read the distribution', icon: <IconBatch /> },
-      { id: 'tournaments', label: 'Tournaments', title: 'Tournaments', hint: 'Brackets, seeding and carry-over', icon: <IconTrophy /> },
+      { id: 'match', label: 'Match setup', title: 'Match setup', hint: 'Pick fighters and rules, run one bout', icon: <IconMatch />, ownHeader: true },
+      { id: 'batch', label: 'Batch simulation', title: 'Batch simulation', hint: 'Run one matchup thousands of times and read the odds', icon: <IconBatch />, ownHeader: true },
+      { id: 'tournaments', label: 'Tournaments', title: 'Tournaments', hint: 'Run a bracket of fighters, match by match', icon: <IconTrophy />, ownHeader: true },
     ],
   },
   {
     group: 'Review',
     items: [
-      { id: 'watch', label: 'Watch', title: 'Watch', hint: 'Play a bout back in 3D, frame by frame', icon: <IconPlay /> },
-      { id: 'result', label: 'Result', title: 'Bout result', hint: 'The last bout: scorecards and the full stat sheet', icon: <IconResult /> },
-      { id: 'history', label: 'History', title: 'History', hint: 'Past bouts: re-watch, verify, export', icon: <IconHistory /> },
+      { id: 'watch', label: 'Watch', title: 'Watch', hint: 'Play a bout back in 3D or 2D, frame by frame', icon: <IconPlay /> },
+      { id: 'result', label: 'Result', title: 'Bout result', hint: 'The last bout: scorecards and the full stat sheet', icon: <IconResult />, ownHeader: true },
+      { id: 'history', label: 'History', title: 'History', hint: 'Past bouts: re-watch, verify, export', icon: <IconHistory />, ownHeader: true },
     ],
   },
   {
     group: 'Library',
     items: [
-      { id: 'fighters', label: 'Fighters', title: 'Fighter database', hint: 'Browse, search, import and export fighters', icon: <IconUsers /> },
+      { id: 'fighters', label: 'Fighters', title: 'Fighter database', hint: 'Browse, search, import and export fighters', icon: <IconUsers />, ownHeader: true },
       { id: 'creator', label: 'Fighter editor', title: 'Fighter editor', hint: 'Build or edit one fighter, with the derivation shown live', icon: <IconEdit /> },
     ],
   },
   {
     group: 'Reference',
     items: [
-      { id: 'model', label: 'About the model', title: 'About the model', hint: 'What the simulation models, its calibration targets and every parameter', icon: <IconBook /> },
+      { id: 'model', label: 'About the model', title: 'About the model', hint: 'What the simulation models, its calibration targets and every parameter', icon: <IconBook />, ownHeader: true },
     ],
   },
 ];
@@ -152,7 +187,10 @@ export function bindStore(): FighterStoreApi {
     },
 
     validate: (def) => validateFighter(def),
-    blank: () => blankFighter(),
+    // Each blank gets an id no stored fighter has (fighter.new, then
+    // fighter.new.2, …), so saving a second new fighter creates it rather than
+    // overwriting the first through `updateFighter`.
+    blank: () => blankFighter(nextFighterId(allFighters().map((r) => r.definition.id), 'new')),
     random: (seed) => randomFighter(seed),
 
     exportJson(ids) {
@@ -178,6 +216,11 @@ export function bindStore(): FighterStoreApi {
   };
 }
 
+/** The fighter editor's React key: the fighter plus the editing session. */
+export function editorKey(fighterId: string, session: number): string {
+  return `${fighterId}#${session}`;
+}
+
 export function App(): JSX.Element {
   return (
     <ToastProvider>
@@ -188,9 +231,10 @@ export function App(): JSX.Element {
 
 function Shell(): JSX.Element {
   // `?watchDemo=1` opens straight onto the Watch screen with the demonstration
-  // bout: the QA shortcut every Phase 8 capture script uses.
+  // bout: the QA shortcut every Phase 8 capture script uses. Development or
+  // `?capture=1` only (src/app/devFlags.ts).
   const [tab, setTab] = useState<TabId>(() => (
-    typeof location !== 'undefined' && new URLSearchParams(location.search).has('watchDemo') ? 'watch' : 'match'
+    devParams().has('watchDemo') ? 'watch' : 'match'
   ));
   // Panels mount on first visit and then stay mounted (state survives).
   const [visited, setVisited] = useState<ReadonlySet<TabId>>(() => new Set([tab]));
@@ -201,14 +245,26 @@ function Shell(): JSX.Element {
 
   const store = useMemo(() => bindStore(), []);
   const matchStore = useMemo(() => bindMatchStore(), []);
+
   const [revision, setRevision] = useState(0);
   const [editing, setEditing] = useState<{ def: FighterDefinition; fromBuiltIn: boolean } | null>(null);
   const [creatorDirty, setCreatorDirty] = useState(false);
+  // Part of the editor's key: bumping it remounts the editor on its initial
+  // fighter, which is how "Discard and leave" really discards the draft (the
+  // panel itself stays mounted) and restarts dirty tracking.
+  const [editorSession, setEditorSession] = useState(0);
 
   // The match draft lives here rather than in the screen so a rematch from
   // the result screen can pre-fill it, and so switching pages never throws
   // away a half-built card.
-  const [draft, setDraft] = useState<MatchDraft>(() => defaultDraft(newSeed('bout', Date.now())));
+  // A new user lands on a runnable bout: two built-in fighters are
+  // pre-picked (when the database still has them), so "Run bout" works first.
+  const [draft, setDraft] = useState<MatchDraft>(() => {
+    const d = defaultDraft(newSeed('bout', Date.now()));
+    let ids: Set<string>;
+    try { ids = new Set(store.list().map((r) => r.definition.id)); } catch { return d; }
+    return DEFAULT_MATCHUP.every((id) => ids.has(id)) ? { ...d, slots: [...DEFAULT_MATCHUP] } : d;
+  });
   const [lastRun, setLastRun] = useState<BoutRun | null>(null);
   // What the replay view is showing. It takes a `SimConfig` and rebuilds the
   // frames itself (09 §4.5), so handing a bout over means handing over its
@@ -258,9 +314,13 @@ function Shell(): JSX.Element {
       });
       if (!ok) return;
       setCreatorDirty(false);
+      setEditorSession((n) => n + 1);
     }
+    // Opening Watch from the navigation shows the latest bout (run, opened
+    // from History, or a tournament match), not the demonstration bout.
+    if (next === 'watch' && lastRun && watching !== lastRun.config) setWatching(lastRun.config);
     go(next);
-  }, [tab, creatorDirty, confirm, go]);
+  }, [tab, creatorDirty, confirm, go, lastRun, watching]);
 
   const watchRun = useCallback((run: BoutRun) => {
     setWatching(run.config);
@@ -270,11 +330,13 @@ function Shell(): JSX.Element {
 
   const editFighter = useCallback((record: FighterRecord) => {
     setEditing({ def: record.definition, fromBuiltIn: record.builtIn });
+    setEditorSession((n) => n + 1);
     go('creator');
   }, [go]);
 
   const newFighter = useCallback(() => {
     setEditing({ def: store.blank(), fromBuiltIn: false });
+    setEditorSession((n) => n + 1);
     go('creator');
   }, [store, go]);
 
@@ -283,6 +345,7 @@ function Shell(): JSX.Element {
     // seed printed in the notes means a generated fighter can be reproduced.
     const seed = `creator.${Date.now().toString(36)}`;
     setEditing({ def: store.random(seed), fromBuiltIn: false });
+    setEditorSession((n) => n + 1);
     go('creator');
   }, [store, go]);
 
@@ -336,7 +399,11 @@ function Shell(): JSX.Element {
       aria-label={ALL_ITEMS.find((i) => i.id === id)?.title}
       hidden={tab !== id}
     >
-      {visited.has(id) ? body() : null}
+      {visited.has(id) ? (
+        <Suspense fallback={<LoadingState label={`Loading ${ALL_ITEMS.find((i) => i.id === id)?.title ?? 'page'}…`} lines={3} />}>
+          {body()}
+        </Suspense>
+      ) : null}
     </div>
   );
 
@@ -364,6 +431,8 @@ function Shell(): JSX.Element {
                   aria-label={collapsed ? it.label : undefined}
                   title={collapsed ? `${it.label} — ${it.hint}` : it.hint}
                   onClick={() => { void changeTab(it.id); }}
+                  onPointerEnter={() => prefetch(it.id)}
+                  onFocus={() => prefetch(it.id)}
                 >
                   <span className="nav-icon">{it.icon}</span>
                   <span className="nav-label">{it.label}</span>
@@ -391,10 +460,19 @@ function Shell(): JSX.Element {
 
       <div className="main">
         <header className="topbar">
-          <div className="topbar-title">
-            <b>{current.title}</b>
-            <span>{current.hint}</span>
-          </div>
+          {current.ownHeader ? null : (
+            <div className="topbar-title">
+              <b>{current.title}</b>
+              <span>{current.hint}</span>
+            </div>
+          )}
+          <p className="topbar-notice">
+            <b>Toy model</b>
+            <span title={DISCLAIMER}>Results describe this model, not what would happen between real fighters.</span>
+            {tab !== 'model' ? (
+              <Button size="sm" variant="ghost" onClick={() => { void changeTab('model'); }}>How it works</Button>
+            ) : null}
+          </p>
           <div className="topbar-actions">
             <Segmented<ThemeChoice>
               label="Colour theme"
@@ -408,14 +486,6 @@ function Shell(): JSX.Element {
             />
           </div>
         </header>
-
-        <p className="notice-strip">
-          <b>Toy model</b>
-          <span>{DISCLAIMER}</span>
-          {tab !== 'model' ? (
-            <Button size="sm" variant="ghost" onClick={() => { void changeTab('model'); }}>About the model</Button>
-          ) : null}
-        </p>
 
         <main className="app-main">
           {panel('match', true, () => (
@@ -512,7 +582,7 @@ function Shell(): JSX.Element {
                   // Remounting on a different fighter is deliberate: the editor
                   // holds a draft, and carrying one fighter's draft into another
                   // is how an editor corrupts data.
-                  key={editing.def.id}
+                  key={editorKey(editing.def.id, editorSession)}
                   store={store}
                   initial={editing.def}
                   fromBuiltIn={editing.fromBuiltIn}
@@ -524,6 +594,7 @@ function Shell(): JSX.Element {
                     go('fighters');
                   }}
                   onDirtyChange={setCreatorDirty}
+                  active={tab === 'creator'}
                 />
               )}
             </div>

@@ -36,12 +36,19 @@ export function batchConfig(template: Omit<SimConfig, 'seed'>, master: string, i
   return { ...template, seed: batchBoutSeed(master, index) };
 }
 
-export type MethodClass = 'ko' | 'sub' | 'dec' | 'draw';
+/**
+ * How the batch charts group a bout's method. `other` holds the endings that
+ * are neither a finish nor the scorecards nor a draw: a disqualification, and
+ * the street/team outcomes where a fighter escapes or the fight is separated.
+ * `draw` is kept for real draws and no contests.
+ */
+export type MethodClass = 'ko' | 'sub' | 'dec' | 'other' | 'draw';
 
 export function methodClass(m: BoutMethod): MethodClass {
   if (m === 'ko' || m.startsWith('tko') || m === 'allOpponentsStopped') return 'ko';
   if (m.startsWith('submission')) return 'sub';
   if (m.startsWith('decision') || m === 'timeLimit') return 'dec';
+  if (m === 'dq' || m === 'escaped' || m === 'separated') return 'other';
   return 'draw';
 }
 
@@ -166,7 +173,7 @@ export function fingerprint(summaries: readonly BoutSummary[]): string {
 export function aggregate(input: readonly BoutSummary[]): BatchAggregate {
   const all = [...input].sort((a, b) => a.index - b.index);
   const n = all.length;
-  const methodMix: Record<MethodClass, number> = { ko: 0, sub: 0, dec: 0, draw: 0 };
+  const methodMix: Record<MethodClass, number> = { ko: 0, sub: 0, dec: 0, other: 0, draw: 0 };
   const finishRounds: number[] = [];
   let decisions = 0;
   let finishes = 0;
@@ -175,7 +182,7 @@ export function aggregate(input: readonly BoutSummary[]): BatchAggregate {
 
   const per = [0, 1].map(() => ({
     wins: 0,
-    methods: { ko: 0, sub: 0, dec: 0, draw: 0 } as Record<MethodClass, number>,
+    methods: { ko: 0, sub: 0, dec: 0, other: 0, draw: 0 } as Record<MethodClass, number>,
     slpm: [] as number[], kd: [] as number[], td15: [] as number[], sub: [] as number[], ctrl: [] as number[],
     sigL: 0, sigA: 0, tdL: 0, tdA: 0,
   }));
@@ -185,14 +192,15 @@ export function aggregate(input: readonly BoutSummary[]): BatchAggregate {
     methodMix[cls] += 1;
     durations.push(s.totalSeconds / 60);
     if (typeof s.winner === 'number') {
-      if (cls !== 'dec' && cls !== 'draw') {
+      if (cls === 'ko' || cls === 'sub') {
         finishes += 1;
         const r = Math.max(1, s.round) - 1;
         while (finishRounds.length <= r) finishRounds.push(0);
         finishRounds[r] += 1;
-      } else {
+      } else if (cls === 'dec') {
         decisions += 1;
       }
+      // A DQ (or an escape/separation) win is neither a finish nor a decision.
       const w = per[s.winner];
       if (w) {
         w.wins += 1;

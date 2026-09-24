@@ -94,4 +94,15 @@ The presentation sub-review found this. I checked the code and it is highly plau
 - **Overlays:** the dialog's focus trap and focus return work, and toast timers are cleared.
 
 ## Full test suite (vitest)
-The suite on the HEAD export had not finished when I handed back: 192 tests had passed and 0 had failed at that point. The full log is at scratchpad/head/vitest.log.
+Final result on the HEAD export: 44 of 45 test files and 1421 tests passed. 3 tests failed, all in `tests/calibration.infra.test.ts` under "batch runner", all by timing out:
+- "produces byte-identical rows on one worker and on two" hit its 180 s timeout.
+- "resumes an interrupted run (with a torn last line) to the same rows" hit its 180 s timeout.
+- "refuses to overwrite a run without --resume" hit its 5 s timeout.
+
+These tests call `runBatch` with the default throttle. That throttle pauses whenever the whole machine is above the CPU/RAM cap, and this range lowered the cap from 0.93 to 0.88 (`scripts/batch/monitor.ts`, `DEFAULT_THROTTLE`).
+
+My run shared the machine with the golden check and two review agents, so the throttle was very likely holding the batch paused. That the timeouts come from load is my inference; I did not confirm that the tests pass on an idle machine or on CI.
+
+Either way, the tests depend on machine load, so they are a flakiness risk.
+- Fix: pass an explicit throttle in the test helper (`tests/calibration.infra.test.ts:46`), e.g. `throttle: { cap: 0.999, resumeBelow: 0.99 }`.
+- Then re-run that file alone on a quiet machine to confirm.

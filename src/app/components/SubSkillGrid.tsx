@@ -22,6 +22,7 @@ import { DISCIPLINE_META } from '../model/fieldMeta';
 import type { DisciplineSection } from '../model/editorModel';
 import type { DisciplineTierRow } from '../model/derivedModel';
 import { clampNumber, describedByIdForPath, fieldIdForPath } from '../model/paths';
+import { NumberInput, rangeLabel } from '../ui/numberInput';
 
 export interface SubSkillGridProps {
   section: DisciplineSection;
@@ -102,17 +103,17 @@ export function SubSkillGrid({
           <div className="disc-years">
             <div className="fc-field">
               <label htmlFor={yearsId}>{DISCIPLINE_META.years.label}</label>
-              <input
+              <NumberInput
                 id={yearsId}
                 className="field"
-                type="number"
                 min={DISCIPLINE_META.years.clamp?.min}
                 max={DISCIPLINE_META.years.clamp?.max}
                 step={0.5}
                 value={section.years}
+                title={rangeLabel(DISCIPLINE_META.years.clamp?.min, DISCIPLINE_META.years.clamp?.max) ?? undefined}
                 aria-describedby={describedByIdForPath(section.yearsPath)}
-                onChange={(e) =>
-                  onChange(section.yearsPath, clampNumber(e.target.value, DISCIPLINE_META.years.clamp!, section.years))
+                onCommit={(raw) =>
+                  onChange(section.yearsPath, clampNumber(raw, DISCIPLINE_META.years.clamp!, section.years))
                 }
               />
               <p className="fc-help" id={describedByIdForPath(section.yearsPath)}>
@@ -122,19 +123,19 @@ export function SubSkillGrid({
 
             <div className="fc-field">
               <label htmlFor={qualityId}>{DISCIPLINE_META.trainingQuality.label}</label>
-              <input
+              <NumberInput
                 id={qualityId}
                 className="field"
-                type="number"
                 min={DISCIPLINE_META.trainingQuality.clamp?.min}
                 max={DISCIPLINE_META.trainingQuality.clamp?.max}
                 step={0.05}
                 value={section.trainingQuality}
+                title={rangeLabel(DISCIPLINE_META.trainingQuality.clamp?.min, DISCIPLINE_META.trainingQuality.clamp?.max) ?? undefined}
                 aria-describedby={describedByIdForPath(section.qualityPath)}
-                onChange={(e) =>
+                onCommit={(raw) =>
                   onChange(
                     section.qualityPath,
-                    clampNumber(e.target.value, DISCIPLINE_META.trainingQuality.clamp!, section.trainingQuality),
+                    clampNumber(raw, DISCIPLINE_META.trainingQuality.clamp!, section.trainingQuality),
                   )
                 }
               />

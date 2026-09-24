@@ -36,7 +36,7 @@ import { DerivedPanel } from '../components/DerivedPanel';
 import { ProfileEditor } from '../components/ProfileEditor';
 import { TierBadge } from '../components/TierBadge';
 import {
-  Alert, Button, Dialog, EmptyState, Segmented, StatusBadge, useConfirm, useToast,
+  Alert, Button, Dialog, EmptyState, NumberInput, Segmented, rangeLabel, StatusBadge, useConfirm, useToast,
   IconCompare, IconCopy, IconDownload, IconSearch, IconSliders, IconUndo, IconX,
 } from '../ui';
 import { noSimEffect } from '../model/profileModel';
@@ -49,11 +49,12 @@ import {
 import { deriveSafely, disciplineTierRows } from '../model/derivedModel';
 import {
   BODY_META, BUILD_META, DISCIPLINE_LABELS, EXPERIENCE_META, HISTORY_META, MENTAL_META,
-  PHYSICAL_GROUPS, PHYSICAL_META, RECORD_META, STYLE_META, humaniseKey, weightClassLabel,
+  PHYSICAL_GROUPS, PHYSICAL_META, RECORD_META, STYLE_META, humaniseKey, topDisciplineLabel, weightClassLabel,
   type FieldMeta,
 } from '../model/fieldMeta';
 import { clampNumber, deleteAtPath, describedByIdForPath, fieldIdForPath, getAtPath, setAtPath } from '../model/paths';
 import { dualLength, dualMass } from '../model/units';
+import { DraftHistory } from '../model/draftHistory';
 
 // --------------------------------------------------------------------------
 // Sections
@@ -157,6 +158,7 @@ function NumberField({
   const descId = describedByIdForPath(path);
   const clamp = meta.clamp ?? { min: -1e9, max: 1e9, dp: 3 };
   const commit = (raw: string): void => onChange(path, clampNumber(raw, clamp, value));
+  const range = rangeLabel(clamp.min, clamp.max);
   return (
     <div className={`fc-field${invalid ? ' is-invalid' : ''}`} data-path={path}>
       <label htmlFor={id}>
@@ -165,20 +167,18 @@ function NumberField({
         <NoEffect path={path} />
       </label>
       <div className="fc-input-row">
-        <input
+        <NumberInput
           id={id}
           className="field"
-          type="number"
-          inputMode="decimal"
           min={clamp.min}
           max={clamp.max}
           step={step}
-          value={Number.isFinite(value) ? value : 0}
+          value={value}
           aria-describedby={descId}
-          onChange={(e) => commit(e.target.value)}
-          onBlur={(e) => commit(e.target.value)}
+          onCommit={commit}
         />
         {suffix ? <span className="fc-suffix mono">{suffix}</span> : null}
+        {range ? <span className="fc-range mono" title="Allowed range; applied when you leave the box or press Enter">{range}</span> : null}
       </div>
       <p className="fc-help" id={descId}>{meta.help}</p>
     </div>
@@ -258,6 +258,11 @@ export interface FighterCreatorProps {
   onDirtyChange?: (dirty: boolean) => void;
   /** Bumped by the shell when the database changes (the compare list reads it). */
   revision?: number;
+  /**
+   * Whether the editor's page is the one showing. The shell keeps visited
+   * pages mounted, so global shortcuts must check this. Defaults to true.
+   */
+  active?: boolean;
 }
 
 type EditorView = 'basic' | 'advanced' | 'schema';
@@ -284,8 +289,28 @@ export function applyPreset(draft: FighterDefinition, preset: FighterDefinition)
   };
 }
 
+/**
+ * Which history command a key press means, or null. Ctrl/Cmd+Z undoes,
+ * Ctrl/Cmd+Shift+Z and Ctrl+Y redo; nothing fires while typing in a text box
+ * (the browser's own text undo is the one meant there) or while the editor is
+ * not the page on screen.
+ */
+export function undoShortcut(
+  e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; key: string; target: EventTarget | null },
+  active: boolean,
+): 'undo' | 'redo' | null {
+  if (!active || !(e.ctrlKey || e.metaKey)) return null;
+  const t = e.target as { tagName?: string; type?: string } | null;
+  const typing = !!t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && ['text', 'search', 'number'].includes(t.type ?? '')));
+  if (typing) return null;
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) return 'undo';
+  if ((k === 'z' && e.shiftKey) || k === 'y') return 'redo';
+  return null;
+}
+
 export function FighterCreator({
-  store, initial, fromBuiltIn, onSaved, onCancel, onDirtyChange, revision = 0,
+  store, initial, fromBuiltIn, onSaved, onCancel, onDirtyChange, revision = 0, active = true,
 }: FighterCreatorProps): JSX.Element {
   const [baseline, setBaseline] = useState<FighterDefinition>(initial);
   const [draft, setDraftRaw] = useState<FighterDefinition>(initial);
@@ -303,84 +328,57 @@ export function FighterCreator({
   const toast = useToast();
 
   // ---- undo history -------------------------------------------------------
-  // Past states, newest last. Edits to the same field within
-  // UNDO_COALESCE_MS merge, so one slider drag is one undo step.
-  const past = useRef<FighterDefinition[]>([]);
-  const future = useRef<FighterDefinition[]>([]);
-  const lastEdit = useRef<{ key: string; at: number } | null>(null);
+  // Lives in `DraftHistory` (src/app/model/draftHistory.ts). Bookkeeping
+  // happens there rather than inside a state updater, because StrictMode runs
+  // updaters twice in development and would record every step twice.
+  const [history] = useState(() => new DraftHistory<FighterDefinition>(initial, UNDO_COALESCE_MS, UNDO_LIMIT));
   const [, setHistoryTick] = useState(0);
 
-  // The current draft, readable synchronously. History bookkeeping happens
-  // here rather than inside a state updater, because StrictMode runs
-  // updaters twice in development and would record every step twice.
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
+  const show = useCallback((next: FighterDefinition | null) => {
+    if (next === null) return;
+    setDraftRaw(next);
+    setHistoryTick((t) => t + 1);
+  }, []);
 
   const update = useCallback((fn: (d: FighterDefinition) => FighterDefinition, key = '*') => {
-    const d = draftRef.current;
-    const next = fn(d);
-    if (next === d) return;
-    const now = Date.now();
-    const merge = lastEdit.current !== null && key !== '*' && lastEdit.current.key === key
-      && now - lastEdit.current.at < UNDO_COALESCE_MS;
-    if (!merge) {
-      past.current.push(d);
-      if (past.current.length > UNDO_LIMIT) past.current.shift();
-    }
-    future.current = [];
-    lastEdit.current = { key, at: now };
-    draftRef.current = next;
-    setDraftRaw(next);
-    setHistoryTick((t) => t + 1);
-  }, []);
+    show(history.update(fn, key));
+  }, [history, show]);
 
-  const undo = useCallback(() => {
-    const prev = past.current.pop();
-    if (!prev) return;
-    future.current.push(draftRef.current);
-    draftRef.current = prev;
-    setDraftRaw(prev);
-    lastEdit.current = null;
-    setHistoryTick((t) => t + 1);
-  }, []);
+  const undo = useCallback(() => show(history.undo()), [history, show]);
+  const redo = useCallback(() => show(history.redo()), [history, show]);
 
-  const redo = useCallback(() => {
-    const next = future.current.pop();
-    if (!next) return;
-    past.current.push(draftRef.current);
-    draftRef.current = next;
-    setDraftRaw(next);
-    lastEdit.current = null;
-    setHistoryTick((t) => t + 1);
-  }, []);
+  /** The toast "Undo" for an action: puts back the draft from before it. */
+  const undoAction = useCallback((restore: (d: FighterDefinition) => FighterDefinition) => (): void => {
+    update(restore);
+  }, [update]);
 
   // A new fighter arriving from the database replaces the whole editor state,
   // baseline included — otherwise the dirty flag would compare the new fighter
   // against the old one and claim unsaved changes immediately.
   useEffect(() => {
     setBaseline(initial);
+    history.reset(initial);
     setDraftRaw(initial);
-    past.current = [];
-    future.current = [];
+    setHistoryTick((t) => t + 1);
     setExpanded(new Set(Object.keys(initial.disciplines)));
     setMessage(null);
-  }, [initial]);
+  }, [initial, history]);
 
-  // Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z / Ctrl+Y, except inside a text box,
-  // where the browser's own text undo is the one the user means.
+  // Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z / Ctrl+Y, except inside a text box, where
+  // the browser's own text undo is the one the user means — and only while
+  // this screen is showing: the editor stays mounted when hidden, and a hidden
+  // draft must never be edited from another page.
   useEffect(() => {
+    if (!active) return undefined;
     const onKey = (e: KeyboardEvent): void => {
-      if (!(e.ctrlKey || e.metaKey)) return;
-      const t = e.target as HTMLElement | null;
-      const typing = t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && ['text', 'search'].includes((t as HTMLInputElement).type)));
-      if (typing) return;
-      const k = e.key.toLowerCase();
-      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
-      else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); redo(); }
+      const cmd = undoShortcut(e, active);
+      if (cmd === null) return;
+      e.preventDefault();
+      if (cmd === 'undo') undo(); else redo();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [undo, redo]);
+  }, [undo, redo, active]);
 
   const dirty = useMemo(() => isDirty(baseline, draft), [baseline, draft]);
 
@@ -466,23 +464,24 @@ export function FighterCreator({
   }, [update]);
 
   const untrainDiscipline = useCallback((id: string) => {
+    const restore = history.restorePoint();
     update((d) => deleteAtPath(d, `disciplines.${id}`));
-    toast({ message: `Removed ${DISCIPLINE_LABELS[id] ?? id} and its sub-skills.`, actionLabel: 'Undo', onAction: undo });
-  }, [update, toast, undo]);
+    toast({ message: `Removed ${DISCIPLINE_LABELS[id] ?? id} and its sub-skills.`, actionLabel: 'Undo', onAction: undoAction(restore) });
+  }, [history, update, toast, undoAction]);
 
   const save = useCallback(() => {
     if (hasErrors) return;
     try {
       const saved = store.save(draft);
       setBaseline(saved.definition);
-      draftRef.current = saved.definition;
+      history.replace(saved.definition);
       setDraftRaw(saved.definition);
       setMessage({ tone: 'ok', text: fromBuiltIn ? 'Saved as a new custom fighter (built-in archetypes are read-only).' : 'Saved.' });
       onSaved(saved);
     } catch (err) {
       setMessage({ tone: 'alert', text: `Could not save: ${err instanceof Error ? err.message : String(err)}` });
     }
-  }, [store, draft, hasErrors, fromBuiltIn, onSaved]);
+  }, [store, draft, hasErrors, fromBuiltIn, onSaved, history]);
 
   const saveAsCopy = useCallback(() => {
     if (hasErrors) return;
@@ -521,15 +520,17 @@ export function FighterCreator({
 
   const revert = useCallback(() => {
     if (!dirty) return;
+    const restore = history.restorePoint();
     update(() => baseline);
-    toast({ message: 'Reverted to the last save.', actionLabel: 'Undo', onAction: undo });
-  }, [dirty, baseline, update, toast, undo]);
+    toast({ message: 'Reverted to the last save.', actionLabel: 'Undo', onAction: undoAction(restore) });
+  }, [dirty, baseline, history, update, toast, undoAction]);
 
   const usePreset = useCallback((record: FighterRecord) => {
+    const restore = history.restorePoint();
     update((d) => applyPreset(d, record.definition));
     setPresetsOpen(false);
-    toast({ message: `Applied the “${record.summary.name}” preset. Name, nickname and look were kept.`, actionLabel: 'Undo', onAction: undo });
-  }, [update, toast, undo]);
+    toast({ message: `Applied the “${record.summary.name}” preset. Name, nickname and look were kept.`, actionLabel: 'Undo', onAction: undoAction(restore) });
+  }, [history, update, toast, undoAction]);
 
   const sections = useMemo(() => disciplineSections(draft), [draft]);
   const runtimeDisciplines = derived.runtime?.disciplines ?? null;
@@ -589,9 +590,9 @@ export function FighterCreator({
           </div>
           <div className="creator-buttons">
             <Button size="sm" variant="ghost" iconOnly icon={<IconUndo />} aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)"
-              disabled={past.current.length === 0} onClick={undo} />
+              disabled={history.past.length === 0} onClick={undo} />
             <Button size="sm" variant="ghost" iconOnly icon={<IconUndo style={{ transform: 'scaleX(-1)' }} />} aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z)"
-              disabled={future.current.length === 0} onClick={redo} />
+              disabled={history.future.length === 0} onClick={redo} />
             <Button size="sm" icon={<IconSliders />} onClick={() => setPresetsOpen(true)} title="Start from one of the built-in archetypes">Presets</Button>
             <Button size="sm" icon={<IconDownload />} onClick={exportDraft} title="Download this fighter as a JSON file">Export</Button>
             <Button size="sm" icon={<IconCopy />} onClick={saveAsCopy} disabled={hasErrors} title="Save the current edits as a new fighter">Save as copy</Button>
@@ -826,7 +827,7 @@ export function FighterCreator({
               <li key={r.definition.id}>
                 <button type="button" className="preset-card" onClick={() => usePreset(r)}>
                   <span className="preset-name">{r.summary.name} <TierBadge tier={r.summary.overallTier} /></span>
-                  <span className="preset-meta">{weightClassLabel(r.summary.weightClass)} · {r.summary.topDiscipline} · {r.summary.recordLine}</span>
+                  <span className="preset-meta">{weightClassLabel(r.summary.weightClass)} · {topDisciplineLabel(r.summary.topDiscipline)} ·{r.summary.recordLine}</span>
                   {r.definition.notes ? <span className="preset-note">{r.definition.notes}</span> : null}
                 </button>
               </li>
@@ -1466,17 +1467,17 @@ function StyleSection({ draft, onNumber, onField, bad }: SectionProps): JSX.Elem
             <label className="visually-hidden" htmlFor={fieldIdForPath(`style.favouriteCombos.${i}.weight`)}>
               Weight for {c.id}
             </label>
-            <input
+            <NumberInput
               id={fieldIdForPath(`style.favouriteCombos.${i}.weight`)}
               className="field combo-weight"
-              type="number"
               min={0}
               max={5}
               step={0.1}
               value={c.weight}
-              onChange={(e) => {
+              title="0–5"
+              onCommit={(raw) => {
                 const next = combos.slice();
-                next[i] = { ...c, weight: clampNumber(e.target.value, { min: 0, max: 5, dp: 2 }, c.weight) };
+                next[i] = { ...c, weight: clampNumber(raw, { min: 0, max: 5, dp: 2 }, c.weight) };
                 onField('style.favouriteCombos', next);
               }}
             />
@@ -1553,17 +1554,17 @@ function WeightedList({
               <span className="weighted-name">{nameOf(id)}</span>
               <code className="mono weighted-id">{id}</code>
               <label className="visually-hidden" htmlFor={wId}>Weight for {nameOf(id)}</label>
-              <input
+              <NumberInput
                 id={wId}
                 className="field weighted-weight"
-                type="number"
                 min={0}
                 max={5}
                 step={0.1}
                 value={weight}
-                onChange={(ev) => {
+                title="0–5"
+                onCommit={(raw) => {
                   const next = entries.slice();
-                  next[i] = { ...e, weight: clampNumber(ev.target.value, { min: 0, max: 5, dp: 2 }, weight) };
+                  next[i] = { ...e, weight: clampNumber(raw, { min: 0, max: 5, dp: 2 }, weight) };
                   onChange(next);
                 }}
               />

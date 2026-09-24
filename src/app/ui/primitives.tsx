@@ -12,6 +12,7 @@
 import {
   forwardRef, useId, type ButtonHTMLAttributes, type KeyboardEvent, type ReactNode,
 } from 'react';
+import { NumberInput } from './numberInput';
 
 // --------------------------------------------------------------------------
 // Button
@@ -294,18 +295,19 @@ export function Slider({
         onChange={(e) => onChange(Number(e.target.value))}
       />
       {withNumber ? (
-        <input
+        <NumberInput
           className="field ui-slider-number"
-          type="number"
           min={min}
           max={max}
           step={step}
           value={Number.isFinite(value) ? value : min}
           disabled={disabled}
+          title={`${min}–${max}`}
           aria-label={typeof label === 'string' ? `${label} (exact value)` : 'Exact value'}
-          onChange={(e) => {
-            const n = Number(e.target.value);
-            if (e.target.value !== '' && Number.isFinite(n)) onChange(Math.min(max, Math.max(min, n)));
+          onCommit={(raw) => {
+            // Typing is free; the clamp applies on blur or Enter.
+            const n = Number(raw);
+            if (raw.trim() !== '' && Number.isFinite(n)) onChange(Math.min(max, Math.max(min, n)));
           }}
         />
       ) : <span />}

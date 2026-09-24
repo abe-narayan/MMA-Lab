@@ -4,7 +4,7 @@
  *   npx tsx scripts/batch/run.ts --plan baseline,tier_matrix,identical --n 40 \
  *       --seed cal-2026-09 --out runs/pre-tuning [--max-workers 2] [--resume]
  *       [--params overrides.json] [--filter cell=LW] [--cap 0.88] [--resume-below 0.80]
- *       [--affinity 3F] [--per-worker-mb 200] [--sample-ms 2000] [--list]
+ *       [--affinity 1F] [--per-worker-mb 200] [--sample-ms 2000] [--list]
  *
  *   --plan         plan id(s), comma-separated (see --list)
  *   --n            bouts per cell: one number, or `plan=n,plan=n`; default = each plan's

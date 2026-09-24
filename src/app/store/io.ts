@@ -21,7 +21,7 @@
  */
 
 import { SIM_ENGINE_VERSION, type FighterDefinition } from '../../sim';
-import { NAME_MAX, validateFighter } from './validate';
+import { ID_MAX, NAME_MAX, validateFighter } from './validate';
 import type {
   BoutLabExport, FighterRecord, HistoryEntry, MatchupPreset, Tournament, ValidationIssue,
 } from './types';
@@ -119,13 +119,18 @@ function empty(): ImportResult {
   };
 }
 
-/** `"<id> (imported)"`, then `(imported 2)`, … — never an overwrite (09 §3.6). */
-function freeId(id: string, taken: Set<string>): string {
+/**
+ * `"<id> (imported)"`, then `(imported 2)`, … — never an overwrite (09 §3.6).
+ * The base is shortened first so the suffixed id still fits in ID_MAX: an id
+ * stored over the limit would fail validation on every later Save.
+ */
+export function freeId(id: string, taken: ReadonlySet<string>): string {
   if (!taken.has(id)) return id;
-  const first = `${id} (imported)`;
+  const withSuffix = (suffix: string): string => `${id.slice(0, Math.max(1, ID_MAX - suffix.length))}${suffix}`;
+  const first = withSuffix(' (imported)');
   if (!taken.has(first)) return first;
   for (let n = 2; ; n++) {
-    const candidate = `${id} (imported ${n})`;
+    const candidate = withSuffix(` (imported ${n})`);
     if (!taken.has(candidate)) return candidate;
   }
 }

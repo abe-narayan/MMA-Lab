@@ -26,6 +26,7 @@ import {
   type BatchAggregate, type BoutSummary, type Interval, type MethodClass,
 } from '../model/batchModel';
 import { defaultWorkerCount, runBatch, type BatchHandle, type BatchOutcome } from '../run/batchRun';
+import { topDisciplineLabel } from '../model/fieldMeta';
 import {
   Alert, Button, EmptyState, ErrorState, Field, InfoTip, Progress, Segmented, Select, StatusBadge,
   IconBatch, IconDice, IconDownload, IconPlay, IconStop, IconUsers,
@@ -37,18 +38,41 @@ export interface BatchSimProps {
 }
 
 const METHOD_LABEL: Readonly<Record<MethodClass, string>> = {
-  ko: 'KO / TKO', sub: 'Submission', dec: 'Decision', draw: 'Draw / NC',
+  ko: 'KO / TKO', sub: 'Submission', dec: 'Decision', other: 'DQ / other', draw: 'Draw / NC',
 };
-const METHOD_ORDER: readonly MethodClass[] = ['ko', 'sub', 'dec', 'draw'];
+const METHOD_ORDER: readonly MethodClass[] = ['ko', 'sub', 'dec', 'other', 'draw'];
+/** The ways a fighter can win (a draw is nobody's). */
+const WIN_METHODS: readonly MethodClass[] = ['ko', 'sub', 'dec', 'other'];
 const METHOD_COLOR: Readonly<Record<MethodClass, string>> = {
-  ko: 'var(--chart-1)', sub: 'var(--chart-2)', dec: 'var(--chart-3)', draw: 'var(--chart-4)',
+  ko: 'var(--chart-1)', sub: 'var(--chart-2)', dec: 'var(--chart-3)', other: 'var(--muted)', draw: 'var(--chart-4)',
 };
 
-type Phase =
+/**
+ * What a batch was run with, captured when it starts. Results render from this
+ * snapshot, never from the live form, so changing a corner or the seed after a
+ * run cannot relabel numbers that belong to a different matchup.
+ */
+export interface BatchRunInfo {
+  names: [string, string];
+  master: string;
+}
+
+export type BatchPhase =
   | { kind: 'idle' }
-  | { kind: 'running'; done: number; errors: number; total: number; eta: number | null; rate: number; startedAt: number }
-  | { kind: 'finished'; outcome: BatchOutcome; agg: BatchAggregate }
+  | { kind: 'running'; run: BatchRunInfo; done: number; errors: number; total: number; eta: number | null; rate: number; startedAt: number }
+  | { kind: 'finished'; run: BatchRunInfo; outcome: BatchOutcome; agg: BatchAggregate }
   | { kind: 'failed'; message: string };
+type Phase = BatchPhase;
+
+/** The corner names the results panel shows: the run's own, else the form's. */
+export function batchResultNames(phase: BatchPhase, current: [string, string]): [string, string] {
+  return phase.kind === 'running' || phase.kind === 'finished' ? phase.run.names : current;
+}
+
+/** The CSV file name for a finished batch, from the seed it actually ran with. */
+export function batchCsvFileName(run: BatchRunInfo): string {
+  return `boutlab-batch-${run.master.replace(/[^a-z0-9]+/gi, '_')}.csv`;
+}
 
 const pct = (v: number, dp = 1): string => `${(v * 100).toFixed(dp)}%`;
 const ci = (i: Interval, f: (v: number) => string): string => `${f(i.lo)} – ${f(i.hi)}`;
@@ -120,8 +144,9 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
     const startedAt = performance.now();
     const collected: BoutSummary[] = [];
     let lastPaint = 0;
+    const run: BatchRunInfo = { names: [a.summary.name, b.summary.name], master: master.trim() };
     setLive(null);
-    setPhase({ kind: 'running', done: 0, errors: 0, total: bouts, eta: null, rate: 0, startedAt });
+    setPhase({ kind: 'running', run, done: 0, errors: 0, total: bouts, eta: null, rate: 0, startedAt });
     const h = runBatch({ template, master: master.trim(), bouts }, {
       workers,
       onSummary: (s) => collected.push(s),
@@ -132,7 +157,7 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
         // turn into thousands of renders.
         if (t - lastPaint < 160 && p.done + p.errors < p.total) return;
         lastPaint = t;
-        setPhase({ kind: 'running', done: p.done, errors: p.errors, total: p.total, eta: e, rate: eta.rate(t, p.done), startedAt });
+        setPhase({ kind: 'running', run, done: p.done, errors: p.errors, total: p.total, eta: e, rate: eta.rate(t, p.done), startedAt });
         if (collected.length >= 5) setLive(aggregate(collected));
       },
     });
@@ -141,7 +166,7 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
       (outcome) => {
         handle.current = null;
         setLive(null);
-        setPhase({ kind: 'finished', outcome, agg: aggregate(outcome.summaries) });
+        setPhase({ kind: 'finished', run, outcome, agg: aggregate(outcome.summaries) });
       },
       (err: unknown) => {
         handle.current = null;
@@ -162,13 +187,13 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
     const url = URL.createObjectURL(new Blob([`${head}\n${rows.join('\n')}\n`], { type: 'text/csv' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = `boutlab-batch-${master.replace(/[^a-z0-9]+/gi, '_')}.csv`;
+    link.download = batchCsvFileName(phase.run);
     link.click();
     URL.revokeObjectURL(url);
-  }, [phase, master]);
+  }, [phase]);
 
   const shown: BatchAggregate | null = phase.kind === 'finished' ? phase.agg : live;
-  const names: [string, string] = [a?.summary.name ?? 'Fighter A', b?.summary.name ?? 'Fighter B'];
+  const names = batchResultNames(phase, [a?.summary.name ?? 'Fighter A', b?.summary.name ?? 'Fighter B']);
 
   return (
     <div className="batch">
@@ -398,7 +423,7 @@ function FighterPick({
       />
       {r ? (
         <p className="batch-pick-meta">
-          {r.summary.recordLine} · {r.summary.weightClass} · {r.summary.stance} · {r.summary.topDiscipline}
+          {r.summary.recordLine} · {r.summary.weightClass} · {r.summary.stance} · {topDisciplineLabel(r.summary.topDiscipline)}
         </p>
       ) : null}
     </div>
@@ -452,8 +477,8 @@ function Results({
             return (
               <div className="batch-stack-row" key={i}>
                 <span className="batch-stack-name" data-corner={i === 0 ? 'a' : 'b'}>{names[i]}</span>
-                <div className="batch-stack" role="img" aria-label={`${names[i]}: ${METHOD_ORDER.slice(0, 3).map((m) => `${METHOD_LABEL[m]} ${pct(f.methods[m] / agg.n)}`).join(', ')}`}>
-                  {METHOD_ORDER.slice(0, 3).map((m) => {
+                <div className="batch-stack" role="img" aria-label={`${names[i]}: ${WIN_METHODS.map((m) => `${METHOD_LABEL[m]} ${pct(f.methods[m] / agg.n)}`).join(', ')}`}>
+                  {WIN_METHODS.map((m) => {
                     const share = f.methods[m] / agg.n;
                     return share > 0 ? (
                       <span key={m} className="batch-seg" style={{ width: `${share * 100}%`, background: METHOD_COLOR[m] }}

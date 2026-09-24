@@ -112,6 +112,7 @@
 
 .fc-unit { color: var(--faint); font-weight: 400; }
 .fc-suffix { font-size: 11px; color: var(--faint); white-space: nowrap; }
+.fc-range { font-size: 11px; color: var(--faint); white-space: nowrap; }
 
 .fc-help {
   margin: 0;

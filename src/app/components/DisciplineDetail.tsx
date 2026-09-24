@@ -26,6 +26,7 @@ import {
 import type { DisciplineSection } from '../model/editorModel';
 import type { DisciplineTierRow } from '../model/derivedModel';
 import { clampNumber, describedByIdForPath, fieldIdForPath } from '../model/paths';
+import { NumberInput, rangeLabel } from '../ui/numberInput';
 
 export interface DisciplineDetailProps {
   section: DisciplineSection;
@@ -51,24 +52,23 @@ function Num({
   const descId = describedByIdForPath(path);
   const clamp = meta.clamp ?? { min: -1e9, max: 1e9, dp: 2 };
   const commit = (raw: string): void => onChange(path, clampNumber(raw, clamp, value));
+  const range = rangeLabel(clamp.min, clamp.max);
   return (
     <div className={`fc-field${invalid ? ' is-invalid' : ''}`} data-path={path}>
       <label htmlFor={id}>
         {meta.label}
         {meta.unit ? <span className="fc-unit"> ({meta.unit})</span> : null}
+        {range ? <span className="fc-range mono"> {range}</span> : null}
       </label>
-      <input
+      <NumberInput
         id={id}
         className="field"
-        type="number"
-        inputMode="decimal"
         min={clamp.min}
         max={clamp.max}
         step={step}
-        value={Number.isFinite(value) ? value : 0}
+        value={value}
         aria-describedby={descId}
-        onChange={(e) => commit(e.target.value)}
-        onBlur={(e) => commit(e.target.value)}
+        onCommit={commit}
       />
       <p className="fc-help" id={descId}>{meta.help}</p>
     </div>

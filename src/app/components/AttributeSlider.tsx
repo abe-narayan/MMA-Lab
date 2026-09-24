@@ -20,6 +20,7 @@ import { useId } from 'react';
 import { bandOf, TIER_BANDS } from '../model/editorModel';
 import { clampNumber, describedByIdForPath, fieldIdForPath } from '../model/paths';
 import { ATTRIBUTE_CLAMP } from '../model/fieldMeta';
+import { NumberInput } from '../ui/numberInput';
 
 export interface AttributeSliderProps {
   /** Dotted path into the definition; also the control's DOM id. */
@@ -85,20 +86,18 @@ export function AttributeSlider({
         />
       </div>
 
-      <input
+      {/* Typing is free; the value is clamped to 0–100 on blur or Enter. */}
+      <NumberInput
         className="field attr-slider-number"
-        type="number"
         min={0}
         max={100}
         step={1}
-        value={Number.isFinite(value) ? value : 0}
+        value={value}
         disabled={disabled}
-        aria-label={`${label}, numeric entry`}
+        title="0–100"
+        aria-label={`${label}, numeric entry (0 to 100)`}
         aria-describedby={descId}
-        onChange={(e) => commit(e.target.value)}
-        // Clamp on blur as well: the number input will happily hold 9999 while
-        // focused, and the definition must never see it.
-        onBlur={(e) => commit(e.target.value)}
+        onCommit={commit}
       />
 
       <span className="attr-slider-band-name" id={helpId} title={`Skill band ${band.lo}–${band.hi}`}>
