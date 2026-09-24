@@ -374,7 +374,9 @@ export function buildCardStrips(rows: readonly Row[], fromRow: number, u: CrowdU
   const shirtI = floor(h2.mul(SHIRTS.length));
   const shirtCol = shirtFromIndex(shirtI);
   const skinCol = skinFromIndex(floor(h3.mul(SKINS.length)));
-  const albedo = select(head, skinCol, shirtCol);
+  // Faces a little under their albedo: at broadcast distance a bowl of evenly
+  // bright faces reads as speckle, not as a crowd sitting in the dark.
+  const albedo = select(head, skinCol.mul(0.78), shirtCol);
   const P = positionWorld;
   // Light varies over metres, not pixels: evaluate it per vertex.
   const light = varying(standLight(u, P, vec3(P.x.negate(), 0, P.z.negate()).normalize()), 'vCardLight');
@@ -388,7 +390,9 @@ export function buildCardStrips(rows: readonly Row[], fromRow: number, u: CrowdU
   m.opacityNode = max(m.opacityNode as N, select(sparkle, max(flash, phone).mul(occupied), float(0)));
   // The seat row in front shadows the lower body.
   const lowShade = smoothstep(-0.35, 0.15, y).mul(0.75).add(0.25);
-  m.colorNode = albedo.mul(light).mul(h3.mul(0.9).add(0.55)).mul(lowShade).mul(1.4).add(vec3(1, 1, 1).mul(glow));
+  // Per-seat brightness spread kept modest (was 0.55-1.45): enough to break the
+  // rows up, not so much that the far bowl sparkles.
+  m.colorNode = albedo.mul(light).mul(h3.mul(0.45).add(0.8)).mul(lowShade).mul(1.4).add(vec3(1, 1, 1).mul(glow));
   const mesh = new THREE.Mesh(g, m);
   mesh.name = 'arena.crowd.cards';
   return mesh;

@@ -27,7 +27,8 @@ export interface Hall {
 
 const MAT_T = 0.05;
 
-export function buildHall(arena: Arena, matMaterial: THREE.Material, L: number, seed: number): Hall {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function buildHall(arena: Arena, matMaterial: THREE.Material, L: number, seed: number, ledTime: any = null): Hall {
   const group = new THREE.Group();
   group.name = 'arena.hall';
   const h = wallInradius(arena);
@@ -119,7 +120,7 @@ export function buildHall(arena: Arena, matMaterial: THREE.Material, L: number, 
   }
   // LED advertising boards around the safety area (as at judo and grappling events).
   const ledTex = ledBoardTexture(`hall:${seed}`, '#c0161d');
-  const ledMat = ledMaterial(ledTex, 0.8);
+  const ledMat = ledMaterial(ledTex, 0.7, null, ledTime ? { time: ledTime } : null);
   const boards = new MergeBuilder();
   const bE = e + 1.9;
   const boardH = 0.8;

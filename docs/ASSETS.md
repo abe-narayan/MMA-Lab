@@ -219,6 +219,7 @@ PBR sets retrieved 2026-09-23 from the Poly Haven public API (`https://api.polyh
 - **Attribution** (courtesy, not required): *"Rough Linen" by colormass, Rico Cilliers, Poly Haven (CC0).*
 - **Files**: `static/assets/textures/canvas/ao.jpg` (1053808 B), `static/assets/textures/canvas/color.jpg` (3607181 B), `static/assets/textures/canvas/normal.jpg` (3849356 B), `static/assets/textures/canvas/roughness.jpg` (1083725 B)
 - **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
+- **Used at runtime** (arena lookdev pass, 2026-09-24): `normal.jpg` (weave normal) and `ao.jpg` (thread-gap cavity: albedo/roughness breakup of the octagon and ring canvas, same 0.45 m tiling), loaded by `src/presentation/arena/assets.ts` on Medium and up. `color.jpg` and `roughness.jpg` are not loaded.
 
 ### tex.polyhaven.fabric_leather_02
 - **What**: "Fabric Leather 02" PBR texture set — synthetic leather / vinyl for corner pads, post padding, fence top pad.

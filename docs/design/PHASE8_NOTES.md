@@ -256,6 +256,108 @@ boards, not live broadcast graphics; the hall and street are serviceable rather 
 street's buildings are boxes); the haze is a stylised column, not true volumetrics. RectAreaLight was
 considered for the truss; its per-pixel LTC cost bought nothing over the IBL on this GPU.
 
+### Arena and lighting lookdev pass
+
+Goal: a UFC-broadcast look at quality-per-cost, with LOW-ULTRA scaling and at most ~1 ms more GPU on the High main
+shot. Code: `arena/materials.ts`, `marks.ts` (new), `index.ts`, `textures.ts`, `venue.ts`, `lighting.ts`, `street.ts`,
+`hall.ts`, `crowd.ts`, `assets.ts`. Screenshots (before | after): `docs/screenshots/arena-octagon-{main,cageside,overhead}.png`
+(Watch, High, 2560×1440), `arena-fight-marks.png` (after, round 3), `arena-cage-ring.png`, `arena-ring-mats.png`,
+`arena-street.png` (dev/arena, High).
+
+**Stocktake (GPU captures of every arena kind, wide / cageside / overhead, High).** What looked wrong:
+1. *Straight light/dark bands across the canvas* on the main and overhead shots. Two causes, both real bugs.
+   (a) The stage's scene pass writes a packed normal (GTAO input) and motion vectors into MRT attachments with **no
+   blending**, so every transparent draw *replaces* those values for the surface behind it. The haze beam cones
+   crossing the canvas stamped their cone normals into the AO input: GTAO then shaded those regions differently, with
+   the cones' straight edges. (b) The floor contact-occlusion loop stopped at a bounding circle, leaving a small step
+   at its edge.
+2. *Cageside*: the foreground chain-link was a sharp grey lattice filling the frame; the lens depth of field could not
+   blur it because the fence writes no depth. The wires were grey because the IBL fill banks lit their vinyl coat.
+3. *Canvas*: flat paper-white, no difference between ink and cloth, a grey 18 % octagon fill inside the centre emblem
+   with a red slash across the letters; nothing changed over a fight.
+4. *LED boards*: static text, the long mark ("HALF GUARD WATER") squashed to mush.
+5. *Crowd*: the far bowl sparkled — a 0.55-1.45× per-seat brightness spread plus bright faces read as speckle.
+6. *Mats*: over-saturated yellow and blue. *Street*: a monochrome orange picture where the fighters barely separate.
+
+**What changed.**
+- *MRT-safe air layers* (`materials.ts airMRT`): haze column, beam cones and street halos write the floor's up normal
+  into the normal attachment instead of their own, and the chain-link writes a view-facing normal. The bands are gone.
+  **Stage owner**: the proper fix is one line in `stage/pipeline.ts` — give the `normal` and `velocity` MRT outputs
+  `MaterialBlending` (`mrt.setBlendMode('normal', new BlendMode(MaterialBlending))`, same for velocity); opaque draws
+  are unaffected, transparent ones then blend (additive ones add zero). Any other transparent material (hair cards?)
+  has the same problem today.
+- *Contact occlusion*: each sphere's term is windowed to zero 1.3 m out horizontally, so the sum ends smoothly.
+- *Haze beams*: fade out above the canvas (v 0.15-0.5), soft edges from the horizontal facing term, and gone within
+  3-7 m of the lens. The column's floor cap moved just under the canvas (it was coplanar).
+- *Fence*: black vinyl lit by the "outside" environment (no fill-bank sheen), roughness 0.5. **Near-lens defocus in the
+  material** (`FenceLens`): a thin-lens blur disc `aperture × (1 − z/focus)` widens the exact box-filter footprint, so a
+  fence 0.35 m from a handheld dissolves into the soft dark veil a real cageside camera shows, with no depth write.
+  (Tried first: the resolved wires drawn opaque with depth so the lens DoF would blur them. In-page A/B on CAGESIDE:
+  **+12 ms** — GTAO's screen-space radius around near depth explodes. Rejected.) `alphaTest 0.004` discards the empty
+  diamonds before lighting. Focus 3.5 m / aperture 9 mm are uniforms on `VenueSet.fenceLens` if the camera wants to
+  drive them from `CameraState.focusM`.
+- *Canvas* (`floorMaterial`): printed ink is detected from the painted colour against the bare-canvas colour and is
+  smoother (roughness 0.58 vs 0.82): a soft sheen on logos at grazing angles. The Rough Linen **ao map** (previously
+  unused) breaks up albedo and roughness in the weave's tiling (one fetch; it mip-averages to neutral at distance).
+  New emblem: rings, stacked wordmark, a short accent bar between the lines, no fill.
+- *Fight marks* (`marks.ts`, new): damp patches where bodies worked on the canvas (2 per fighter-second on the ground),
+  sweat drips that grow with fight time, and — only from cuts the sim records as bleeding, and only with the bout's
+  `blood` setting — crisp drops under the head when standing, smears on the ground and the odd flick of droplets.
+  All of it is a pure function of the recorded frames + cosmetic seed, baked **once** into a 1024² RGBA16F texture
+  (amount and amount-weighted time per channel); the shader reveals each mark once the playhead's sim time passes it,
+  so seeks, replays and live agree with no per-frame upload. Bake: ~30 ms splats + ~0.25 s raster at bout load (0.1 s on
+  Low, 512²). Demo bout: 3 292 marks, 71 of them blood. Fresh blood is glossy dark red, browning over 4 min; damp
+  cloth is 20 % darker and a little smoother.
+  **Presenter wiring needed** (not in the arena's files): `VenueSet.setRecording(frames, events, { blood })` —
+  call it from `Presenter.setRecording` and after `buildBout` when a recording is known, with `bout.blood`
+  (`ArenaOptions.blood` also accepted). Without it the canvas simply stays clean. The captures here call it from the page.
+- *LED boards*: two pages (sponsor-style marks; the BOUT LAB house page on an accent gradient) with a 0.6 s wipe
+  every 14 s of **sim time** (deterministic, same in replays); short marks only. Also the hall's boards.
+- *Crowd*: per-seat brightness spread 0.8-1.25×, card-row faces at 78 % of their albedo.
+- *Mats*: contest/safety colours desaturated ~15 %. *Street*: the lamp over the fight is a 4000 K LED head (2.6× the old
+  illuminance, aimed at the lot's centre); the two far lamps stay sodium; moon fill doubled; beam haze near-white.
+
+**Quality scaling.** Low: no canvas detail maps (as before), 512² marks, no beams; everything else is shader ALU the
+same on every level. Medium and up: 1024² marks, ao + normal detail. Ultra: 4k canvas (as before), marks stay 1024²
+(5-10 mm texels are already below what any shot resolves). No new `QualitySettings` field was needed.
+
+**GPU cost** (Watch, demo bout, 2560×1440 output, `fixedRes=1`, `gpuTiming=1`, p25 of 60 frames; the GPU was shared
+with other agents' browsers the whole time — the same build measured 8.6-15.0 ms on MAIN across five page loads — so
+only same-page A/B deltas are trustworthy):
+
+| High | Before | After (quietest run) | Scene pass before → after |
+| --- | --- | --- | --- |
+| MAIN | 13.7 ms | 8.6-13.3 ms | 4.8 → 3.8-4.5 ms |
+| CAGESIDE | 14.9 ms | 10.8-13.5 ms | 5.7 → 4.5 ms |
+| OVERHEAD | 13.6 ms | 11.3-12.8 ms | 4.7 → (not broken out) |
+
+| After, p25 MAIN / CAGESIDE (best of the runs) | Low | Medium | High | Ultra |
+| --- | --- | --- | --- | --- |
+| This pass | 2.6 / 6.5 ms | 7.3 / 8.8 ms | 8.6 / 10.8 ms | 19.5 / 23.8 ms |
+| Performance pass reference (before) | 4.3 / 7.9 ms | 7.4 / 11.5 ms | 12.4 / 15.1 ms | 22.1 / 28.0 ms |
+
+In-page A/B (alternating ABBA blocks, same frame): fence defocus on vs off on CAGESIDE −1.5 to +0.5 ms (noise);
+the rejected depth-writing fence +12 ms. The canvas additions (two fetches, ink/marks ALU) are inside the noise of
+the per-pass `output` timing. Net: within the 1 ms budget on the High main shot; nothing measurable got slower.
+
+**Unused static assets** (none deleted here). Now used: `textures/canvas/{normal,ao}.jpg`, `textures/vinyl/normal.jpg`,
+`textures/asphalt/{color,normal,roughness}.jpg`. Still never loaded at runtime, removable (~29 MB):
+`hdri/*` (11 MB; used only by `dev/assets.ts` — the procedural environments stay, because the fill directions and the
+canvas bounce must match the set, see "Lighting design"), `textures/canvas/{color,roughness}.jpg` (4.6 MB),
+`textures/vinyl/{color,roughness,ao}.jpg`, `textures/asphalt/ao.jpg`, and the whole `metal`, `leather`, `satin`,
+`concrete`, `rubber_mat` sets (unless the character/kit work plans to use leather or satin).
+
+**Still wrong / open.**
+- The crowd is still low-poly mannequins up close and cards far away; at cageside the front rows read as shapes.
+- The canvas is still the brightest, cleanest thing in frame until marks accumulate; real canvases also carry
+  visible fabric seams, footprint grime at the corners and a satin sheen from the top light that this does not model.
+- Dark ink reads a little grey from straight above (the ink sheen reflects the truss IBL); acceptable, not perfect.
+- The near-fence veil approximates the lens; its focus is a constant, not the shot's focus distance.
+- Marks are 2D stamps on a flat texture: no thickness, no pooling, no footprints tracked through blood.
+- The truss fixtures are still emissive discs, the LED boards are two static pages, the hall and street remain
+  serviceable sets rather than beautiful ones.
+- The MRT blending issue affects any transparent material outside the arena (stage fix above).
+
 ## Characters
 
 Owner: character module (`src/presentation/character/`, `scripts/assets/build-body.mjs`,

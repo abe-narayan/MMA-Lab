@@ -15,10 +15,10 @@
 import * as THREE from 'three/webgpu';
 import {
   float, vec2, vec3, uniform, positionWorld, cameraPosition, normalize, dot, sqrt, max, min, clamp, abs, exp, mix,
-  smoothstep, sin, uv, normalView, positionViewDirection, pow, mx_noise_float, fract, floor, hash, step, length, texture,
+  smoothstep, sin, uv, normalView, positionViewDirection, pow, normalWorld, mx_noise_float, fract, floor, hash, step, length, texture,
 } from 'three/tsl';
 import { MergeBuilder, cylinderBetween, srgb, type RGB } from './merge';
-import { glowMaterial } from './materials';
+import { airMRT, glowMaterial } from './materials';
 import { mulberry32 } from './rng';
 
 type N = any;
@@ -159,6 +159,7 @@ export function buildHazeColumn(R: number, y0: number, y1: number, h: HazeUnifor
   const ymid = O.y.add(D.y.mul(tNear.add(len.mul(0.5))));
   const lift = smoothstep(y0, y1, ymid).mul(0.6).add(0.7);
   m.colorNode = h.colour.mul(h.density.mul(len).mul(core).mul(lift).mul(hazePhase(D)));
+  m.mrtNode = airMRT();
   const mesh = new THREE.Mesh(g, m);
   mesh.name = 'arena.haze.column';
   mesh.renderOrder = 5;
@@ -207,15 +208,26 @@ export function buildShafts(from: readonly THREE.Vector3[], targetY: number, spr
   mat.blending = THREE.AdditiveBlending;
   // uv.y: 1 at the lamp (top of the cylinder), 0 at the canvas.
   const v = uv().y;
-  const facing = abs(dot(normalView, positionViewDirection.negate()));
-  const edge = pow(facing, 2.2);
+  // Soft cone edges: how squarely the cone faces the camera measured in the
+  // horizontal plane, so the silhouette fades to zero from every elevation
+  // (in view space a cone seen from above kept a hard rim); weaker looking down.
+  const toCam = normalize(cameraPosition.sub(positionWorld));
+  const facingH = abs(dot(normalize(normalWorld.xz), normalize(toCam.xz.add(vec2(1e-4, 0)))));
+  const edge = pow(facingH, 2.2).mul(float(1).sub(abs(toCam.y).mul(0.6)));
   const nearLamp = pow(v, 1.6).mul(0.8).add(0.2);
-  const floorFade = smoothstep(0.0, 0.12, v);
+  // Faded out above the canvas: against the white canvas a cone's lower part
+  // only reads as a flat stripe; up high, against the dark bowl, it reads as
+  // light in the air.
+  const floorFade = smoothstep(0.15, 0.5, v);
   const P = positionWorld;
   // Cheap drifting breakup (no Perlin: the cones overdraw a lot of pixels).
   const swirl = sin(P.x.mul(2.1).add(P.y.mul(0.9)).add(h.time.mul(0.11))).mul(sin(P.z.mul(1.7).sub(P.y.mul(0.6)).add(h.time.mul(0.07)))).mul(0.2).add(0.85);
   const Dv = normalize(P.sub(cameraPosition));
-  mat.colorNode = h.colour.mul(h.density.mul(14)).mul(edge).mul(nearLamp).mul(floorFade).mul(swirl).mul(hazePhase(Dv));
+  // Beams are only seen from a distance: a cone wall passing close to the lens
+  // (a high camera among the fixtures) would sweep a bright sheet across the frame.
+  const nearFade = smoothstep(3.0, 7.0, length(P.sub(cameraPosition)));
+  mat.colorNode = h.colour.mul(h.density.mul(14)).mul(edge).mul(nearLamp).mul(floorFade).mul(swirl).mul(hazePhase(Dv)).mul(nearFade);
+  mat.mrtNode = airMRT();
   const mesh = new THREE.Mesh(geo, mat);
   mesh.name = 'arena.haze.shafts';
   mesh.renderOrder = 6;

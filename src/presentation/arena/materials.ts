@@ -15,13 +15,27 @@ import * as THREE from 'three/webgpu';
 import {
   Fn, float, vec2, vec3, vec4, uv, fwidth, floor, fract, min, max, clamp, abs, mix, smoothstep,
   positionWorld, normalView, cameraViewMatrix, texture, uniform, uniformArray, Loop, int, If, length,
-  mx_noise_float, sin, dot, sqrt, attribute, select, round,
+  mx_noise_float, sin, dot, sqrt, attribute, select, round, mrt, output, cameraPosition,
 } from 'three/tsl';
 
 type N = any; // TSL node objects: the @types for TSL are too loose to be worth fighting here.
 
 /** World-space direction -> view space (for normalNode). */
 export const toView = (dir: N): N => cameraViewMatrix.mul(vec4(dir, 0)).xyz.normalize();
+
+/**
+ * For additive "air" layers (haze, beams, halos). The stage's scene pass
+ * writes a packed view normal (for GTAO) and motion vectors into extra render
+ * targets with no blending, so a transparent layer replaces whatever surface is
+ * behind it there: a beam crossing the canvas stamped its cone normals into the
+ * AO input and showed as a hard-edged band of different occlusion. These layers
+ * write the floor's normal (straight up) instead, which is what is behind them
+ * on every shot where they cover the canvas.
+ */
+export function airMRT(): N {
+  // `output` too: without a pass MRT (Low, the dev page) this becomes the whole output.
+  return mrt({ output, normal: toView(vec3(0, 1, 0)).mul(0.5).add(0.5) });
+}
 
 // ---------------------------------------------------------------------------
 // Contact occlusion
@@ -55,8 +69,8 @@ export class ContactOccluders {
     if (n === 0) { b.set(0, 0, -1); return; }
     const cx = (minX + maxX) / 2;
     const cz = (minZ + maxZ) / 2;
-    // The occlusion falls off as r^2/d^2: beyond ~6 radii of the largest sphere it is < 3 %.
-    b.set(cx, cz, Math.hypot(maxX - cx, maxZ - cz) + 1.2);
+    // Each sphere's term is windowed to zero by 1.3 m (aoAt), inside this circle.
+    b.set(cx, cz, Math.hypot(maxX - cx, maxZ - cz) + 1.4);
   }
 
   /** Ambient-occlusion factor (1 = open) at a floor point with an upward normal. */
@@ -70,7 +84,12 @@ export class ContactOccluders {
           const dv = s.xyz.sub(p);
           const d2 = max(dot(dv, dv), 1e-4);
           const cosT = max(dv.y.div(sqrt(d2)), 0);
-          occ.addAssign(cosT.mul(s.w.mul(s.w)).div(d2));
+          // Windowed to zero 1.3 m out horizontally, so the sum ends smoothly
+          // inside the bounding circle instead of cutting off at its edge (a
+          // visible, straight-looking step across the canvas on wide shots).
+          const r2 = s.w.mul(s.w);
+          const fall = max(float(1).sub(dv.x.mul(dv.x).add(dv.z.mul(dv.z)).div(1.69)), 0);
+          occ.addAssign(cosT.mul(r2).div(d2).mul(fall.mul(fall)));
         });
       });
       return clamp(float(1).sub(occ.mul(1.7)), 0.08, 1);
@@ -97,6 +116,44 @@ export interface FloorOptions {
   /** Metres per tile of `detailNormal`. */
   detailTileM?: number;
   detailStrength?: number;
+  /**
+   * Optional tiling cavity (AO) map in the same tiling as `detailNormal`: the
+   * weave's thread gaps read a little darker and rougher up close; it
+   * mip-averages to its mean far away, so it never shimmers.
+   */
+  detailCavity?: THREE.Texture;
+  /**
+   * Linear colour of the bare floor. Texels that differ from it are printed
+   * ink (logos, lines, the apron), which is smoother than the cloth: a soft
+   * sheen on the logos at grazing angles, as on a televised canvas.
+   */
+  inkBase?: [number, number, number];
+  /** Roughness of printed ink (default: 0.62 x `roughness`). */
+  inkRoughness?: number;
+  /** The bout's sweat and blood marks (marks.ts). */
+  marks?: FloorMarks;
+}
+
+/**
+ * Uniforms and texture of the recorded fight marks (marks.ts): the texture is
+ * swapped when the recording arrives; `time` is the playhead's sim time.
+ */
+export class FloorMarks {
+  readonly time: N = uniform(0);
+  /** Half-extent (m) of the square the marks texture covers. */
+  readonly extent: N = uniform(5);
+  /** 0 until a recording has been baked (skips the lookup's effect). */
+  readonly on: N = uniform(0);
+  readonly node: N;
+  constructor(initial: THREE.Texture) {
+    // The lookup is built here, once, so swapping `node.value` re-binds it.
+    this.node = texture(initial, positionWorld.xz.div(this.extent.mul(2)).add(0.5));
+  }
+  set(tex: THREE.Texture, extent: number): void {
+    this.node.value = tex;
+    this.extent.value = extent;
+    this.on.value = 1;
+  }
 }
 
 /**
@@ -146,10 +203,41 @@ export function floorMaterial(o: FloorOptions): THREE.MeshStandardNodeMaterial {
   // albedo (a stand-in for their occlusion). Without shadow maps it carries the
   // whole contact shadow.
   const direct = o.occluders ? mix(ao.pow(0.8), ao.mul(ao), o.occluders.noShadows) : float(1);
-  m.colorNode = tex.rgb.mul(direct);
-  // Worn areas (darker in the texture) read slightly smoother, as polished canvas does.
-  const lum = dot(tex.rgb, vec3(0.3, 0.59, 0.11));
-  m.roughnessNode = clamp(float(o.roughness).add(lum.sub(0.6).mul(0.08)), 0.3, 1);
+  let albedo: N = tex.rgb;
+  let rough: N = float(o.roughness);
+  if (o.inkBase) {
+    // Printed ink vs bare cloth, from the painted colour itself (no extra map).
+    const d = tex.rgb.sub(vec3(...o.inkBase));
+    const ink = smoothstep(0.25, 0.5, sqrt(dot(d, d)));
+    rough = mix(rough, float(o.inkRoughness ?? o.roughness * 0.62), ink);
+  } else {
+    // Worn areas (darker in the texture) read slightly smoother, as polished canvas does.
+    const lum = dot(tex.rgb, vec3(0.3, 0.59, 0.11));
+    rough = rough.add(lum.sub(0.6).mul(0.08));
+  }
+  if (o.detailCavity) {
+    // Thread gaps: darker and rougher; the map's mean (~0.77) is neutral.
+    const cav = texture(o.detailCavity, vec2(P.x, P.z.negate()).div(o.detailTileM ?? 0.4)).r.sub(0.77);
+    albedo = albedo.mul(cav.mul(0.45).add(1));
+    rough = rough.sub(cav.mul(0.25));
+  }
+  if (o.marks) {
+    const mk = o.marks;
+    const mt = mk.node;
+    const age = (a: N, t: N, fade: number) => a.mul(clamp(mk.time.sub(t).div(fade), 0, 1)).mul(mk.on);
+    const sweat = age(mt.r, mt.g, 5);
+    const blood = age(mt.b, mt.a, 1.2);
+    // Damp cloth: a little darker and greyer, and smoother (it catches the key).
+    albedo = albedo.mul(float(1).sub(sweat.mul(0.2)));
+    rough = rough.sub(sweat.mul(0.15));
+    // Blood: dark red that browns as it dries; fresh blood is glossy.
+    const dry = clamp(mk.time.sub(mt.a).div(240), 0, 1);
+    const bloodCol = mix(vec3(0.3, 0.012, 0.01), vec3(0.14, 0.03, 0.018), dry);
+    albedo = mix(albedo, bloodCol, blood.mul(0.92));
+    rough = mix(rough, mix(float(0.3), float(0.6), dry), blood);
+  }
+  m.colorNode = albedo.mul(direct);
+  m.roughnessNode = clamp(rough, 0.25, 1);
   m.metalnessNode = float(0);
   m.aoNode = ao;
   return m;
@@ -213,6 +301,29 @@ export interface ChainLinkOptions {
   wireR: number;
   colour: THREE.ColorRepresentation;
   roughness: number;
+  /**
+   * Near-lens defocus (FenceLens): the wires a few tens of centimetres from a
+   * handheld are far out of focus, so their box filter is widened by the blur
+   * disc the lens would give them. Omitted = always sharp.
+   */
+  lens?: FenceLens;
+}
+
+/**
+ * The fence cannot write depth (a depth-writing near fence made GTAO's
+ * screen-space radius explode: +12 ms on CAGESIDE, measured), so the stage's
+ * lens depth of field never sees it. The material blurs itself instead: a
+ * thin lens focused at `focus` metres with an aperture radius `aperture`
+ * spreads a point at distance z over a disc of radius aperture * |1 - z/focus|
+ * in that point's own plane, which is simply a wider footprint for the exact
+ * box-filtered coverage. Only nearer than focus (the far fence is the lens
+ * DoF's background blur).
+ */
+export class FenceLens {
+  /** Focus distance (m); the handhelds focus on the fighters, 3-5 m away. */
+  readonly focus: N = uniform(3.5);
+  /** Aperture radius (m) of a broadcast zoom opened up indoors. */
+  readonly aperture: N = uniform(0.009);
 }
 
 /**
@@ -244,14 +355,27 @@ export function chainLinkMaterial(o: ChainLinkOptions): THREE.MeshStandardNodeMa
   const s1 = U.x.add(U.y).mul(inv);
   const s2 = U.x.sub(U.y).mul(inv);
   // Footprint along each family's normal; a touch wider than one pixel.
-  const fw1 = max(fwidth(s1).mul(1.25), 1e-5);
-  const fw2 = max(fwidth(s2).mul(1.25), 1e-5);
+  let blur: N = float(0);
+  if (o.lens) {
+    const z = length(positionWorld.sub(cameraPosition));
+    blur = o.lens.aperture.mul(max(float(1).sub(z.div(o.lens.focus)), 0)).mul(2);
+  }
+  const fw1 = max(fwidth(s1).mul(1.25), 1e-5).add(blur);
+  const fw2 = max(fwidth(s2).mul(1.25), 1e-5).add(blur);
   const c1 = lineCoverage(s1, fw1, d, w);
   const c2 = lineCoverage(s2, fw2, d, w);
   const cov = float(1).sub(float(1).sub(c1).mul(float(1).sub(c2)));
 
   // Knuckles (where the wires twist over each other) are slightly thicker and catch more light.
-  m.opacityNode = clamp(cov.mul(1.08), 0, 1);
+  const opacity = clamp(cov.mul(1.08), 0, 1);
+  m.opacityNode = opacity;
+  // The veil must not replace the AO input of what is behind it (see airMRT):
+  // a view-facing normal is what a body or the far canvas seen through a near
+  // fence mostly is, and it is the fence's own normal on the handheld shots.
+  m.mrtNode = mrt({ output, normal: vec3(0.5, 0.5, 1) });
+  // alphaTest discards before lighting: the empty holes of a near fence
+  // (most of its pixels) cost almost nothing.
+  m.alphaTest = 0.004;
 
   // Bent normals across each wire while it is resolved.
   const o1 = clamp(s1.sub(round(s1.div(d)).mul(d)).div(w), -1, 1);
@@ -310,10 +434,31 @@ export function glowMaterial(colour: THREE.ColorRepresentation, intensity: numbe
   return m;
 }
 
-/** Emissive texture (LED boards) at a given brightness, with an optional animated scroll. */
-export function ledMaterial(map: THREE.Texture, intensity: number, scroll: N | null = null): THREE.MeshBasicNodeMaterial {
+/**
+ * Emissive texture (LED boards) at a given brightness, with an optional
+ * animated scroll. With `pages` the texture holds two pages stacked
+ * vertically (ledBoardTexture) and the board wipes from one to the other every
+ * `period` seconds of sim time: the same picture live and in a replay.
+ */
+export function ledMaterial(
+  map: THREE.Texture, intensity: number, scroll: N | null = null, pages: { time: N; period?: number } | null = null,
+): THREE.MeshBasicNodeMaterial {
   const m = new THREE.MeshBasicNodeMaterial();
-  const U = scroll ? uv().add(vec2(scroll, 0)) : uv();
+  let U: N = scroll ? uv().add(vec2(scroll, 0)) : uv();
+  if (pages) {
+    const period = pages.period ?? 14;
+    const k = pages.time.div(period);
+    const cycle = floor(k);
+    const into = fract(k).mul(period);
+    // A 0.6 s wipe along the board at the start of each period.
+    const wipe = clamp(into.div(0.6), 0, 1);
+    const shown = fract(U.x).lessThan(wipe);
+    const cur = cycle.mod(2);
+    const prev = float(1).sub(cur);
+    const page = select(shown, cur, prev);
+    // Page 0 is the top half of the canvas (v in [0.5, 1]), page 1 the bottom.
+    U = vec2(U.x, clamp(U.y, 0.01, 0.99).mul(0.5).add(float(0.5).sub(page.mul(0.5))));
+  }
   m.colorNode = texture(map, U).rgb.mul(intensity);
   return m;
 }

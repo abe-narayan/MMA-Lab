@@ -3,6 +3,7 @@
  * asset pipeline placed in `static/assets/textures/` (docs/ASSETS.md):
  *
  *   canvas/normal.jpg   "Rough Linen"   woven-canvas normal, tiled ~0.4 m
+ *   canvas/ao.jpg       "Rough Linen"   thread-gap cavity (albedo/roughness breakup), same tiling
  *   asphalt/*           "Asphalt 02"    street ground colour/normal/roughness
  *   vinyl/normal.jpg    "Fabric Leather 02"  fine grain on competition mats
  *
@@ -15,6 +16,7 @@ import type { SetKind } from './geometry';
 
 export interface ArenaTextures {
   canvasNormal?: THREE.Texture;
+  canvasCavity?: THREE.Texture;
   vinylNormal?: THREE.Texture;
   asphalt?: { color: THREE.Texture; normal: THREE.Texture; roughness: THREE.Texture };
 }
@@ -44,7 +46,9 @@ export async function loadArenaTextures(kind: SetKind, q: QualitySettings): Prom
   const aniso = q.level === 'ultra' ? 16 : 8;
   const out: ArenaTextures = {};
   if (kind === 'octagon' || kind === 'ring') {
-    out.canvasNormal = await load('canvas/normal.jpg', false, aniso);
+    [out.canvasNormal, out.canvasCavity] = await Promise.all([
+      load('canvas/normal.jpg', false, aniso), load('canvas/ao.jpg', false, aniso),
+    ]);
   } else if (kind === 'mat') {
     out.vinylNormal = await load('vinyl/normal.jpg', false, aniso);
   } else {

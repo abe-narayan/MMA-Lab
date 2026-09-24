@@ -119,37 +119,26 @@ export function drawEmblem(ctx: CanvasRenderingContext2D, r: number, ink: string
   ctx.beginPath();
   ctx.arc(0, 0, r * 0.88, 0, Math.PI * 2);
   ctx.stroke();
-  // An octagon inside the ring.
-  ctx.beginPath();
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
-    const px = Math.sin(a) * r * 0.8;
-    const py = Math.cos(a) * r * 0.8;
-    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.globalAlpha = 0.18;
+  // Wordmark stacked in the ring, with a short accent bar between the lines
+  // (clear of the letters) and two small ticks on the ring at 3 and 9 o'clock.
   ctx.fillStyle = ink;
-  ctx.fill();
-  ctx.globalAlpha = 1;
-  // Slash accent.
+  ctx.save();
+  ctx.translate(0, -r * 0.22);
+  fitText(ctx, 'BOUT', r * 1.18, r * 0.4);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(0, r * 0.33);
+  fitText(ctx, 'LAB', r * 0.9, r * 0.34);
+  ctx.restore();
   ctx.fillStyle = accent;
   ctx.beginPath();
-  ctx.moveTo(-r * 0.62, r * 0.1);
-  ctx.lineTo(r * 0.7, -r * 0.1);
-  ctx.lineTo(r * 0.64, r * 0.04);
-  ctx.lineTo(-r * 0.68, r * 0.24);
+  ctx.moveTo(-r * 0.46, r * 0.075);
+  ctx.lineTo(r * 0.5, r * 0.02);
+  ctx.lineTo(r * 0.47, r * 0.085);
+  ctx.lineTo(-r * 0.49, r * 0.14);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = ink;
-  ctx.save();
-  ctx.translate(0, -r * 0.28);
-  fitText(ctx, 'BOUT', r * 1.25, r * 0.42);
-  ctx.restore();
-  ctx.save();
-  ctx.translate(0, r * 0.36);
-  fitText(ctx, 'LAB', r * 0.95, r * 0.36);
-  ctx.restore();
+  for (const sx of [-1, 1]) ctx.fillRect(sx * r * 0.94 - r * 0.03, -r * 0.012, r * 0.06, r * 0.024);
   ctx.restore();
 }
 
@@ -471,8 +460,8 @@ export function matTexture(arena: Arena, size: number, seed: string): THREE.Canv
   const c = makeCanvas(size);
   const p = painter(c, L);
   const { ctx, k } = p;
-  const contest = tatami ? '#d9c24a' : '#2c4f86';
-  const safety = tatami ? '#2c5aa0' : '#d1c33d';
+  const contest = tatami ? '#c6b458' : '#2d4b7a';
+  const safety = tatami ? '#2f5692' : '#c2b153';
   const outer = 3.0;
   // Hall floor (maple-ish) beyond the mats.
   ctx.fillStyle = '#8a6a44';
@@ -531,34 +520,72 @@ export function matTexture(arena: Arena, size: number, seed: string): THREE.Canv
   return toTexture(c);
 }
 
-/** LED board strip for aprons / skirts / barriers: dark with repeating fictional marks. */
+/**
+ * LED board strip for aprons / skirts / barriers: two "pages" of fictional
+ * content stacked vertically (top half: sponsor-style words on black; bottom
+ * half: the BOUT LAB house page on a dark accent gradient), which the LED
+ * material wipes between on sim time (`ledMaterial(..., pages)`). A board is
+ * 8 m of u; the painted LED pixel pitch mip-averages away with distance.
+ */
 export function ledBoardTexture(seed: string, accent = '#c01a22'): THREE.CanvasTexture {
   const W = 2048;
-  const H = 128;
+  const P = 128;
+  const H = P * 2;
   const c = makeCanvas(W, H);
   const ctx = c.getContext('2d')!;
-  ctx.fillStyle = '#050507';
-  ctx.fillRect(0, 0, W, H);
-  const words = ['BOUT LAB', ...FICTIONAL_SPONSORS.slice(0, 5)];
   const rnd = mulberry32(hashString(seed + ':led'));
-  const n = 6;
-  for (let i = 0; i < n; i++) {
-    const cx = (i + 0.5) * (W / n);
+  const word = (text: string, cx: number, cy: number, maxW: number, hPx: number, fill: string, italic = true) => {
     ctx.save();
-    ctx.translate(cx, H / 2);
-    ctx.fillStyle = i % 3 === 0 ? accent : rnd() < 0.5 ? '#d8d8dc' : '#6f8fb8';
-    const word = words[i % words.length]!;
-    ctx.font = `italic 900 ${H * 0.5}px ${FONT}`;
-    const w = ctx.measureText(word).width;
-    const maxW = (W / n) * 0.8;
+    ctx.translate(cx, cy);
+    ctx.fillStyle = fill;
+    ctx.font = `${italic ? 'italic ' : ''}900 ${hPx}px ${FONT}`;
+    const w = ctx.measureText(text).width;
     if (w > maxW) ctx.scale(maxW / w, 1);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(word, 0, 4);
+    ctx.fillText(text, 0, hPx * 0.06);
     ctx.restore();
+  };
+  // Page A: short marks only (long ones squash into mush at LED size).
+  ctx.fillStyle = '#040406';
+  ctx.fillRect(0, 0, W, P);
+  const short = ['BOUT LAB', ...FICTIONAL_SPONSORS.filter((w) => w.length <= 9)];
+  const n = 5;
+  for (let i = 0; i < n; i++) {
+    const cx = (i + 0.5) * (W / n);
+    const fill = i % 3 === 0 ? accent : rnd() < 0.5 ? '#c9c9ce' : '#6d8cb4';
+    word(short[i % short.length]!, cx, P / 2, (W / n) * 0.72, P * 0.46, fill);
+    // Thin separators between marks.
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(Math.round((i + 1) * (W / n)) - 2, P * 0.2, 3, P * 0.6);
+  }
+  // Page B: the house page.
+  const g = ctx.createLinearGradient(0, P, W, H);
+  g.addColorStop(0, '#07070a');
+  g.addColorStop(0.5, accent);
+  g.addColorStop(1, '#07070a');
+  ctx.fillStyle = '#07070a';
+  ctx.fillRect(0, P, W, P);
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = g;
+  ctx.fillRect(0, P + P * 0.12, W, P * 0.76);
+  ctx.globalAlpha = 1;
+  for (let i = 0; i < 2; i++) {
+    const cx = (i + 0.5) * (W / 2);
+    word('BOUT LAB', cx - W * 0.1, P * 1.5, W * 0.2, P * 0.5, '#f0f0f2');
+    word('FIGHT NIGHT', cx + W * 0.13, P * 1.5, W * 0.16, P * 0.34, 'rgba(240,240,242,0.75)', false);
+    // Chevrons.
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    for (let k = 0; k < 3; k++) {
+      const x = cx - W * 0.235 + k * 18;
+      ctx.beginPath();
+      ctx.moveTo(x, P * 1.3); ctx.lineTo(x + 12, P * 1.5); ctx.lineTo(x, P * 1.7); ctx.lineTo(x + 6, P * 1.7);
+      ctx.lineTo(x + 18, P * 1.5); ctx.lineTo(x + 6, P * 1.3);
+      ctx.fill();
+    }
   }
   // LED pixel grid.
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
   for (let x = 0; x < W; x += 4) ctx.fillRect(x, 0, 1, H);
   for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 1);
   const t = toTexture(c);

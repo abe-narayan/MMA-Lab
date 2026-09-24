@@ -19,7 +19,7 @@
  * red/blue.
  */
 import * as THREE from 'three/webgpu';
-import type { Arena, SimEvent } from '../../sim';
+import type { Arena, SimEvent, TickSnapshot } from '../../sim';
 import type { ArenaSet, FrameInput, QualitySettings } from '../contract';
 import type { WorldPose } from '../rig/skeleton';
 import { B } from '../rig/skeleton';
@@ -28,7 +28,10 @@ import {
   wallInradius, wallSegments, type SetKind,
 } from './geometry';
 import { hashString } from './rng';
-import { ContactOccluders, OCCLUDER_COUNT, chainLinkMaterial, floorMaterial, ledMaterial, propMaterial, vinylMaterial } from './materials';
+import {
+  ContactOccluders, FenceLens, FloorMarks, OCCLUDER_COUNT, chainLinkMaterial, floorMaterial, ledMaterial, propMaterial, vinylMaterial,
+} from './materials';
+import { bakeFightMarks, emptyMarks, fightMarkSplats, marksExtent } from './marks';
 import { broadcastRig, hallRig, streetRig, type Rig } from './lighting';
 import { buildEnvironment } from './environment';
 import { floorExtent, ledBoardTexture, octagonCanvasTexture, ringCanvasTexture, matTexture } from './textures';
@@ -63,6 +66,8 @@ export interface ArenaOptions {
    * far side of the action from it. Default 0 (+z).
    */
   hardCameraAngle?: number;
+  /** BoutPresentation.blood: false keeps blood off the canvas. Default true (the sim's default setting). */
+  blood?: boolean;
 }
 
 /** The concrete set: the contract plus what the presenter and dev tools read. */
@@ -77,6 +82,14 @@ export interface VenueSet extends ArenaSet {
   setRefereeOverride(p: RefereePlacement | null): void;
   /** Extra contact-shadow bodies (x, y, z, radius): cornermen and stools. */
   setExtraOccluders(list: readonly (readonly [number, number, number, number])[]): void;
+  /**
+   * The bout's recording: bakes the sweat and blood the fight leaves on the
+   * canvas (marks.ts), revealed by sim time. Optional for the presenter; the
+   * canvas simply stays clean without it. `opts.blood` overrides the option.
+   */
+  setRecording(frames: readonly TickSnapshot[], events?: readonly SimEvent[], opts?: { blood?: boolean }): void;
+  /** Near-lens defocus of the chain-link (focus distance and aperture uniforms); constants unless a camera drives them. */
+  readonly fenceLens: FenceLens;
 }
 
 interface Built {
@@ -121,6 +134,13 @@ class Venue implements VenueSet {
   private readonly seed: string;
   private readonly seedNum: number;
   private readonly occluders = new ContactOccluders();
+  private readonly marks = new FloorMarks(emptyMarks());
+  private marksFrames: readonly TickSnapshot[] | null = null;
+  private marksKey = '';
+  private marksBlood = true;
+  private fence: THREE.Mesh | null = null;
+  /** Near-lens defocus of the chain-link (materials.ts FenceLens); focus/aperture are uniforms. */
+  readonly fenceLens = new FenceLens();
   private readonly cu = new CrowdUniforms();
   private readonly haze = new HazeUniforms();
   private readonly screens = new ScreenUniforms();
@@ -145,6 +165,7 @@ class Venue implements VenueSet {
     this.red = o.cornerColours?.[0] ?? DEFAULT_RED;
     this.blue = o.cornerColours?.[1] ?? DEFAULT_BLUE;
     this.quality = q;
+    this.marksBlood = o.blood ?? true;
     this.bounds = venueBounds(arena);
     this.tracker = new RefereeTracker(arena, undefined, o.hardCameraAngle ?? 0);
     this.cu.seedOffset.value = this.seedNum % 65536;
@@ -185,13 +206,15 @@ class Venue implements VenueSet {
       : ringCanvasTexture(this.arena, this.texSize(q), this.seed, this.red, this.blue);
     const canvasMat = floorMaterial({
       map: tex, roughness: 0.82, weaveM: 0.004, weaveDepth: 0.35, undulation: 0.018, occluders: this.occluders,
-      detailNormal: this.tex.canvasNormal, detailTileM: 0.45, detailStrength: 0.35,
+      detailNormal: this.tex.canvasNormal, detailTileM: 0.45, detailStrength: 0.35, detailCavity: this.tex.canvasCavity,
+      // Linear colour of the bare canvas (textures.ts): everything else is printed ink.
+      inkBase: isCage ? [0.716, 0.701, 0.658] : [0.584, 0.617, 0.658], inkRoughness: 0.58, marks: this.marks,
     });
     const vinyl = vinylMaterial('#ffffff', 0.78);
     vinyl.clearcoat = 0.0;
     vinyl.specularIntensity = 0.6;
     vinyl.vertexColors = true;
-    const led = ledMaterial(ledBoardTexture(this.seed, this.red), 0.55);
+    const led = ledMaterial(ledBoardTexture(this.seed, this.red), 0.5, null, { time: this.screens.time });
     led.side = THREE.DoubleSide;
 
     if (isCage) {
@@ -205,10 +228,14 @@ class Venue implements VenueSet {
       hw.receiveShadow = true;
       hw.name = 'arena.cage.hardware';
       add(hw, parts.hardware.index!.count / 3);
-      const fence = new THREE.Mesh(parts.fence, chainLinkMaterial({ pitch: 0.05, wireR: 0.0024, colour: '#0b0b0c', roughness: 0.42 }));
+      // Vinyl-coated wire; defocused analytically near a handheld's lens (FenceLens).
+      const fence = new THREE.Mesh(parts.fence, chainLinkMaterial({
+        pitch: 0.05, wireR: 0.0024, colour: '#0a0a0b', roughness: 0.5, lens: this.fenceLens,
+      }));
       fence.name = 'arena.cage.fence';
       fence.renderOrder = 2;
       add(fence, 16);
+      this.fence = fence;
       const skirt = new THREE.Mesh(parts.skirt, led);
       skirt.name = 'arena.skirt';
       add(skirt, parts.skirt.index!.count / 3);
@@ -246,7 +273,9 @@ class Venue implements VenueSet {
     root.add(rig.group);
 
     // Haze: glow column + beams under the inner-square fixtures.
-    const column = buildHazeColumn(stageR + 0.8, 0, trussY - 0.3, this.haze);
+    // The column's floor cap sits just under the canvas: at y = 0 it was
+    // coplanar with it (depth-fighting, an additive layer flickering on and off).
+    const column = buildHazeColumn(stageR + 0.8, -0.05, trussY - 0.3, this.haze);
     add(column, 96);
     const inner = truss.fixtures.filter((p) => Math.max(Math.abs(p.x), Math.abs(p.z)) < stageR * 0.8);
     const beamFrom = inner.filter((_, i) => i % 4 === 1);
@@ -293,6 +322,9 @@ class Venue implements VenueSet {
     this.extraTextures.push(outside);
     const outsideEnv = pmremTexture(outside);
     for (const o of [arenaFloor, dressMesh, truss.frame]) (o.material as THREE.MeshStandardNodeMaterial).envNode = outsideEnv;
+    // The fence's black vinyl coat: lit by the fill banks' broad reflections every
+    // wire turned a pale grey; without them it stays black with the key's glint.
+    if (this.fence) (this.fence.material as THREE.MeshStandardNodeMaterial).envNode = outsideEnv;
     // Black vinyl pads and ropes: without the fill banks' broad reflections they
     // stay black with a highlight, instead of a grey plastic sheen.
     vinyl.envNode = outsideEnv;
@@ -306,9 +338,9 @@ class Venue implements VenueSet {
     const tex = matTexture(this.arena, this.texSize(q), this.seed);
     const matMat = floorMaterial({
       map: tex, roughness: 0.62, weaveM: 0, weaveDepth: 0, undulation: 0.006, occluders: this.occluders,
-      detailNormal: this.tex.vinylNormal, detailTileM: 0.6, detailStrength: 0.25,
+      detailNormal: this.tex.vinylNormal, detailTileM: 0.6, detailStrength: 0.25, marks: this.marks,
     });
-    const hall = buildHall(this.arena, matMat, floorExtent(this.arena), this.seedNum);
+    const hall = buildHall(this.arena, matMat, floorExtent(this.arena), this.seedNum, this.screens.time);
     root.add(hall.group);
     const rig = hallRig(wallInradius(this.arena), hall.ceilingY, q);
     root.add(rig.group);
@@ -352,7 +384,7 @@ class Venue implements VenueSet {
     const env = buildEnvironment({
       kind: 'street', floorRadius: 0, floorRadiance: [0, 0, 0], trussHeight: 0, trussHalf: 0, trussRadiance: 0,
     }, this.seedNum);
-    this.haze.colour.value.setRGB(1.0, 0.62, 0.3);
+    this.haze.colour.value.setRGB(1.0, 0.86, 0.68);
     this.haze.density.value = 0.0011;
     return { root, rig, env, rows, bowl, shafts: st.shafts, triangles: st.triangles, drawCalls: st.drawCalls };
   }
@@ -405,6 +437,7 @@ class Venue implements VenueSet {
     this.built.rig.setQuality(q);
     this.occluders.noShadows.value = q.shadows === 'off' ? 1 : 0;
     if (this.built.shafts) this.built.shafts.visible = q.level !== 'low';
+    if (this.marksFrames) this.bakeMarks(this.marksFrames, this.marksBlood);
     this.rebuildCrowd(q);
   }
 
@@ -429,6 +462,7 @@ class Venue implements VenueSet {
     this.cu.phones.value = this.kind === 'street' ? 0.6 : this.crowd.phones;
     this.haze.time.value = simTime;
     this.screens.time.value = simTime;
+    this.marks.time.value = simTime;
     this.screens.excite.value = this.crowd.excitement;
 
     this.feedOccluders(input, fighters);
@@ -475,6 +509,27 @@ class Venue implements VenueSet {
     } else {
       this.referee = r.present ? r : null;
     }
+  }
+
+  setRecording(frames: readonly TickSnapshot[], _events?: readonly SimEvent[], opts: { blood?: boolean } = {}): void {
+    this.marksFrames = frames;
+    this.bakeMarks(frames, opts.blood ?? this.marksBlood);
+  }
+
+  /** Bake the marks texture (once per recording, blood setting and texture size). */
+  private bakeMarks(frames: readonly TickSnapshot[], blood: boolean): void {
+    this.marksBlood = blood;
+    if (this.kind === 'street') return;
+    // 1 cm texels on a 30 ft octagon (the bake is ~0.1 s at 512, ~0.25 s at 1024, on the main thread at load).
+    const size = this.quality.level === 'low' ? 512 : 1024;
+    const key = `${frames.length}:${frames[frames.length - 1]?.tick ?? 0}:${blood}:${size}`;
+    if (key === this.marksKey) return;
+    this.marksKey = key;
+    const extent = marksExtent(this.arena);
+    const splats = fightMarkSplats(frames, { blood, seed: hashString(`${this.seed}:marks`), extent });
+    const old = this.marks.node.value as THREE.Texture;
+    this.marks.set(bakeFightMarks(splats, extent, size), extent);
+    old.dispose();
   }
 
   /**

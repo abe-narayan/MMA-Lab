@@ -12,7 +12,7 @@ import {
 } from 'three/tsl';
 import type { Arena } from '../../sim';
 import { MergeBuilder, cylinderBetween, roundedBox, srgb, type RGB } from './merge';
-import { chainLinkMaterial, floorDetailSlope, glowMaterial, propMaterial, toView } from './materials';
+import { airMRT, chainLinkMaterial, floorDetailSlope, glowMaterial, propMaterial, toView } from './materials';
 import type { ArenaTextures } from './assets';
 import { mulberry32 } from './rng';
 import { buildShafts, type HazeUniforms } from './venue';
@@ -152,6 +152,7 @@ export function buildStreet(arena: Arena, seed: number, haze: HazeUniforms, asph
     { x: 10.5, y: 6.8, z: -10, main: false, pole: [11.8, -11.8] as [number, number] },
   ];
   const heads = new MergeBuilder();
+  const ledHead = new MergeBuilder();
   for (const L of lampSpots) {
     const [px, pz] = L.pole;
     const pole = cylinderBetween(new THREE.Vector3(px, 0, pz), new THREE.Vector3(px, L.y + 0.25, pz), 0.07, 8, 0.05);
@@ -162,11 +163,12 @@ export function buildStreet(arena: Arena, seed: number, haze: HazeUniforms, asph
     lit.add(roundedBox(0.36, 0.14, 0.7, 0.05, 2), { x: L.x, y: L.y + 0.06, z: L.z, ry: ang }, srgb('#2c2e32'));
     const lens = new THREE.PlaneGeometry(0.26, 0.55);
     lens.rotateX(Math.PI / 2);
-    heads.add(lens, { x: L.x, y: L.y - 0.02, z: L.z, ry: ang }, [1, 1, 1]);
+    (L.main ? ledHead : heads).add(lens, { x: L.x, y: L.y - 0.02, z: L.z, ry: ang }, [1, 1, 1]);
   }
   const headMesh = new THREE.Mesh(heads.build(), glowMaterial('#ffae4a', 60));
-  group.add(headMesh);
-  tris += heads.triangles; draws++;
+  const ledMesh = new THREE.Mesh(ledHead.build(), glowMaterial('#fff1dc', 60));
+  group.add(headMesh, ledMesh);
+  tris += heads.triangles + ledHead.triangles; draws += 2;
 
   const litMesh = new THREE.Mesh(lit.build(), propMaterial(0.75));
   litMesh.castShadow = true;
@@ -214,6 +216,7 @@ export function buildStreet(arena: Arena, seed: number, haze: HazeUniforms, asph
   haloM.blending = THREE.AdditiveBlending;
   const facing = abs(dot(normalView, positionViewDirection.negate()));
   haloM.colorNode = vec3(1.0, 0.55, 0.2).mul(pow(facing, 6).mul(0.5));
+  haloM.mrtNode = airMRT();
   group.add(new THREE.Mesh(haloG.build(), haloM));
   tris += haloG.triangles; draws++;
 

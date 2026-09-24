@@ -173,19 +173,24 @@ export function streetRig(lamps: readonly { x: number; y: number; z: number; mai
   const group = new THREE.Group();
   group.name = 'arena.lights';
   const sodium = kelvin(2050);
+  // The lamp over the fight has been retrofitted with a 4000 K LED head (as most
+  // city lots are): the fighters read in near-white light against the sodium
+  // pools beyond, instead of the whole picture going monochrome orange.
+  const led = kelvin(4000);
   const spots: THREE.SpotLight[] = [];
   let mainL: THREE.SpotLight | null = null;
   for (const p of lamps) {
-    const l = spot(sodium, 0, 1.05, 0.85);
+    const l = spot(p.main ? led : sodium, 0, p.main ? 0.95 : 1.05, 0.85);
     l.position.set(p.x, p.y, p.z);
-    l.target.position.set(p.x * 0.75, 0, p.z * 0.75);
-    l.intensity = (p.main ? 1.5 : 1.1) * p.y * p.y;
+    // The main head is tilted toward the lot's centre, where the fight is.
+    l.target.position.set(p.main ? p.x * 0.3 : p.x * 0.75, 0, p.main ? p.z * 0.3 : p.z * 0.75);
+    l.intensity = (p.main ? 2.6 : 1.1) * p.y * p.y;
     group.add(l, l.target);
     spots.push(l);
     if (p.main && !mainL) mainL = l;
   }
   // Cold moonlight / sky fill so silhouettes separate from the night.
-  const moon = new THREE.DirectionalLight(new THREE.Color(0.45, 0.55, 0.8), 0.06);
+  const moon = new THREE.DirectionalLight(new THREE.Color(0.45, 0.55, 0.8), 0.12);
   moon.position.set(-20, 30, -10);
   group.add(moon);
   const rig: Rig = {
