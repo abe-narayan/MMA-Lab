@@ -1,9 +1,8 @@
 /**
  * BOUT TRANSPORT v4 (docs/design/09 §4.5).
  *
- * The playback transport over a recorded `BoutRun`. It is the v4 successor of
- * `src/replay/player.ts`, which drives the old engine and is left alone; the
- * ideas worth keeping are kept — frame-accurate seek, an interpolation alpha
+ * The playback transport over a recorded `BoutRun`. It succeeds the retired v3
+ * player; the ideas worth keeping are kept — frame-accurate seek, an interpolation alpha
  * for the renderer, click-an-event-to-jump — and the missing half of §4.5 is
  * added: true slow motion, a loop range, and the instant-replay buffer.
  *

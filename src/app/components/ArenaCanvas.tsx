@@ -1,15 +1,11 @@
 /**
  * ARENA VIEW — 2D top-down.
  *
- * Phase 8 owns the 3D presenter. The existing `src/render/ArenaRenderer` is
- * bound to the *old* engine's vocabulary — a ten-member `ActionKind` enum, a
- * fixed pair of hard-coded athletes and a fixed octagon — so adapting it to a
- * v4 `TickSnapshot` would mean inventing a lossy mapping from several hundred
- * technique ids down to ten, and would still show the wrong arena for every
- * ruleset but one. This is the documented fallback instead: a clear top-down
- * board showing positions, facings, engagement links, the fence, cage pressure
- * and strike markers, drawn from the same `TickSnapshot` the 3D presenter will
- * read.
+ * The fallback and analysis view beside the 3D broadcast (src/presentation):
+ * a clear top-down board showing positions, facings, engagement links, the
+ * fence, cage pressure and strike markers, drawn from the same `TickSnapshot`
+ * the 3D presenter reads. Used when WebGPU/WebGL2 is unavailable, when the 3D
+ * view fails to load, and on request.
  *
  * It is a pure function of (frame, next, alpha, window): nothing is animated
  * off a wall clock except the fade of a strike marker, which cannot change

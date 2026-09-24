@@ -7,12 +7,10 @@
  * switching pages never throws away a half-built match card, a running
  * tournament or a batch in progress.
  *
- * The legacy v3 views (Replay, Dashboard and the v3 Model notes) are no
- * longer mounted: Watch replaces the replay view, the Batch screen carries
- * the aggregate analytics the dashboard used to show, and "About the model"
- * replaces the v3 notes with the v4 rulebook summary and the live parameter
- * registry. Nothing under src/ui, src/engine, src/render, src/replay or
- * src/data is imported by the app any more (see docs/design/UI_PASS.md).
+ * The legacy v3 views (Replay, Dashboard and the v3 Model notes) were retired
+ * with the v3 engine: Watch replaces the replay view, the Batch screen carries
+ * the aggregate analytics, and "About the model" shows the v4 rulebook summary
+ * and the live parameter registry (see docs/design/UI_PASS.md).
  *
  * This is also the one file that knows the concrete store module. The screens
  * are written against `FighterStoreApi`, so the mapping from that interface

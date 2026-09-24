@@ -1,8 +1,7 @@
 /* ==========================================================================
    BOUT LAB - base styles (reset + shared legacy classes)
    --------------------------------------------------------------------------
-   Moved here from src/ui/styles.css so the app no longer imports anything
-   from the legacy v3 tree. Tokens and the component look are owned by
+   Moved here from the retired v3 src/ui/styles.css. Tokens and the component look are owned by
    src/app/theme.css, loaded after this file; the token block below is kept
    only so a page that loads this sheet alone still resolves every colour.
 

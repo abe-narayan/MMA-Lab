@@ -3,8 +3,7 @@
  *
  * The recorded event stream is the part of a bout you can read without running
  * anything. Clicking a line seeks the playhead to the tick that produced it —
- * the one idea worth carrying over verbatim from `src/ui/Timeline.tsx`, which
- * still drives the legacy engine and is left alone.
+ * the one idea carried over from the retired v3 timeline.
  */
 import { useEffect, useMemo, useRef } from 'react';
 import type { SimEvent } from '../../sim';
