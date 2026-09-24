@@ -35,7 +35,7 @@
  * HEAVY_CPU_START (default 0.70), HEAVY_AFFINITY (hex mask, default 3F).
  */
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { constants, cpus, freemem, setPriority, totalmem, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -45,7 +45,13 @@ const HEAP_MB = Number(process.env.HEAVY_HEAP_MB ?? 2048);
 const CAP = Number(process.env.HEAVY_CAP ?? 0.93);
 const CPU_START = Number(process.env.HEAVY_CPU_START ?? 0.70);
 const AFFINITY = process.env.HEAVY_AFFINITY ?? '3F';
-const STALE_MS = 30 * 60 * 1000;
+// A slot whose owner process is gone is reclaimed at once; a live owner keeps
+// its slot however long its job runs (up to a 12 h safety net).
+const STALE_MS = 12 * 60 * 60 * 1000;
+const GATE_STALE_MS = 60 * 1000;
+// After starting a job, hold the start gate this long so the job's memory shows
+// up in freemem() before the next waiter checks it.
+const GATE_HOLD_MS = 8000;
 const POLL_MS = 3000;
 const LOCK_ROOT = join(tmpdir(), 'boutlab-heavy-locks');
 
@@ -81,28 +87,65 @@ async function cpuBusy(windowMs = 1200) {
   return total > 0 ? 1 - idle / total : 0;
 }
 
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+
+function ownerPid(dir) {
+  try { return Number(readFileSync(join(dir, 'owner'), 'utf8').split(' ')[0]); } catch { return NaN; }
+}
+
+/** Remove a lock dir whose owner process is dead, or that is older than `maxAgeMs`. */
+function reapIfStale(dir, maxAgeMs) {
+  try {
+    const age = Date.now() - statSync(dir).mtimeMs;
+    const pid = ownerPid(dir);
+    // A dir without an owner file is being created right now; give it a moment.
+    const dead = Number.isNaN(pid) ? age > 10000 : !pidAlive(pid);
+    if (dead || age > maxAgeMs) rmSync(dir, { recursive: true, force: true });
+  } catch { /* raced with its owner releasing it */ }
+}
+
+function takeLock(dir) {
+  try {
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'owner'), `${process.pid} ${new Date().toISOString()} ${cmd.join(' ')}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Remove a lock only while this process owns it (a reaped-and-retaken lock is someone else's). */
+function releaseLock(dir) {
+  if (ownerPid(dir) === process.pid) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* already gone */ }
+  }
+}
+
 function tryTakeSlot() {
   for (let i = 0; i < SLOTS; i++) {
     const dir = join(LOCK_ROOT, `slot-${i}`);
-    try {
-      mkdirSync(dir);
-      writeFileSync(join(dir, 'owner'), `${process.pid} ${new Date().toISOString()} ${cmd.join(' ')}`);
-      return dir;
-    } catch {
-      try {
-        if (Date.now() - statSync(dir).mtimeMs > STALE_MS) rmSync(dir, { recursive: true, force: true });
-      } catch { /* raced with its owner releasing it */ }
-    }
+    if (takeLock(dir)) return dir;
+    reapIfStale(dir, STALE_MS);
   }
   return null;
 }
 
+// The resource checks and the start happen under a machine-wide start gate,
+// held for GATE_HOLD_MS after the start, so two waiters can't both pass the
+// memory check on the same free memory.
+const GATE = join(LOCK_ROOT, 'start-gate');
 let slot = null;
 let waitedMs = 0;
 for (;;) {
-  if (memoryAllows() && (await cpuBusy()) < CPU_START) {
-    slot = tryTakeSlot();
+  if (takeLock(GATE)) {
+    if (memoryAllows() && (await cpuBusy()) < CPU_START) slot = tryTakeSlot();
     if (slot) break;
+    releaseLock(GATE);
+  } else {
+    reapIfStale(GATE, GATE_STALE_MS);
   }
   if (waitedMs % 30000 === 0) {
     const pct = (100 * (1 - freemem() / totalmem())).toFixed(0);
@@ -114,9 +157,10 @@ for (;;) {
 
 const release = () => {
   if (slot) {
-    try { rmSync(slot, { recursive: true, force: true }); } catch { /* already gone */ }
+    releaseLock(slot);
     slot = null;
   }
+  releaseLock(GATE);
 };
 process.on('exit', release);
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { release(); process.exit(130); });
@@ -139,7 +183,13 @@ if (process.platform === 'win32') {
       `(Get-Process -Id ${process.pid}).ProcessorAffinity = 0x${AFFINITY}`], { stdio: 'ignore' });
   } catch { /* best effort: the memory and slot gates still apply */ }
 }
-const child = spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', env, shell: process.platform === 'win32' });
+// Windows needs a shell to run .cmd shims (npx, npm). Quote each argument so
+// spaces don't split it and cmd.exe metacharacters (& | < > ^) stay literal.
+const winQuote = (a) => (/^[\w@%+=:,./\\-]+$/.test(a) ? a : `"${a.replace(/"/g, '""')}"`);
+const child = process.platform === 'win32'
+  ? spawn(cmd.map(winQuote).join(' '), { stdio: 'inherit', env, shell: true })
+  : spawn(cmd[0], cmd.slice(1), { stdio: 'inherit', env });
+setTimeout(() => releaseLock(GATE), GATE_HOLD_MS).unref();
 child.on('exit', (code, signal) => {
   release();
   process.exit(code ?? (signal ? 1 : 0));
