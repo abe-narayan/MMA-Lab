@@ -614,6 +614,16 @@ export const PLACING_LABELS: Readonly<Record<string, string>> = Object.freeze({
   olympicMedal: 'Olympic medal',
 });
 
+/**
+ * A fighter summary's top discipline ("T3 muayThai", the store's compact form)
+ * for display: "T3 Muay Thai".
+ */
+export function topDisciplineLabel(top: string): string {
+  const m = /^(T\d) (\w+)$/.exec(top);
+  if (!m) return top;
+  return m[2] === 'untrained' ? `${m[1]} untrained` : `${m[1]} ${DISCIPLINE_LABELS[m[2]] ?? m[2]}`;
+}
+
 /** Human labels for the discipline ids. */
 export const DISCIPLINE_LABELS: Readonly<Record<string, string>> = Object.freeze({
   boxing: 'Boxing',

@@ -372,8 +372,8 @@ export function mismatchWarnings(
     const shift = classGap === 1 ? '+8–12 pp' : '+15–25 pp';
     out.push({
       level: 'note',
-      text: `Openweight: ${classGap} ${classGap === 1 ? 'class' : 'classes'} apart, so the size `
-        + `effects in chapter 01 are fully on. Expect roughly ${shift} of win probability to the `
+      text: `Openweight: ${classGap} ${classGap === 1 ? 'class' : 'classes'} apart, so size and `
+        + `reach effects are fully on. Expect roughly ${shift} of win probability to the `
         + 'bigger fighter before any skill difference is counted.',
     });
   }
@@ -394,8 +394,8 @@ export function mismatchWarnings(
       out.push({
         level: 'warning',
         text: `Extreme skill gap: T${Math.min(...tiers)} against T${Math.max(...tiers)}. `
-          + 'Expect a short, one-sided bout; the finish-rate targets in chapter 09 §7 are drawn '
-          + 'from same-tier fights and do not apply here.',
+          + 'Expect a short, one-sided bout; the calibration targets come from same-tier fights '
+          + 'and do not apply here.',
       });
     }
   }
