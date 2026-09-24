@@ -75,6 +75,14 @@ export interface StrikeEvent extends SimEventBase {
     combinationIndex?: number;
     /** A short clinch/ground strike: not significant (09 §4.1). */
     short?: boolean;
+    /**
+     * Realism pass (QA2 #6): significance and position *as thrown*. A strike
+     * is an attempt when it is thrown (FightMetric), classified by where it
+     * was thrown from; the live counters and the stats both read these, so
+     * the two can never disagree. Absent on pre-6.0 logs.
+     */
+    sig?: boolean;
+    pos?: 'distance' | 'clinch' | 'ground';
   };
 }
 

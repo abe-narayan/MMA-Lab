@@ -638,7 +638,7 @@ export interface RefereeOptions {
  * Damaging head strikes a grounded fighter must have gone without answering
  * before a static cover counts as "not intelligently defending" [E: Phase 9].
  */
-export const COVERING_MIN_UNANSWERED = 2;
+export const COVERING_MIN_UNANSWERED = 3;
 
 /** 05 §2.7 / §22: seconds of static cover under fire that count as not defending. */
 export const COVERING_STATIC_S = 3;
@@ -647,7 +647,7 @@ export const COVERING_STATIC_S = 3;
  * Damaging head strikes a visibly hurt fighter (05 limpness 1) may go without
  * answering before the referee steps in [E: Phase 9].
  */
-export const HURT_TKO_UNANSWERED = 2;
+export const HURT_TKO_UNANSWERED = 3;
 
 export class Referee {
   readonly cfg: RefereeConfig;

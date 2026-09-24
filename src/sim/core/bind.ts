@@ -21,6 +21,7 @@
  * draw count — stays a pure function of state, which §2.6 explicitly allows.
  */
 import type { FighterWorldState, World } from './world';
+import type { FighterRuntime } from '../fighter';
 import type { Decision, DecisionPolicy } from './policy';
 
 import { MmaPolicy, familyForTechnique, guardChoice, tierBehaviourFor } from '../ai';
@@ -58,6 +59,13 @@ import {
   type RefEngagementInput, type RefFighterInput, type RoundLedger,
 } from '../rules';
 import type { DamageEvent, GrappleEvent, SimEvent, StrikeEvent } from '../record/events';
+import { FEINT, feint as feintSpecOf, type FeintId } from '../striking/combos';
+import {
+  biteBonus, feintBiteP, feintRepeats, noteDefence, noteFeint, notePrevStrike, openExposure,
+  strikingCraft, tacticalTerms,
+} from '../striking/tactics';
+import { bandLimits } from '../striking/range';
+import { FOOTWORK, stepMs } from '../ai/footwork';
 import { isSignificantStrike, isStatLanded } from '../record/stats';
 
 // ---------------------------------------------------------------------------
@@ -73,6 +81,9 @@ interface StrikePayload {
   node: PositionId | null;
   /** A short clinch/ground strike (non-significant, 09 §4.1). */
   short?: boolean;
+  /** Realism pass (QA2 #6): significance and position when thrown. */
+  sig: boolean;
+  pos: 'distance' | 'clinch' | 'ground';
 }
 
 /**
@@ -216,6 +227,52 @@ function scaledDefence(d: ResolvedDefence | null, mult: number): ResolvedDefence
   return d === null || mult === 1 ? d : { ...d, successP: d.successP * mult };
 }
 
+/** A logit shift on a reactive defence's success (a missed kick costs the kicker his defence, §2.5.1). */
+function shiftedDefence(d: ResolvedDefence | null, logit: number): ResolvedDefence | null {
+  if (d === null || logit === 0) return d;
+  const p = Math.min(0.999, Math.max(0.001, d.successP));
+  const l = Math.log(p / (1 - p)) + logit;
+  return { ...d, successP: 1 / (1 + Math.exp(-l)) };
+}
+
+/** Passive-block multiplier while the defender is reacting to a feint [E: Realism pass]. */
+export const FEINT_BITE_GUARD_MULT = 0.5;
+
+/**
+ * Realism pass [D]: gain on the striking skill-gap terms (02 §2.6.2 arrival
+ * k 2.0/100, §2.4.2 defence k). Measured with clones one skill domain apart
+ * (plan skill_domains), +10 points on every sub-skill won only 60 % of bouts
+ * where FIGHT_DATA §2.4 odds calibration (88-93 % at >= 2.5 rating SD, the
+ * gap +10 is in the UFC population) asks for far more; LIT_B §1.9-§1.11 put
+ * experts' anticipation and accuracy advantages at SMD 1.0-1.2.
+ */
+export const STRIKING_SKILL_GAIN = 1.6;
+
+/**
+ * Realism pass [E]: a single arrival offset that returns pooled distance
+ * accuracy to FIGHT_DATA §3 #3/#16 once the tactical terms (range fit
+ * penalties, counter/chain/feint bonuses) are live. The terms move accuracy
+ * *between* fighters; this keeps the population mean where the data put it.
+ */
+export const TACTICAL_ARRIVAL_OFFSET = 0.2;
+
+/**
+ * Realism pass [E: FIGHT_DATA §5 rule of thumb 1]: defence has a level as well
+ * as a gap. "Equal-skill lower tiers should land slightly *more*" — two
+ * regional fighters of equal skill hit each other more cleanly than two UFC
+ * fighters, which the gap-only arrival term could not express (regional
+ * finish rates ran 40 % against 69 %). Zero at the UFC reference level.
+ */
+export const ABSOLUTE_DEFENCE = Object.freeze({ k: 1.5, ref: 70 });
+
+/** §2.8's weight-class scale of the reach term (LIT_B §2.4: reach only bites at heavyweight). */
+function reachClassScale(wc: string): 'light' | 'middle' | 'heavy' {
+  if (wc === 'wc.light_heavyweight' || wc === 'wc.heavyweight' || wc === 'wc.super_heavyweight'
+    || wc === 'wc.cruiserweight') return 'heavy';
+  if (wc === 'wc.welterweight' || wc === 'wc.middleweight' || wc === 'wc.super_middleweight') return 'middle';
+  return 'light';
+}
+
 /** Arrival logit by striking posture [E: tuned Phase 9] — see `positionalArrivalLogit`. */
 export const POSITIONAL_ARRIVAL = Object.freeze({ clinch: 1.6, groundTop: 1.6, groundBottom: 0.3 });
 
@@ -229,6 +286,19 @@ export const POSITIONAL_ARRIVAL = Object.freeze({ clinch: 1.6, groundTop: 1.6, g
  */
 export const TARGET_ARRIVAL: Readonly<Partial<Record<TargetRegion, number>>> = Object.freeze({
   head: -0.7, body: 2.2, leadLeg: 0.7, rearLeg: 0.7,
+});
+
+/**
+ * Realism pass [E: tuned to FIGHT_DATA §3 #18-#19]: position x target on top
+ * of the two tables above. In a tie-up the head is the part a fighter still
+ * defends (clinch head 58 %), the body and the thighs are not (86 / 91 %);
+ * underneath, a man framing against a top player covers his head and leaves
+ * the body (ground body 94 %).
+ */
+export const POSITION_TARGET_ARRIVAL: Readonly<Record<string, Partial<Record<TargetRegion, number>>>> = Object.freeze({
+  distance: {},
+  clinch: { head: -0.45, leadLeg: 0.6, rearLeg: 0.6 },
+  ground: { body: 1.4, leadLeg: 0.8, rearLeg: 0.8 },
 });
 
 /**
@@ -279,6 +349,12 @@ export function techClassFor(spec: TechniqueSpec, posture: ImpactPosture): TechC
  * 09 §4.1: every strike landed at distance is significant; in clinch and on the
  * ground only power strikes are (non-jab punches, kicks, knees, elbows).
  */
+/** The stats' three-way position from 05's posture enum. */
+export function statPosition(posture: ImpactPosture): 'distance' | 'clinch' | 'ground' {
+  return posture === 'distance' ? 'distance'
+    : posture === 'clinch' || posture === 'wallPinned' ? 'clinch' : 'ground';
+}
+
 export function isSignificant(spec: TechniqueSpec, posture: ImpactPosture, short = false): boolean {
   const position = posture === 'distance' ? 'distance'
     : posture === 'clinch' || posture === 'wallPinned' ? 'clinch' : 'ground';
@@ -362,7 +438,7 @@ function resolvedDefenceOf(
   const base = baseDefenceSuccess(d, spec);
   const p = 1 / (1 + Math.exp(-(
     Math.log(Math.max(1e-9, base) / Math.max(1e-9, 1 - base))
-    + (d.k * (defenderSkill - attackerSkill)) / 100
+    + (STRIKING_SKILL_GAIN * d.k * (defenderSkill - attackerSkill)) / 100
   )));
   void skillGapK;
   return { spec: d, successP: Math.min(0.97, Math.max(0.03, p)) };
@@ -395,6 +471,120 @@ function inRange(spec: TechniqueSpec, band: RangeBand): boolean {
 // Module views of a fighter (03 / 04 read narrow interfaces, not the world)
 // ---------------------------------------------------------------------------
 
+/**
+ * 03 §2.1.3's binding alias map, resolved from chapter 01's effective
+ * sub-skills (after transfer, background offsets, priors and rust). Where the
+ * table says `max(...)` [E] it is a max; sambo resolves through §01's transfer
+ * factors, so it is read directly here only where 03 names it.
+ */
+const ALIAS_CACHE = new WeakMap<FighterRuntime, Record<string, number>>();
+export function grapplingAliases(r: FighterRuntime): Record<string, number> {
+  const hit = ALIAS_CACHE.get(r);
+  if (hit) return hit;
+  const S = (d: keyof FighterRuntime['disciplines'], k: string): number => r.disciplines[d]?.effective[k] ?? 0;
+  // Realism pass: the MMA floor. Every professional MMA fighter drills
+  // takedown defence, getting up and not getting submitted, whatever his base
+  // art (MMA_INTEGRATION §1, §7: "wrestling for MMA" is its own curriculum);
+  // 01 files that under `mmaIntegration`, which the alias map did not read
+  // for the defensive aliases. Without the floor a kickboxer with no wrestling
+  // block sprawled at 7 against shots at 75.
+  const mmaDef = Math.max(S('mmaIntegration', 'transitions'), S('mmaIntegration', 'cageWork'),
+    S('mmaIntegration', 'levelChanges'));
+  const mmaGround = Math.max(S('mmaIntegration', 'getUps'), S('mmaIntegration', 'subDefenceUnderStrikes'));
+  const out: Record<string, number> = {
+    'wr.shot': Math.max(S('wrestling', 'shots'), S('sambo', 'takedowns'), 0.8 * S('mmaIntegration', 'levelChanges')),
+    'wr.finish': S('wrestling', 'finishes'),
+    'wr.sprawl': Math.max(S('wrestling', 'takedownDefence'), 0.85 * mmaDef, 0.7 * S('judo', 'gripFighting')),
+    'wr.pummel': S('wrestling', 'clinch'),
+    'wr.mat_return': S('wrestling', 'matReturns'),
+    'wr.ride': S('wrestling', 'topControl'),
+    'wr.scramble': Math.max(S('wrestling', 'scrambles'), 0.7 * mmaGround),
+    'wr.get_up': Math.max(S('wrestling', 'getUps'), S('mmaIntegration', 'getUps')),
+    'wr.chain': S('wrestling', 'chains'),
+    'jd.grip': Math.max(S('judo', 'gripFighting'), S('judo', 'kuzushi'), S('sambo', 'gripFighting')),
+    'jd.throw_fwd': Math.max(S('judo', 'throws'), S('sambo', 'throws')),
+    'jd.throw_rear': Math.max(S('judo', 'throws'), S('sambo', 'throws')),
+    'jd.foot_sweep': S('judo', 'footSweeps'),
+    'jd.counter': S('judo', 'counters'),
+    'jd.throw_def': Math.max(S('judo', 'gripFighting'), S('wrestling', 'takedownDefence'), 0.8 * mmaDef),
+    'bjj.pass': S('bjj', 'passing'),
+    'bjj.retention': Math.max(S('bjj', 'guard'), 0.75 * mmaGround),
+    'bjj.sweep': S('bjj', 'sweeps'),
+    'bjj.escape': Math.max(S('bjj', 'escapes'), 0.75 * mmaGround, 0.7 * S('wrestling', 'getUps')),
+    'bjj.top_control': Math.max(S('bjj', 'topControl'), S('wrestling', 'topControl'), S('sambo', 'topControl')),
+    'bjj.back_control': S('bjj', 'backControl'),
+    'bjj.leg_entangle': Math.max(S('bjj', 'legLocks'), S('sambo', 'legLocks')),
+    'mma.level_change': S('mmaIntegration', 'levelChanges'),
+    'mma.anti_wrestling': Math.max(S('wrestling', 'takedownDefence'), S('mmaIntegration', 'transitions')),
+    'mma.cage': Math.max(S('mmaIntegration', 'cageWork'), S('wrestling', 'cageWrestling')),
+    'mma.gnp': S('mmaIntegration', 'groundAndPound'),
+    'mma.clinch_strike': Math.max(S('mmaIntegration', 'clinchStriking'), S('muayThai', 'clinch')),
+  };
+  // Realism pass: grip strength holds ties, pins and submissions; balance keeps
+  // the feet under a man being shot on or thrown. The creator exposed both and
+  // nothing in the grappling layer read either. +/-0.12 alias points per
+  // attribute point from 50 [E; WRESTLING §8, JUDO §8 grip dominance].
+  const grip = 0.12 * ((r.effective.gripStrength ?? 50) - 50);
+  const bal = 0.12 * ((r.effective.balance ?? 50) - 50);
+  out['wr.pummel'] += grip;
+  out['bjj.top_control'] += grip;
+  out['bjj.back_control'] += grip;
+  out['jd.grip'] += grip;
+  out['wr.sprawl'] += bal;
+  out['jd.throw_def'] += bal;
+  out['mma.anti_wrestling'] += bal;
+  ALIAS_CACHE.set(r, out);
+  return out;
+}
+
+/** 02 §2.6.3 `attackerPrecision`: the technique's power/placement sub-skill. */
+function precisionOf(r: FighterRuntime, spec: TechniqueSpec): number {
+  const S = (d: keyof FighterRuntime['disciplines'], k: string): number => r.disciplines[d]?.effective[k] ?? 0;
+  if (spec.weapon === 'fist' || spec.weapon === 'backfist' || spec.weapon === 'hammerfist') {
+    return Math.max(S('boxing', 'power'), S('kickboxing', 'punches'), S('muayThai', 'hands'), 0.8 * r.strikingMean);
+  }
+  if (spec.weapon === 'elbow' || spec.weapon === 'elbow_point') return Math.max(S('muayThai', 'elbows'), 0.8 * r.strikingMean);
+  if (spec.weapon === 'knee') return Math.max(S('muayThai', 'knees'), 0.8 * r.strikingMean);
+  return Math.max(S('muayThai', 'kicks'), S('kickboxing', 'kicks'), S('karate', 'kicks'), S('taekwondo', 'kicks'),
+    0.8 * r.strikingMean);
+}
+
+/** `target`'s speed toward `toward`, m/s, >= 0. */
+function closingSpeed(target: FighterWorldState, toward: FighterWorldState): number {
+  const dx = toward.x - target.x;
+  const dz = toward.z - target.z;
+  const len = Math.hypot(dx, dz);
+  if (len < 1e-6) return 0;
+  return Math.max(0, (target.vx * dx + target.vz * dz) / len);
+}
+
+/** The skill pair a strike is resolved on, by position (Realism pass). */
+export function strikeSkills(
+  actor: FighterWorldState, target: FighterWorldState, posture: ImpactPosture,
+): [number, number] {
+  const a = actor.runtime;
+  const d = target.runtime;
+  if (posture === 'distance') return [a.strikingMean, d.strikingMean];
+  const A = grapplingAliases(a);
+  const D = grapplingAliases(d);
+  if (posture === 'clinch' || posture === 'wallPinned') {
+    return [
+      0.5 * a.strikingMean + 0.5 * A['mma.clinch_strike'],
+      0.5 * d.strikingMean + 0.5 * Math.max(D['mma.clinch_strike'], D['wr.pummel']),
+    ];
+  }
+  if (posture === 'groundTop') {
+    return [
+      0.4 * a.strikingMean + 0.6 * A['mma.gnp'],
+      0.4 * d.strikingMean + 0.6 * Math.max(D['bjj.retention'], D['bjj.escape']),
+    ];
+  }
+  return [
+    0.5 * a.strikingMean + 0.5 * A['bjj.retention'],
+    0.5 * d.strikingMean + 0.5 * D['mma.gnp'],
+  ];
+}
+
 function grappleActorOf(w: World, f: FighterWorldState): GrappleActor {
   const r = f.runtime;
   const disc = r.disciplines;
@@ -410,6 +600,14 @@ function grappleActorOf(w: World, f: FighterWorldState): GrappleActor {
     if (!block) continue;
     for (const k of Object.keys(block.effective)) skills[`${prefix}.${k}`] = block.effective[k];
   }
+  // Realism pass: the 03 §2.1.3 alias map. The edge tables name their skills
+  // by alias (`wr.shot`, `bjj.pass`, `mma.cage`, ...) and until this pass the
+  // table above only held §01's own names (`wr.shots`, `bjj.passing`, ...),
+  // which match *none* of the aliases — so `skillOf` returned null and no
+  // grappling edge in the sim ever read a grappling skill. A better wrestler
+  // shot, sprawled, rode and got up exactly as well as a worse one (a clone
+  // with +10 on every grappling sub-skill won 47 %; +10 striking 62 %).
+  Object.assign(skills, grapplingAliases(r));
   return {
     id: f.id,
     skills: skills as GrappleActor['skills'],
@@ -447,10 +645,17 @@ function subFighterOf(f: FighterWorldState): SubFighter {
     chokes: pick('chokes', r.grappling.subAttack),
     jointLocks: pick('jointLocks', r.grappling.subAttack),
     legLocks: pick('legLocks', r.grappling.subAttack),
-    cranks: pick('cranks', r.grappling.subAttack),
-    escapes: pick('escapes', r.grappling.subDefence),
-    control: pick('control', r.grappling.subDefence),
-    guard: pick('guard', r.grappling.subDefence),
+    // Realism pass: 04's `sk.cranks` has no §01 skill of its own (neck cranks
+    // are chokes-and-locks craft), and `sk.control` / `sk.guard` are 03's
+    // `bjj.top_control` / `bjj.retention` (03 §2.1.3). `control` fell back to
+    // the *defensive* SUB composite, so the man on top held a submission with
+    // his escape skill.
+    cranks: pick('cranks', 0.5 * (pick('chokes', r.grappling.subAttack) + pick('jointLocks', r.grappling.subAttack))),
+    // Realism pass: the MMA floor (see `grapplingAliases`) reaches the
+    // submission battle too; a non-BJJ fighter's escapes were his untrained 7.
+    escapes: Math.max(pick('escapes', r.grappling.subDefence), grapplingAliases(r)['bjj.escape'], r.grappling.subDefence),
+    control: grapplingAliases(r)['bjj.top_control'] || r.grappling.subDefence,
+    guard: Math.max(pick('guard', r.grappling.subDefence), grapplingAliases(r)['bjj.retention']),
     strength: r.effective.strength,
     flexibility: r.effective.flexibility,
     neck: r.effective.neck,
@@ -636,7 +841,11 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     if (posture === 'groundBottom') return 'groundBottomPressured';
     const speed = Math.hypot(f.vx, f.vz);
     void w;
-    return speed > 1.0 ? 'movementHighPace' : speed > 0.05 ? 'movementLowPace' : 'idleStanding';
+    // Realism pass: footwork is now committed steps at step speed (~2 m/s for
+    // 200-400 ms, 02 §2.1.5). A step is fight footwork, not the sustained
+    // high-pace running DAMAGE §4's per-second cost was written for; only a
+    // chase or a flight above ~2.4 m/s is.
+    return speed > 2.4 ? 'movementHighPace' : speed > 0.05 ? 'movementLowPace' : 'idleStanding';
   }
 
   /**
@@ -810,6 +1019,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     if (f.damage.grounded && f.posture !== 'ground') return false;
     // Mid-commitment: still inside startup/active/recovery, or a contact pending.
     if (f.action !== null && w.nowMs < f.actionCommitMs + f.actionTotalMs) return false;
+    // Realism pass: a feint is a committed movement with no contact.
+    if (w.nowMs < f.tactic.busyUntilMs) return false;
     if (w.scheduler.queue.pendingFor(f.id) !== null) return false;
     // 04: a fighter held at `secure` or deeper cannot choose a new action; the
     // submission battle is resolved by its own windows.
@@ -837,8 +1048,126 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
    * doing with his hands. Only the defence is taken; the movement intent and
    * the action are the parts a commitment locks out.
    */
-  function holdDefence(_w: World, f: FighterWorldState, d: Decision): void {
+  function holdDefence(w: World, f: FighterWorldState, d: Decision): void {
     f.defence = d.defence;
+    // Realism pass: a committed step keeps its sense (in, out, around) relative
+    // to where the opponent is *now* while the fighter is busy — circling is a
+    // circle, not a straight line that drifts away from him.
+    if (w.nowMs < f.step.untilMs && !w.engagements.of(f.id)) {
+      const target = targetOf(w, f, d) ?? w.nearestOpponent(f);
+      if (target) {
+        const dx = target.x - f.x;
+        const dz = target.z - f.z;
+        const len = Math.hypot(dx, dz) || 1;
+        const ux = dx / len;
+        const uz = dz / len;
+        const s = f.step;
+        f.vx = clamp((s.radial * ux - s.lateral * uz) * s.speed, -4, 4);
+        f.vz = clamp((s.radial * uz + s.lateral * ux) * s.speed, -4, 4);
+      }
+    }
+  }
+
+  /**
+   * Realism pass: footwork is committed in steps (02 §2.1.5: a step-drag or a
+   * shuffle takes ~200 ms, an L-step 400). A movement decision starts a step
+   * whose radial and lateral sense (toward / around the opponent) holds for
+   * the step's duration; a wait or a defensive posture chosen mid-step does
+   * not stop the feet, only a strike, a grapple or a new commitment does. A
+   * step-in strike (`stepIn` flag) carries the attacker forward over its
+   * startup, which is what closes the distance on the way in. Before this,
+   * velocity lived for exactly the tick a movement was chosen, so 92 % of
+   * movement runs lasted one tick and the fighters stuttered.
+   */
+  function steer(w: World, f: FighterWorldState, d: Decision, target: FighterWorldState | null): void {
+    const max = 4;
+    const fleeing = /flee|flight/.test(d.intentTag);
+    if (fleeing || !target) {
+      f.vx = clamp(d.moveX, -max, max);
+      f.vz = clamp(d.moveZ, -max, max);
+      f.step.untilMs = -Infinity;
+      return;
+    }
+    const dx = target.x - f.x;
+    const dz = target.z - f.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const ux = dx / len;
+    const uz = dz / len;
+    const px = -uz;
+    const pz = ux;
+    const active = w.nowMs < f.step.untilMs;
+    const passive = d.kind === 'wait' || d.kind === 'defend' || (d.kind === 'move' && active) || d.what === null;
+    if (d.kind === 'move' && !active) {
+      const speed = Math.hypot(d.moveX, d.moveZ);
+      if (speed > 1e-6) {
+        let radial = (d.moveX * ux + d.moveZ * uz) / speed;
+        let lateral = (d.moveX * px + d.moveZ * pz) / speed;
+        // The candidate's direction was built from the *perceived* position
+        // (a tick or two old); a step is either in/out or around, so snap it.
+        if (Math.abs(radial) < 0.6) { radial = 0; lateral = lateral >= 0 ? 1 : -1; }
+        else { radial = radial > 0 ? 1 : -1; lateral = 0; }
+        const sp = radial < -0.5 ? speed * FOOTWORK.retreatSpeedMult : speed;
+        f.step = { tag: d.intentTag, radial, lateral, speed: sp, untilMs: w.nowMs + stepMs(d.what ?? '') };
+        // Walking into the other man's range unguarded is an entry he can
+        // time (02 §2.5.1 applied to a step): a short exposure window.
+        if (radial > 0.5 && len <= bandLimits(reachOf(target)).longMax + 0.25) {
+          openEntryExposure(w, f);
+        }
+      } else {
+        f.step.untilMs = -Infinity;
+      }
+    } else if (!passive) {
+      f.step.untilMs = -Infinity;
+      if (d.kind === 'strike' && typeof d.what === 'string' && hasTechnique(d.what)) {
+        const spec = technique(d.what as TechniqueId);
+        if (spec.flags.includes('stepIn')) {
+          // A step-in strike covers ~0.4 m over its startup.
+          const ms = Math.max(100, spec.startupMs);
+          f.step = { tag: d.what, radial: 1, lateral: 0, speed: (0.4 / ms) * 1000, untilMs: w.nowMs + ms };
+        }
+      }
+    }
+    if (w.nowMs < f.step.untilMs) {
+      const s = f.step;
+      f.vx = clamp((s.radial * ux + s.lateral * px) * s.speed, -max, max);
+      f.vz = clamp((s.radial * uz + s.lateral * pz) * s.speed, -max, max);
+      if (passive) f.intentTag = s.tag;
+    } else {
+      f.vx = d.kind === 'move' ? clamp(d.moveX, -max, max) : 0;
+      f.vz = d.kind === 'move' ? clamp(d.moveZ, -max, max) : 0;
+    }
+  }
+
+  /** See `resolveStrikeContact`: a range strike stops an advancing opponent. */
+  function stopTheEntry(w: World, actor: FighterWorldState, target: FighterWorldState, spec: TechniqueSpec): void {
+    const key = spec.family === 'teep' ? 'teep'
+      : spec.family === 'straight' ? (spec.limb === 'leadHand' ? 'jab' : 'cross')
+        : spec.family === 'bodyKick' ? 'bodyKick' : null;
+    if (key === null) return;
+    const dx = actor.x - target.x;
+    const dz = actor.z - target.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const vr = (target.vx * dx + target.vz * dz) / len;
+    const stepping = w.nowMs < target.step.untilMs && target.step.radial > 0.5;
+    if (vr <= FOOTWORK.enteringSpeedMs && !stepping) return;
+    target.step.untilMs = -Infinity;
+    target.vx = 0;
+    target.vz = 0;
+    const push = FOOTWORK.pushbackM[key] ?? 0;
+    const c = clampToArena(w.arena, target.x - (dx / len) * push, target.z - (dz / len) * push, 0.35);
+    target.x = c.x;
+    target.z = c.z;
+  }
+
+  /** The exposure an unguarded walk-in opens (see `steer`). */
+  function openEntryExposure(w: World, f: FighterWorldState): void {
+    const t = f.tactic;
+    if (t.exposedUntilMs >= w.nowMs) return;
+    t.exposedFromMs = w.nowMs;
+    t.exposedUntilMs = w.nowMs + FOOTWORK.entryExposureMs + 200;
+    t.exposedDefenceLogit = 0;
+    t.exposedReadLogit = -0.15;
+    t.exposedTech = 'tech.jab_step' as TechniqueId;
   }
 
   function commitDecision(w: World, f: FighterWorldState, d: Decision, jitter: number): void {
@@ -849,16 +1178,15 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     // Movement intent. P5 integrates whatever is left here; an engaged fighter
     // outside a scramble is pinned in place by invariant I4.
     const e = w.engagements.of(f.id);
+    const target = targetOf(w, f, d);
     if (e && e.kind !== 'scramble') {
       f.vx = 0;
       f.vz = 0;
+      f.step.untilMs = -Infinity;
     } else {
-      const max = 4;
-      f.vx = clamp(d.moveX, -max, max);
-      f.vz = clamp(d.moveZ, -max, max);
+      steer(w, f, d, target);
     }
 
-    const target = targetOf(w, f, d);
     // A fighter faces his opponent while moving in any direction — retreating,
     // circling or cutting off the cage — and faces his direction of travel only
     // when running away (street flight). Facing used to follow the movement
@@ -916,6 +1244,10 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
   function commitStrike(
     w: World, f: FighterWorldState, target: FighterWorldState, d: Decision, jitter: number,
   ): void {
+    if (typeof d.what === 'string' && d.what.startsWith('feint.')) {
+      commitFeint(w, f, target, d);
+      return;
+    }
     const id = d.what as TechniqueId;
     if (!hasTechnique(id)) return;
     const spec = technique(id);
@@ -938,13 +1270,68 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     const region: TargetRegion = (d.payload as { region?: TargetRegion } | undefined)?.region
       ?? spec.targets[0];
     f.totalAttempted++;
-    if (isSignificant(spec, posture, short)) f.sigAttempted++;
+    const sig = isSignificant(spec, posture, short);
+    if (sig) f.sigAttempted++;
 
     const contact = schedule(w, f, target, 'strike', id, contactMs, total, {
       kind: 'strike', technique: id, region, posture, node: f.position, ...(short ? { short: true } : {}),
+      sig, pos: statPosition(posture),
     }, jitter, Math.round(spec.startupMs * mult * tMult), Math.round(spec.activeMs * mult * tMult));
     // I-2/I-3: the shot that follows a strike is the one that works.
     openSetupWindow(w, f, contact.commitMs + contactMs);
+  }
+
+  /**
+   * Realism pass: a feint is a real, committed movement (02 §2.3.4). Until
+   * this pass a feint decision reached `commitStrike`, failed `hasTechnique`
+   * and did nothing at all — every feint the AI ever chose was a wasted tick.
+   *
+   * The bite is resolved here, once per feint, from the uniform the policy
+   * carries in the payload (the conditional residual of its own selection
+   * draw, so no draw is added). A bite means the defender executes the
+   * reaction the feint sells: until `bitUntilMs` his reactive defence is spent
+   * and the feinter's next strike carries §2.3.4's follow-up bonus.
+   */
+  function commitFeint(w: World, f: FighterWorldState, target: FighterWorldState, d: Decision): void {
+    let spec;
+    try {
+      spec = feintSpecOf(d.what as FeintId);
+    } catch {
+      return;
+    }
+    const busyMs = spec.startupMs + spec.recoveryMs;
+    f.tactic.busyUntilMs = w.nowMs + busyMs;
+    f.action = null;
+    f.actionResult = 'none';
+    f.damage.spendAction('feint', { skill: f.runtime.strikingMean });
+    const u = (d.payload as { biteU?: number } | undefined)?.biteU ?? 1;
+    // A feint is only sold to a man who is standing, free and looking.
+    const canSee = target.posture === 'standing' && postureOf(w, target) === 'distance'
+      && w.nowMs >= target.tells.backTurnedUntilMs;
+    const p = canSee ? feintBiteP({
+      baseBiteP: target.runtime.anticipation.striking.feintBiteP,
+      attackerFeintSkill: strikingCraft(f.runtime).feints,
+      repeats: feintRepeats(f.tactic, spec.id, w.nowMs),
+      defenderFatigue: target.energy.f,
+      defenderRocked: target.damage.has(S.rocked),
+      defenderVisionBlocked: w.nowMs < target.tells.eyesShutUntilMs,
+      consecutive: f.tactic.feintsSinceStrike,
+    }) : 0;
+    const bite = u < p;
+    noteFeint(f.tactic, spec.id, w.nowMs);
+    // 03 §2.3 A: a feint grants the set-up window to the shot that follows.
+    openSetupWindow(w, f, w.nowMs + spec.startupMs);
+    if (bite) {
+      target.tactic.bitBy = f.id;
+      target.tactic.bitUntilMs = w.nowMs + spec.startupMs + FEINT.windowMs;
+      target.tactic.bitBonus = biteBonus(spec.id, target.runtime.strikingTier);
+      target.tactic.bitFeint = spec.id;
+    }
+    emit(w, {
+      ...base(w, 'feint', f.id, target.id, `${f.runtime.def.short} ${bite ? 'draws a reaction with' : 'shows'} a ${spec.name.toLowerCase()}`),
+      kind: 'feint',
+      detail: { intent: spec.id, bite },
+    });
   }
 
   /**
@@ -1091,11 +1478,45 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     actor: FighterWorldState, target: FighterWorldState, why: string,
   ): void {
     actor.actionResult = 'missed';
+    // Realism pass: a strike that falls short is still a whiff — the thrower
+    // is out of position for its recovery (02 §2.5.1 "missed x1.0").
+    if (why === 'out of range' && hasTechnique(p.technique)) {
+      const spec = technique(p.technique);
+      openExposure(actor.tactic, spec, 'missed', actor.runtime.strikingTier, contact.tMs + Math.round(spec.activeMs));
+      notePrevStrike(actor.tactic, spec, contact.commitMs, target.id, 'missed', regionLabel(p.region));
+    }
     const e: StrikeEvent = {
       ...base(w, 'strike', actor.id, target.id,
         `${actor.runtime.def.short} misses (${why})`, contact.subMs),
       kind: 'strike',
-      detail: { technique: p.technique, result: 'missed', target: regionLabel(p.region), defence: target.defence },
+      detail: {
+        technique: p.technique, result: 'missed', target: regionLabel(p.region), defence: target.defence,
+        ...(p.short ? { short: true } : {}), sig: p.sig, pos: p.pos,
+      },
+    };
+    emit(w, e);
+  }
+
+  /**
+   * QA2 #6: a strike that was thrown but never reached its contact phase (a
+   * knockdown or a referee break cancelled it, the bell rang, the bout
+   * ended) is still an attempt. It goes on the books as `interrupted`, so
+   * every committed strike produces exactly one strike event and the live
+   * counters equal the stats.
+   */
+  function abandonContact(w: World, contact: ScheduledContact): void {
+    const p = contact.payload as Payload | undefined;
+    if (!p || p.kind !== 'strike') return;
+    const actor = w.fighters[contact.actorId];
+    if (!actor) return;
+    const e: StrikeEvent = {
+      ...base(w, 'strike', actor.id, contact.targetId,
+        `${actor.runtime.def.short}'s strike is cut off`, 0),
+      kind: 'strike',
+      detail: {
+        technique: p.technique, result: 'interrupted', target: regionLabel(p.region),
+        ...(p.short ? { short: true } : {}), sig: p.sig, pos: p.pos,
+      },
     };
     emit(w, e);
   }
@@ -1251,6 +1672,32 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       return;
     }
 
+    // --- Realism pass: chapter 02's tactical layer at contact ----------------
+    // Range fit and reach (§2.1.1, §2.8), stance (§2.7), combination flow
+    // (§2.3.1), counters into the target's recovery (§2.5.1) and feint bites
+    // (§2.3.4). Draw-free; see `striking/tactics.ts`.
+    const profile = reachOf(actor);
+    const tac = tacticalTerms({
+      spec,
+      launchMs: contact.commitMs,
+      contactMs: contact.tMs,
+      attackerId: actor.id,
+      targetId: target.id,
+      attacker: actor.runtime,
+      defender: target.runtime,
+      attackerState: actor.tactic,
+      defenderState: target.tactic,
+      distanceM: w.distance(actor, target),
+      band,
+      profile,
+      limits: bandLimits(profile),
+      atDistance: posture === 'distance',
+      region: regionLabel(p.region),
+      attackerStance: actor.stance,
+      defenderStance: target.stance,
+      classScale: reachClassScale(actor.runtime.body.weightClass),
+    });
+
     // --- 02 resolution: exactly DRAWS_PER_STRIKE draws ---------------------
     const force: ForceContext = {
       tier: actor.runtime.strikingTier,
@@ -1261,10 +1708,20 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
       fatigue: actor.energy.f,
       commit: commitModeOf(w, actor, target, spec),
       rangeFitMult: (p.short ? SHORT_STRIKE_MODEL.forceMult : 1) * gnpDamageMult(posture, actor.position, spec),
+      counterForceMult: tac.forceMult,
+      // Realism pass: a man walking onto a punch adds his own speed to it
+      // (02 §2.6.4 closing speed, BOX x1.25/x1.5; 05 kClosing). The field
+      // existed on both contracts and nothing filled it.
+      closingSpeedMs: posture === 'distance' ? closingSpeed(target, actor) : 0,
       female: actor.runtime.body.sex === 'female',
     };
-    const attackerSkill = actor.runtime.strikingMean;
-    const defenderSkill = target.runtime.strikingMean;
+    // Realism pass: the skill that lands a strike depends on where it is
+    // thrown. At distance it is striking; in a tie-up it is clinch striking
+    // (03 §2.1.3 `mma.clinch_strike`) against the other man's clinch craft;
+    // from the top of a ground position it is ground-and-pound (`mma.gnp`)
+    // against his guard and frames. Until this pass every strike read the
+    // striking mean, so MMA-integration skill decided nothing.
+    const [attackerSkill, defenderSkill] = strikeSkills(actor, target, posture);
     const g = guardOf(target, w.nowMs);
     const targetMidAction = target.action !== null
       && w.nowMs < target.actionCommitMs + target.actionTotalMs;
@@ -1314,8 +1771,23 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         grounded: onFloor,
       },
       guard: g,
-      defence: scaledDefence(resolvedDefenceOf(target, spec, attackerSkill, defenderSkill), positionalDefenceMult(posture)),
-      passiveBlockP: passiveBlockP(g, spec, defenderSkill) * positionalDefenceMult(posture),
+      // A defender reacting to a feint has spent his reactive defence and his
+      // guard is where the feint sent it (§2.3.4).
+      defence: tac.voidDefence ? null : shiftedDefence(
+        scaledDefence(resolvedDefenceOf(target, spec, attackerSkill, defenderSkill), positionalDefenceMult(posture)),
+        tac.defenceLogit,
+      ),
+      passiveBlockP: passiveBlockP(g, spec, defenderSkill) * positionalDefenceMult(posture)
+        * (tac.voidDefence ? FEINT_BITE_GUARD_MULT : 1),
+      counter: tac.counter,
+      // Realism pass: 02 §2.6.3's placement terms were never passed, so a
+      // precise puncher landed flush exactly as often as a sloppy one and head
+      // movement never turned a flush shot into a glancing one.
+      placement: {
+        attackerPrecision: precisionOf(actor.runtime, spec),
+        defenderHeadMovement: p.region === 'head' ? strikingCraft(target.runtime).headMovement : 50,
+        defenderRocked: target.damage.has(S.rocked),
+      },
       arrivalLogit: arrivalLogit(spec, {
         attackerSkill,
         defenderSkill,
@@ -1333,8 +1805,10 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         defenderBackTurned: w.nowMs < target.tells.backTurnedUntilMs,
         defenderVisionBlocked: w.nowMs < target.tells.eyesShutUntilMs,
         guardLogit: guardLogit(g, spec),
-      }) + (p.short ? SHORT_STRIKE_MODEL.arrivalLogit : 0) + positionalArrivalLogit(posture)
-        + (TARGET_ARRIVAL[p.region] ?? 0),
+      }, 2.0 * STRIKING_SKILL_GAIN) + (p.short ? SHORT_STRIKE_MODEL.arrivalLogit : 0) + positionalArrivalLogit(posture)
+        + (TARGET_ARRIVAL[p.region] ?? 0) + (POSITION_TARGET_ARRIVAL[statPosition(posture)][p.region] ?? 0)
+        + tac.arrivalLogit + TACTICAL_ARRIVAL_OFFSET
+        + ABSOLUTE_DEFENCE.k * (ABSOLUTE_DEFENCE.ref - defenderSkill) / 100,
     };
     const res = resolveStrike(w.rng, input);
     if (res.draws !== DRAWS_PER_STRIKE) {
@@ -1344,6 +1818,24 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     actor.actionResult = res.result === 'landed' ? 'landed'
       : res.result === 'blocked' ? 'blocked'
         : res.result === 'evaded' ? 'evaded' : 'missed';
+
+    // Realism pass: the tactical memory. The attacker is now exposed for his
+    // strike's counter window (§2.5.1); a defence that worked is remembered
+    // for the best-counter lookup; the strike is the previous beat of any
+    // combination that follows.
+    const contactEnd = contact.tMs + Math.round(spec.activeMs);
+    openExposure(actor.tactic, spec, res.result, actor.runtime.strikingTier, contactEnd);
+    if (res.defence && res.result !== 'landed' && res.result !== 'missed') {
+      noteDefence(target.tactic, res.defence, contact.tMs);
+    }
+    notePrevStrike(actor.tactic, spec, contact.commitMs, target.id, res.result, regionLabel(p.region));
+    // A straight, a teep or a front body kick that meets a man walking in
+    // stops him and moves him back: the jab and the teep are range tools,
+    // not just points (02 §2.1.4, MUAY_THAI teep; BOX §4 "the jab keeps
+    // distance"). Only against an advancing target, only at distance.
+    if (posture === 'distance' && (res.result === 'landed' || res.result === 'blocked' || res.result === 'checked')) {
+      stopTheEntry(w, actor, target, spec);
+    }
 
     // 05 §2.7: an evasion, a check or a catch is intelligent defence; a glove
     // block is a static cover and deliberately is not.
@@ -1385,7 +1877,8 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
 
     if (res.statLanded) {
       actor.totalLanded++;
-      if (isSignificant(spec, posture, p.short === true)) actor.sigLanded++;
+      // QA2 #6: the strike is significant or not as it was *thrown*.
+      if (p.sig) actor.sigLanded++;
     }
 
     // Feed the outcome back to chapter 07's ledger. Only P4 knows whether a
@@ -1411,7 +1904,10 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
         damage: damageDetail,
         defence: res.defence ?? undefined,
         unseen: !seen,
+        ...(tac.counter ? { counter: true } : {}),
         ...(p.short ? { short: true } : {}),
+        sig: p.sig,
+        pos: p.pos,
       },
     };
     emit(w, e);
@@ -2289,6 +2785,7 @@ export function createModules(world: World, opts: BindOptions = {}): BoundModule
     commitDecision,
     holdDefence,
     resolveContact,
+    abandonContact,
     referee: refereePhase,
     judges,
     breakRecovery,

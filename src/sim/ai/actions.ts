@@ -382,6 +382,24 @@ export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
       targetRegion: spec.targets[0],
       spec,
     }));
+    // Realism pass: a real knee to the thigh in the tie-up is a significant
+    // leg strike (UFCStats; FIGHT_DATA §3 #18 clinch leg accuracy 91 %). The
+    // sim had no clinch or ground leg strikes at all.
+    if (inClinch && homeInClinch && spec.weapon === 'knee' && spec.targets.includes('body')) {
+      out.push(mk(ctx, {
+        kind: 'strike',
+        id: spec.id,
+        family: 'clinchStrike',
+        defence: 'def.neutral',
+        moveX: 0,
+        moveZ: 0,
+        intentTag: `${spec.id}#leg`,
+        rangeError: 0,
+        targetRegion: 'leadLeg',
+        spec,
+        base: basePrior('clinchStrike') * LEG_STRIKE.clinchKneeMult,
+      }));
+    }
     // UFCStats' non-significant strikes are mostly these: short punches and
     // thigh/body knees in the clinch that carry no power (09 §4.1).
     if (inClinch && homeInClinch && (spec.weapon === 'fist' || spec.weapon === 'knee')) {
@@ -412,6 +430,9 @@ export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
  * short share of clinch and ground strikes); `bottomMult` is the bottom
  * fighter's striking against the top's.
  */
+/** Realism pass [E: FIGHT_DATA §3 #18-#19 need leg strikes in both positions]. */
+export const LEG_STRIKE = Object.freeze({ clinchKneeMult: 0.45, groundFistMult: 0.15 });
+
 export const SHORT_STRIKE = Object.freeze({
   // FIGHT_DATA §3 #5-#7, #23-#24: ~1.8 non-significant attempts a minute
   // against 8.4 significant, living mostly in the clinch and on the mat —
@@ -471,6 +492,23 @@ export function groundStrikeCandidates(ctx: EnumerationContext): Candidate[] {
         ...(short ? { short: true } : {}),
         base: basePrior('groundStrike') * side * (short ? SHORT_STRIKE.groundPriorMult : 1),
         ...(short ? { risk: 0.10 } : {}),
+      }));
+    }
+    // Realism pass: punches and hammerfists to the thigh from the top (and
+    // the bottom man's heel into the knee) are the ground's leg strikes.
+    if (spec.weapon === 'fist' || spec.weapon === 'hammerfist') {
+      out.push(mk(ctx, {
+        kind: 'strike',
+        id: spec.id,
+        family: 'groundStrike',
+        defence: 'def.neutral',
+        moveX: 0,
+        moveZ: 0,
+        intentTag: `${spec.id}#leg`,
+        rangeError: 0,
+        targetRegion: 'leadLeg',
+        spec,
+        base: basePrior('groundStrike') * side * LEG_STRIKE.groundFistMult,
       }));
     }
   }

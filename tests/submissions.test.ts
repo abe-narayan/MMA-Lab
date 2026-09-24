@@ -816,7 +816,7 @@ describe('parameters', () => {
     expect(a.bySection('submissions')).toHaveLength(SUBMISSION_PARAMS.length);
     // Moving a free parameter changes the hash, so a replay can never be
     // silently replayed under different numbers.
-    expect(a.hash({ 'sub.kSkill.secure': 2.5 })).not.toBe(a.hash());
+    expect(a.hash({ 'sub.kSkill.secure': 3.5 })).not.toBe(a.hash());
   });
 
   it('keeps measured numbers out of the calibrator', () => {

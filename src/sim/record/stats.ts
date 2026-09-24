@@ -359,9 +359,13 @@ export function computeStats(
       case 'strike': {
         if (!actor) break;
         const pair = pairOf.get(e.actor);
-        const position = phaseOf(pair ? pair.node : null);
+        // QA2 #6 (engine 6.0): a strike is classified as it was *thrown* —
+        // the position and significance the sim recorded at commit — so these
+        // tallies equal the live counters. Older logs fall back to the pair
+        // state at the event.
+        const position = e.detail.pos ?? phaseOf(pair ? pair.node : null);
         const landed = isStatLanded(e.detail.result);
-        const sig = isSignificant(e.detail.technique, position, e.detail.short === true);
+        const sig = e.detail.sig ?? isSignificant(e.detail.technique, position, e.detail.short === true);
         actor.total.attempted++;
         if (landed) actor.total.landed++;
         if (sig) {

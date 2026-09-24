@@ -200,7 +200,10 @@ describe('§2.4.1 knockdown model, Monte-Carlo over the §2.1 force distribution
     expect(r.pConcuss).toBeLessThan(0.125);
     expect(r.drop).toBeGreaterThan(0.030);
     expect(r.drop).toBeLessThan(0.060);
-    expect(r.ko).toBeGreaterThan(0.003);
+    // Realism pass: ko.kKO 0.05 -> 0.035 (the rotational term raised the
+    // in-fight concussion rate; this fixture carries no trajectory, so it
+    // sees only the lower KO share).
+    expect(r.ko).toBeGreaterThan(0.0015);
     expect(r.ko).toBeLessThan(0.013);
     // The split itself: drops are 0.42 of concussive events (kKO 0.07 + hurt
     // 0.10 + flash 0.25) at massSevKO = 1 and f = 0.
@@ -1086,8 +1089,11 @@ describe('§2.3.1 the §2.4 roll overrides the threshold mapping for its own imp
    * is the opposite of what these cases hold fixed.
    */
   function rockedAtNinety(): DamageState {
+    // `ko.alphaCal` pinned at its Phase 9 value: the cases below need a 4,000 N
+    // chin shot whose pConcuss stays under the scripted 0.999 (Realism pass
+    // moved the default to 1.38).
     const ds = new DamageState(defaultProfile({ chinEff: 50 }), {
-      tuning: tuningWith({ 'dmg.rawScale': RAW_SCALE_REFERENCE }),
+      tuning: tuningWith({ 'dmg.rawScale': RAW_SCALE_REFERENCE, 'ko.alphaCal': 1.3 }),
     });
     // Two chin shots at the §2.1 power median are enough to enter `rocked`.
     const quiet = scripted([0.999]);

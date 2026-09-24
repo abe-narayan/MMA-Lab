@@ -147,8 +147,28 @@ export function alphaEquivalent(
   front: FrontEnd,
 ): AlphaBreakdown {
   const site = imp.subLocation;
-  const kWeapon = t.table('ko.kWeapon', koWeaponKey(imp));
+  let kWeapon = t.table('ko.kWeapon', koWeaponKey(imp));
   const kLever = isHeadSite(site) ? t.table('ko.kLever', site) : 1;
+  // Realism pass: the rotational term. Rotational acceleration is the
+  // concussion mechanism (Rowson & Duma 2013; LIT_A §4), and how much of a
+  // blow's force becomes head *rotation* depends on its trajectory and where
+  // it lands: a hook or a round kick arrives tangentially and turns the head
+  // on the neck; a straight mostly drives it back (DAMAGE_PHYSIOLOGY §3.1,
+  // Viano 2005 vs Walilko 2005). The catalogue carries the trajectory as
+  // `rot`; tangential blows to the jaw and temple get the extra lever. With a
+  // `rot` present the per-punch-kind `kWeapon` (hook 1.15) is superseded —
+  // the trajectory now lives here, not in a three-way table. Hooks and head
+  // kicks to the jaw become the knockout blows the data say they are
+  // (FIGHT_DATA §3 #29: lead hook 27 %, rear hook 24 %, rear straight 29 %).
+  let kRot = 1;
+  if (imp.rotFactor !== undefined && isHeadSite(site)) {
+    const excess = imp.rotFactor - 1;
+    if (weaponClass(imp.weapon) === 'fist') kWeapon = 1;
+    else if (weaponClass(imp.weapon) === 'shin' || weaponClass(imp.weapon) === 'foot') kWeapon = 1;
+    const tangential = site === 'chin' || site === 'temple';
+    kRot = Math.max(0.5, 1 + t.n('ko.rotGain') * excess)
+      * (tangential && excess > 0 ? 1 + t.n('ko.rotSiteGain') * excess : 1);
+  }
   const kGlove = t.table('ko.kGlove', imp.gloveType);
   const kUnseen = imp.seen ? 1 : t.n('ko.kUnseen');
   // 01 `neckMult` = 1.15 - 0.30 * neck/100 `[S: DAMAGE §3.2 — Collins 2014,
@@ -184,7 +204,7 @@ export function alphaEquivalent(
 
   const alphaEq = t.n('ko.alphaRef')
     * (front.fDel / t.n('ko.forceRef'))
-    * kWeapon * kLever * kGlove * kUnseen * kBrace * kRelaxed * kClosing
+    * kWeapon * kRot * kLever * kGlove * kUnseen * kBrace * kRelaxed * kClosing
     * kFatigue * kPrior * kGround * kInertia * t.n('ko.alphaCal');
   return { alphaEq, kWeapon, kLever, kPrior };
 }
@@ -241,10 +261,14 @@ export function outcomeWeights(
   const historyMult = koHistoryMult(target.koLosses, t.n('ko.historyPerKO'), t.n('ko.historyCap'));
   const kKO = t.n('ko.kKO') * massSevKO * historyMult
     * (1 + t.n('ko.kKO.fatigue') * clamp(targetFatigue, 0, 1));
+  // Realism pass: a flash knockdown is a buckle as much as a blackout — the
+  // legs go before the lights do. Balance (01 `balanceStumbleMult`'s input)
+  // keeps a man on his feet: x1.16 at 10 .. x0.84 at 90 [E].
+  const balanceMult = 1.2 - 0.4 * clamp((target.balance ?? 50) / 100, 0, 1);
   return {
     kKO,
     hurt: t.n('ko.split.hurtKD') * massSevKO,
-    flash: t.n('ko.split.flashKD'),
+    flash: t.n('ko.split.flashKD') * balanceMult,
     massSevKO,
   };
 }

@@ -34,6 +34,12 @@ export interface LoopModules {
   policy: DecisionPolicy;
   /** Resolve one due contact; returns true when it changed the bout state. */
   resolveContact(world: World, contact: ScheduledContact): void;
+  /**
+   * Realism pass (QA2 #6): a committed contact that will never resolve
+   * (cancelled, cut off by the bell or by the end of the bout). Optional so
+   * test doubles need not implement it.
+   */
+  abandonContact?(world: World, contact: ScheduledContact): void;
   /** Per-fighter upkeep: fatigue, damage decay, timers. No RNG draws (P2). */
   upkeep(world: World, f: FighterWorldState, dtMs: number): void;
   /** Referee pass; may end the bout. */
@@ -160,10 +166,15 @@ export class BoutLoop {
     // sees the world before the later ones, so trades happen naturally and a
     // knockdown can cancel the punch that was already on its way.
     for (const contact of w.scheduler.due(w.tick)) {
-      if (w.finished) break;
-      if (contact.cancelled) continue;
+      if (w.finished || contact.cancelled) {
+        this.modules.abandonContact?.(w, contact);
+        continue;
+      }
       const actor = w.fighters[contact.actorId];
-      if (!actor || actor.out) continue;
+      if (!actor || actor.out) {
+        this.modules.abandonContact?.(w, contact);
+        continue;
+      }
       this.modules.resolveContact(w, contact);
     }
 
@@ -204,6 +215,8 @@ export class BoutLoop {
         && w.nowMs >= this.cfg.maxSeconds * 1000 && !w.finished) {
       w.finished = true;
     }
+    // QA2 #6: strikes still in the air when the bout ends are attempts too.
+    if (w.finished) this.abandonPending();
 
     // ---- P8 commentary: nothing; it is derived from the event log --------
     // ---- P9 digest -------------------------------------------------------
@@ -316,8 +329,17 @@ export class BoutLoop {
     }
   }
 
+  /** Every contact still queued goes on the books as abandoned (QA2 #6). */
+  private abandonPending(): void {
+    const w = this.world;
+    const hook = this.modules.abandonContact;
+    if (!hook) return;
+    for (const c of w.scheduler.queue.popDue(Number.POSITIVE_INFINITY)) hook.call(this.modules, w, c);
+  }
+
   private endRound(): void {
     const w = this.world;
+    this.abandonPending();
     if (w.round >= this.cfg.rounds) {
       w.finished = true;
       return;

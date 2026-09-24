@@ -54,6 +54,8 @@ import {
   availableMacros, comboMatchScore, preferComboOrder, type ComboPreference,
 } from '../src/sim/ai/macros';
 import { ADJUSTMENT_ROWS, type AdaptSignals } from '../src/sim/ai/adapt';
+import { urgency } from '../src/sim/ai/scorecard';
+import { shapeUrgency } from '../src/sim/ai/policy';
 import { AI_PARAMS } from '../src/sim/params/ai.params';
 // The barrel wires §2.5's generator to the decision core.
 import '../src/sim/ai';
@@ -503,16 +505,22 @@ describe('01 §2.6 whenLosing shapes the behind-on-the-cards adjustment', () => 
   }
 
   it('gambles harder, stalls flatter, and presses in between', () => {
-    const risk = (w: AdaptSignals['whenLosing']): number =>
-      behindFinal.build(signals({ whenLosing: w })).policy?.riskDelta ?? 0;
-    const pace = (w: AdaptSignals['whenLosing']): number =>
-      behindFinal.build(signals({ whenLosing: w })).policy?.paceMult ?? 1;
+    // Realism pass: pace and risk when behind are the scorecard urgency's
+    // (`ai/scorecard.ts`), shaped per fighter by `shapeUrgency`; the row keeps
+    // only its emergency flag. Behind by a round in the last minute of the
+    // final round:
+    const base = urgency({
+      roundsUp: -1, lead: -0.3, round: 3, rounds: 3, elapsedFrac: 0.85, iqTier: 4, holdWhenLosing: false,
+    });
+    const shaped = (w: AdaptSignals['whenLosing']) => shapeUrgency(base, undefined, w, 50);
+    const risk = (w: AdaptSignals['whenLosing']): number => shaped(w).press + 1.5 * shaped(w).desperation;
+    expect(base.press).toBeGreaterThan(0);
     expect(risk('gamble')).toBeGreaterThan(risk('press'));
     expect(risk('press')).toBeGreaterThan(risk('stall'));
-    expect(pace('gamble')).toBeGreaterThan(pace('press'));
-    expect(pace('press')).toBeGreaterThan(pace('stall'));
+    expect(shaped('press').press).toBeGreaterThan(shaped('stall').press);
     // An absent field is the §2.6.3 default.
     expect(risk(undefined)).toBe(risk('press'));
+    expect(behindFinal.build(signals({ whenLosing: 'gamble' })).policy?.emergency).toBe('stealRound');
   });
 
   it('`hold` disables the rule entirely, like `losingBehaviour: unchanged`', () => {

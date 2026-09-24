@@ -630,7 +630,51 @@ const EDGE_CASES: Plan = {
 // Registry
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// skill_domains (Realism pass): what is a point of each kind of skill worth?
+// ---------------------------------------------------------------------------
+
+const STRIKING_ARTS = ['boxing', 'muayThai', 'kickboxing', 'karate', 'taekwondo'];
+const GRAPPLING_ARTS = ['wrestling', 'judo', 'bjj', 'sambo'];
+
+function shiftArts(f: FighterDefinition, arts: readonly string[], val: number): void {
+  const ds = f.disciplines as unknown as Record<string, { sub: Record<string, number> } | undefined>;
+  for (const a of arts) {
+    const d = ds[a];
+    if (!d) continue;
+    for (const k of Object.keys(d.sub)) d.sub[k] = Math.round(clamp(d.sub[k] + val, 1, 99));
+  }
+}
+
+const DOMAIN_SHIFTS: readonly { id: string; apply: (f: FighterDefinition, v: number) => void }[] = [
+  { id: 'striking', apply: (f, v) => shiftArts(f, STRIKING_ARTS, v) },
+  { id: 'grappling', apply: (f, v) => shiftArts(f, GRAPPLING_ARTS, v) },
+  { id: 'integration', apply: (f, v) => shiftArts(f, ['mmaIntegration', 'mma'], v) },
+  { id: 'all', apply: (f, v) => shiftSkills(f, v) },
+];
+
+const SKILL_DOMAINS: Plan = {
+  id: 'skill_domains',
+  description: 'Realism pass: T4 lightweight vs its own clone with one skill domain (striking arts, grappling arts, MMA integration, all) lowered by 10 points; edge side alternates.',
+  defaultN: 300,
+  cells: (n) => DOMAIN_SHIFTS.map((dsh) => ({
+    id: `skill_domains/${dsh.id}/10`,
+    plan: 'skill_domains',
+    n,
+    qa: false,
+    tags: tags('skill_domains', 'domain', { tierA: 4, tierB: 4, sweepVar: `domain_${dsh.id}`, sweepVal: 10 }),
+    make: ({ i, seed }) => {
+      const base = gen(`${seed}#base`, { tier: 4, weightClass: LW.wc, sex: 'male' });
+      const weaker = clone(base);
+      dsh.apply(weaker, -10);
+      const s = sided(i, clone(base), weaker);
+      return { config: config1v1(seed, s.pair[0], s.pair[1]), bt: { edge: s.edge } };
+    },
+  })),
+};
+
 export const PLANS: Readonly<Record<string, Plan>> = Object.freeze({
+  skill_domains: SKILL_DOMAINS,
   baseline: BASELINE,
   ufc_population: UFC_POPULATION,
   tier_matrix: TIER_MATRIX,

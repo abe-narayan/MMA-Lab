@@ -96,6 +96,13 @@ export interface StrikeImpact {
   gloveType: GloveType;
   /** Optional rad/s^2 if a head-kinematics model ever exists. v1 never sets it. */
   rotProxy?: number;
+  /**
+   * Realism pass: the technique's trajectory factor (the catalogue's `rot`
+   * column: straight 1.0, uppercut 1.2, overhand 1.4, hook 1.5, head kick
+   * 1.7, body shots < 1). 05 turns it into the rotational share of the head's
+   * acceleration (`ko.ts` kRot). Absent on non-technique impacts.
+   */
+  rotFactor?: number;
   /** Checked-kick shin impact (weapon 'shin_on_knee', forceN = 0.6 x forceN). */
   selfDamage?: StrikeImpact;
 }
@@ -329,8 +336,10 @@ export const PLACEMENT = Object.freeze({
   narrowFailMargin: 0.15,
   blockedPartial: 0.70,
   blockedGlancing: 0.30,
-  precisionK: 0.5,
-  headMovementK: -0.4,
+  // Realism pass: x1.6 with the rest of the striking skill terms (bind
+  // STRIKING_SKILL_GAIN); the terms were dead until bind passed them.
+  precisionK: 0.8,
+  headMovementK: -0.64,
   rockedFlushMult: 1.5,
 });
 
@@ -815,6 +824,7 @@ export function resolveStrike(rng: RNG, input: StrikeResolveInput): StrikeResolu
       },
       posture: input.posture ?? 'distance',
       gloveType: input.gloveType,
+      rotFactor: spec.rotationalFactor,
     };
     // §2.2.4: a checked kick puts 60 % of the raw force into the kicker's own
     // shin. The kicker's shin pool (05) is what makes kick output fall late.

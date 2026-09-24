@@ -91,6 +91,8 @@ export interface StrikeImpact {
   gloveType: GloveType;
   /** Optional explicit rad/s^2 from 02; replaces the derived `alphaEq` (§2.2.2). */
   rotProxy?: number;
+  /** Realism pass: 02's trajectory factor (`rot` column); see ko.ts kRot. */
+  rotFactor?: number;
   /** Checked-kick shin (§2.3.3) or the hand/foot injury route (§2.3.5). */
   selfDamage?: StrikeImpact;
 }

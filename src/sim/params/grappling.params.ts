@@ -136,7 +136,8 @@ export const GRAPPLING_PARAMS: ParamSpec[] = [
   p('grap.captureFailFrontHeadlock', 0.15, 'weight', '[S: WRESTLING §9 r8]', { min: 0, max: 1 }),
   p('grap.finishAttemptsMaxOpen', 3, 'count', '[S: WRESTLING §9 r8]', { min: 1, max: 10 }),
   p('grap.finishAttemptsMaxCage', 6, 'count', '[S: WRESTLING §9 r8]', { min: 1, max: 15 }),
-  p('grap.tdChainLogit', 0.65, 'logit', '[E: tuned Phase 9 to FIGHT_DATA §3 #57 — the WRESTLING §9 base rates are wrestler-vs-wrestler; with them MMA takedown accuracy ran 24-26 % against a real 38 %. Added to the shooter capture, throw and finish edges in a bout]', { min: 0, max: 1.5 }),
+  p('grap.tdChainLogit', 1.3, 'logit', '[E: tuned Phase 9 to FIGHT_DATA §3 #57 — the WRESTLING §9 base rates are wrestler-vs-wrestler; with them MMA takedown accuracy ran 24-26 % against a real 38 %. Added to the shooter capture, throw and finish edges in a bout]', { min: 0, max: 1.5 }),
+  p('grap.kSkillScale', 1.8, 'ratio', '[D: Realism pass: WRESTLING §8 tier table, sprawl denial 50 / 70 / 85 %, chain success 40 / 65 / 85 %, ride retention 60 / 75 / 85 % across 20-point tiers = 3.3-5.3 logit per 100 points; 03 §2.3 capped its k at 2.1-2.5 for the clamps. The skill term was dead until the Realism pass (alias map), so this is its first calibration]', { min: 0, max: 4 }),
   p('grap.getUpLogit', 1.0, 'logit', '[E: tuned Phase 9 to FIGHT_DATA §3 #24 — the BJJ_POSITIONS escape rates come from grappling, where the bottom player is not trying to stand; in MMA, with the cage to walk up, a third of ground spells lasted to the bell (mean 170 s) and ground time ran 29-31 % against a real 24 %. Added to bottom-initiated edges from the mat that end standing or in the clinch]', { min: 0, max: 1.5 }),
   p('grap.openMatFarShotMult', 0.85, 'x P beyond 1.2 m', '[S: WRESTLING §9 r7]', { min: 0.5, max: 1 }),
 

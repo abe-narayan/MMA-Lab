@@ -33,6 +33,7 @@ import {
   type FighterDamageProfile, type GloveType, type RefObservables,
 } from '../damage';
 import { EngagementSet } from '../grappling';
+import { newTacticalState } from '../striking/tactics';
 import type { SimEvent } from '../record/events';
 
 // ---------------------------------------------------------------------------
@@ -261,6 +262,8 @@ function newFighterState(
       readUntilMs: -Infinity, rules: [],
     },
     intentTag: 'idle',
+    tactic: newTacticalState(),
+    step: { tag: '', radial: 0, lateral: 0, speed: 0, untilMs: -Infinity },
     sigLanded: 0,
     sigAttempted: 0,
     totalLanded: 0,

@@ -199,7 +199,7 @@ interface ModeDefaults {
   weights: Partial<Record<ActionFamily, number>>;
 }
 
-const MODE_DEFAULTS: Record<Exclude<ModeId, 'mode.outnumbered'>, ModeDefaults> = {
+export const MODE_DEFAULTS: Record<Exclude<ModeId, 'mode.outnumbered'>, ModeDefaults> = {
   'mode.distance_striking': {
     rangeTarget: 'long', phaseTarget: 'distance', initiative: 'mixed', tdPolicy: 'reactive',
     clinchPolicy: 'avoid', groundTopPolicy: 'standAndReset', groundBottomPolicy: 'standUpFirst',
@@ -305,9 +305,26 @@ export function generateGamePlan(input: PlanInput): GamePlan | null {
 
   // ---- steps 1-4: mode fitness -------------------------------------------
   const fitness = modeFitness(ctx);
+  // Realism pass: the authored game plan (`style.primaryMode`) is the fighter's
+  // own preference. The generator used to ignore it and pick by matchup
+  // fitness alone, so the creator's "game plan" control changed nothing. A
+  // preferred mode's fitness is raised x1.4: he fights his way unless the
+  // matchup makes it a clearly worse idea (a smarter fighter reads the
+  // matchup; the multiplier is the same, the fitness gaps he sees are not).
+  const preferred = authoredMode(self.def.style.primaryMode);
+  if (preferred !== null) {
+    for (const f of fitness) {
+      if (f.mode === preferred && f.fitness > 0) { f.fitness *= AUTHORED_MODE_BIAS; f.own *= AUTHORED_MODE_BIAS; }
+    }
+  }
   const available = fitness.filter((f) => f.fitness > 0);
   const primaryMode = pickPrimary(ctx, fitness);
-  const fallbackMode = iqTier >= 2 ? pickFallback(primaryMode, available) : null;
+  // The authored plan B, when it is a different, allowed mode, replaces the
+  // generated fallback (T2+ plans have one at all, §2.5.8).
+  const authoredB = authoredMode(self.def.style.fallbackMode);
+  const fallbackMode = iqTier < 2 ? null
+    : authoredB !== null && authoredB !== primaryMode && available.some((f) => f.mode === authoredB)
+      ? authoredB : pickFallback(primaryMode, available);
 
   // ---- step 5: action weights --------------------------------------------
   // 01 §2.6's authored preferences come first so that the scouted rules of
@@ -632,6 +649,23 @@ function modeAllowed(mode: ModeId, ctx: PlanContext): boolean {
       return r.takedownsAllowed;
     default:
       return true;
+  }
+}
+
+/** Realism pass: weight of an authored `style.primaryMode` on its mode's fitness [E]. */
+export const AUTHORED_MODE_BIAS = 1.4;
+
+/** 01's authored mode labels onto 07's plan modes; null for "all-rounder" / unset. */
+export function authoredMode(m: string | undefined | null): ModeId | null {
+  switch (m) {
+    case 'pressure': case 'pressureStriking': case 'volume': return 'mode.pressure_striking';
+    case 'counter': return 'mode.counter_striking';
+    case 'pointFighter': case 'distanceStriking': return 'mode.distance_striking';
+    case 'power': return 'mode.sprawl_and_brawl';
+    case 'grinder': case 'clinchGrind': return 'mode.clinch_grind';
+    case 'scrambler': case 'wrestleControl': return 'mode.wrestle_control';
+    case 'guardPlayer': case 'submissionHunt': return 'mode.submission_hunt';
+    default: return null;
   }
 }
 

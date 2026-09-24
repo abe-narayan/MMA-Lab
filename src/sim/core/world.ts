@@ -25,6 +25,7 @@ import { PerceptionBuffer } from './perception';
 import { Scheduler } from './scheduler';
 import type { RNG } from '../rng';
 import { Digest } from '../rng';
+import type { TacticalState } from '../striking/tactics';
 
 /** Per-fighter mutable state. One of these per fighter for the whole bout. */
 export interface FighterWorldState {
@@ -105,6 +106,17 @@ export interface FighterWorldState {
   };
   /** Short intent id for the HUD and commentary. */
   intentTag: string;
+  /**
+   * Realism pass: chapter 02's tactical memory (counter exposure, feint
+   * bites, combination flow), written at commit/contact and read at contact.
+   */
+  tactic: TacticalState;
+  /**
+   * Realism pass: a committed footwork step (§2.1.5 movements last 200-400
+   * ms). While `stepUntilMs` is in the future the fighter keeps moving in
+   * that step's radial/lateral sense unless he chooses to strike or grapple.
+   */
+  step: { tag: string; radial: number; lateral: number; speed: number; untilMs: number };
 
   // ---- running tallies ---------------------------------------------------
   sigLanded: number;

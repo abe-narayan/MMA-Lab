@@ -449,7 +449,8 @@ export function edgeProbability(
     const a = skillOf(att, edge.skills.attacker);
     const dS = skillOf(def, edge.skills.defender);
     if (a !== null && dS !== null) {
-      const t = (edge.kSkill * (a - dS)) / 100;
+      // Realism pass: `grap.kSkillScale` (see the registry note).
+      const t = (p.get('grap.kSkillScale') * edge.kSkill * (a - dS)) / 100;
       sum += t;
       terms.push({ code: 'skill', logit: t });
     }

@@ -61,10 +61,12 @@ export const STAGE_PARAMS = {
 /** Logit modifier coefficients (§2.3). Names match the `M_*` ids in the design. */
 export const MODIFIER_PARAMS = {
   /** M_SKILL: k_skill x (skAtt - skDef)/100. Halved past the entry/secure pair. */
-  kSkillEntry: 2.0,
-  kSkillSecure: 2.0,
-  kSkillFinish: 1.0,
-  kSkillLocked: 1.0,
+  // Realism pass: x1.25 (BJJ_POSITIONS '+' ladder 2.0/3.0/3.5 per 100; the
+  // belt gap is the largest skill effect in grappling).
+  kSkillEntry: 2.5,
+  kSkillSecure: 2.5,
+  kSkillFinish: 1.25,
+  kSkillLocked: 1.25,
   /** M_CTRL: logit per §03 control point away from the neutral 5. */
   kCtrl: 0.12,
   /** M_SETUP: logit per strike landed in the last 5 s, at most 3 counted. */
@@ -125,7 +127,7 @@ export const MODIFIER_PARAMS = {
    * the grappling-sourced stage rates price in. Without it half of all
    * locked-in attempts finished against a real quarter.
    */
-  mmaDefenceBonus: 0.8,
+  mmaDefenceBonus: 1.0,
   glovesEzekielBonus: 0.2,
   /** M_CLASS: flyweight/bantamweight triangle and armbar entries. */
   classLightTriArmbar: 0.1,

@@ -72,6 +72,15 @@ import {
   COUNTER_ON_READ_MULT, type Cues,
 } from './perceive';
 import { patternReadP } from '../striking/defence';
+import { strikingCraft } from '../striking/tactics';
+import { FOOTWORK, preferredDistance } from './footwork';
+import {
+  NO_URGENCY, URGENCY_EFFECT, currentRoundLead, newScoreBelief, scoreRound as scoreRoundBelief, urgency,
+  visibleMargin, type ScoreBelief, type Urgency,
+} from './scorecard';
+import type { RoundLedger } from '../rules/judges';
+import { resolveSubmissionFamily } from '../submissions/catalogue';
+import { MODE_DEFAULTS } from './plan';
 import { STRIKE_FAMILIES, type OppFamily } from './families';
 import {
   adaptWeight, applyAdjustment, beliefToConfidence, buildAdjustment, candidateAdjustments,
@@ -198,8 +207,10 @@ export const SUB_HAZARD_PER_MIN: Readonly<Record<string, number>> = Object.freez
   'closedGuard:bottom': 0.45,
   'openGuard:bottom': 0.25,
   'half:bottom': 0.08,
-  'legEntanglement:top': 0.5,
-  'legEntanglement:bottom': 0.5,
+  // Realism pass: 0.5 -> 0.2. Leg locks are 3 % of MMA submission finishes
+  // (FIGHT_DATA §3 #75); an entanglement gives up top position under strikes.
+  'legEntanglement:top': 0.2,
+  'legEntanglement:bottom': 0.2,
   clinch: 0.12,
   attack: 0.25,
   standingFree: 0.05,
@@ -217,13 +228,20 @@ export const CLINCH_ENTRY_PER_MIN = 3.0;
  * P(a free fighter follows a knocked-down opponent to the floor) per decision
  * while the chance lasts [E: tuned Phase 9 to FIGHT_DATA §5 KD conversion].
  */
-export const KNOCKDOWN_FOLLOW_P = 0.35;
+export const KNOCKDOWN_FOLLOW_P = 0.6;
 
 /** How long a measured finisher who stopped waits before trying again [E: Phase 9]. */
 export const FINISH_RETRY_MS = 10_000;
 
 /** Positional-edge attempts per minute in contact, by role [E: tuned Phase 9]. */
 export const GRAPPLE_TEMPO_PER_MIN = Object.freeze({ clinch: 5, top: 5, bottom: 12 });
+
+/**
+ * Realism pass [E: retuned to FIGHT_DATA §3 #69]: the MMA floor on escapes and
+ * guard (bind `grapplingAliases`) and the grappling skill terms cut attempts
+ * to ~0.28 per 15 min; this restores the population rate.
+ */
+export const SUB_HAZARD_SCALE = 1.6;
 
 /** A submission-hunting plan's multiplier on the attempt hazard [E]. */
 export const SUB_HUNT_MULT = 1.5;
@@ -244,7 +262,7 @@ export function tierPaceMult(tier: number): number {
 
 /** Takedown governor [E: tuned Phase 9]: gain on the plan's per-round target. */
 export const TD_GOVERNOR = Object.freeze({
-  gain: 2.6, boost: 3.0, n: 2.0, priorS: 60, floorPerRound: 0.15,
+  gain: 1.9, boost: 3.0, n: 2.0, priorS: 60, floorPerRound: 0.15,
 });
 
 /**
@@ -259,14 +277,184 @@ export const TD_FAMILIES: ReadonlySet<string> = new Set([
   'shoot', 'nakedShot', 'shootOffStrikes', 'bodylockTd', 'trip',
 ]);
 
+/**
+ * Realism pass [E]: weight on repeating the combination thrown last time.
+ * Repeating a pattern is what the opponent model reads (§2.4.3 pattern read),
+ * so fighters vary them; 0.35 keeps a favourite recognisable without making
+ * every jab the start of the same one-two.
+ */
+export const COMBO_REPEAT_DAMP = 0.35;
+
+/**
+ * Realism pass: in-fight adaptation that follows success. The §2.6.1 rows fire
+ * at evaluation cadence on hard thresholds (a family below 25 % over six
+ * attempts); between them a fighter kept the same mix whatever landed, and in
+ * the audit the families that landed best in R1 were used *less* in R2. Here
+ * each strike family's landing rate is tracked with a 90 s half-life, shrunk
+ * toward what that family normally lands (a leg kick landing 80 % is not a
+ * discovery), and its weight moves by (rate / expected)^gain, bounded. The
+ * gain is fight IQ x adaptability: a T1 fighter keeps throwing what he came
+ * with; an elite one drifts toward what works (LIT_B §4: experts anticipate
+ * and adjust; 07 §2.6 "he adjusted").
+ */
+export const WORKS_EXPECTED: Readonly<Partial<Record<ActionFamily, number>>> = Object.freeze({
+  jab: 0.30, cross: 0.32, hook: 0.30, leadHook: 0.30, uppercut: 0.30, overhand: 0.28,
+  bodyHook: 0.60, spinning: 0.20, teep: 0.60, lowKick: 0.78, leadLowKick: 0.78, bodyKick: 0.62,
+  headKick: 0.25, rearKick: 0.60, knee: 0.60, elbow: 0.50,
+});
+export const WORKS = Object.freeze({ halfLifeS: 90, prior: 4, exp: 0.9, min: 0.6, max: 1.7 });
+
+function decayWorks(r: { a: number; l: number; t: number }, nowS: number): void {
+  const dt = nowS - r.t;
+  if (dt > 0) {
+    const k = Math.pow(0.5, dt / WORKS.halfLifeS);
+    r.a *= k;
+    r.l *= k;
+    r.t = nowS;
+  }
+}
+
+function noteWorks(st: AiState, family: string, what: 'a' | 'l', nowS: number): void {
+  const r = (st.works[family] ??= { a: 0, l: 0, t: nowS });
+  decayWorks(r, nowS);
+  r[what] += 1;
+}
+
+export function worksWeight(st: AiState, family: string, nowS: number): number {
+  const e = WORKS_EXPECTED[family as ActionFamily];
+  const r = st.works[family];
+  if (e === undefined || !r) return 1;
+  decayWorks(r, nowS);
+  const rate = (r.l + WORKS.prior * e) / (r.a + WORKS.prior);
+  const w = Math.pow(rate / e, WORKS.exp * st.worksGain);
+  return w < WORKS.min ? WORKS.min : w > WORKS.max ? WORKS.max : w;
+}
+
+const LONG_MAX_CACHE = new WeakMap<object, number>();
+
+/**
+ * +1 a pure counter-fighter .. -1 a pure lead fighter, from the plan's
+ * initiative and the authored `style.initiative` (either may say it). [E]
+ */
+export function counterLean(planInitiative: string, authored: string | undefined): number {
+  let v = planInitiative === 'counter' ? 0.6 : planInitiative === 'lead' ? -0.4 : 0;
+  if (authored === 'counter') v += 0.4;
+  else if (authored === 'pressure') v -= 0.4;
+  else if (authored === 'point') v -= 0.15;
+  return Math.max(-1, Math.min(1, v));
+}
+
+/**
+ * Realism pass: 01 `style.initiative` (pressure / counter / point / balanced),
+ * which only the scouting report read. It is the fighter's habit of who
+ * starts the exchange (LIT_B §5.10: elite initiations ~1/3 lead, 1/3 counter,
+ * 1/3 defensive). [E] magnitudes.
+ */
+export const INITIATIVE_WEIGHTS: Readonly<Record<string, Partial<Record<ActionFamily, number>>>> = Object.freeze({
+  pressure: { advance: 1.3, inOut: 1.1, retreat: 0.75, circleAway: 0.85, counterWindow: 0.85, jab: 1.1, cross: 1.1, clinchEntry: 1.15 },
+  counter: { counterWindow: 1.4, parryCross: 1.3, baitCross: 1.3, advance: 0.8, wait: 1.25, circle: 1.15, leadStrike: 0.8 },
+  point: { jab: 1.25, teep: 1.25, inOut: 1.3, leadLowKick: 1.15, hook: 0.85, overhand: 0.8, retreat: 1.15 },
+  balanced: {},
+});
+
+export function initiativeWeight(initiative: string | undefined, family: ActionFamily): number {
+  if (!initiative) return 1;
+  return INITIATIVE_WEIGHTS[initiative]?.[family] ?? 1;
+}
+
+/**
+ * Realism pass: what the fighter does about the cards is his own. 01 §2.6
+ * `losingBehaviour` ("risk when behind") and `whenLosing` shape the urgency:
+ * a finish-seeker goes for the stoppage early, a round-stealer presses on
+ * volume, a sheller covers up, a gambler throws everything. `heart` is the
+ * will to push when it gets hard: it scales pressing late. [E]
+ */
+export function shapeUrgency(u: Urgency, losing: string | undefined, whenLosing: string | undefined, heart: number): Urgency {
+  let press = u.press;
+  let desp = u.desperation;
+  let protect = u.protect;
+  switch (losing) {
+    case 'finishSeek': desp = Math.min(1, Math.max(desp * 1.6, press * 0.6)); break;
+    case 'stealRound': press = Math.min(1, press * 1.3); desp *= 0.5; break;
+    case 'shell': protect = Math.min(1, protect + 0.3 * press); press *= 0.3; desp *= 0.3; break;
+    case 'gamble': press = Math.min(1, press * 1.2); desp = Math.min(1, Math.max(desp * 1.8, press * 0.5)); break;
+    default: break;
+  }
+  switch (whenLosing) {
+    case 'stall': press *= 0.4; desp *= 0.5; break;
+    case 'gamble': desp = Math.min(1, Math.max(desp * 1.5, press * 0.4)); break;
+    default: break;
+  }
+  const h = 0.7 + 0.6 * Math.max(0, Math.min(100, heart)) / 100;
+  return { press: Math.min(1, press * h), desperation: Math.min(1, desp * h), protect };
+}
+
+/** Heart fights the fatigue brake: x1.3 slope at 0 .. x0.7 at 100 [E]. */
+export function heartFatigueMult(heart: number): number {
+  return 1.3 - 0.6 * Math.max(0, Math.min(100, heart)) / 100;
+}
+
+/**
+ * Realism pass: which submission an MMA fighter goes for, by family
+ * (FIGHT_DATA §3 #74-#75: chokes 79 %, arm locks 15 %, leg locks 3 % of
+ * finishes; the sim ran 61 / 21 / 10). Chokes work through gloves and sweat
+ * and do not give up position; a leg lock under ground-and-pound does. [E]
+ */
+export const SUB_FAMILY_WEIGHT: Readonly<Record<string, number>> = Object.freeze({
+  choke: 1.45, jointLock: 0.8, legLock: 0.3, crank: 0.8, compression: 0.8,
+});
+
+const SUB_WEIGHT_CACHE = new Map<string, number>();
+
+export function subFamilyWeight(id: string): number {
+  const hit = SUB_WEIGHT_CACHE.get(id);
+  if (hit !== undefined) return hit;
+  const spec = resolveSubmissionFamily(id)[0];
+  const w = spec ? SUB_FAMILY_WEIGHT[spec.family] ?? 1 : 1;
+  SUB_WEIGHT_CACHE.set(id, w);
+  return w;
+}
+
+/**
+ * Realism pass: fatigue lowers the intended output. The governors held the
+ * plan's pace whatever the tank said, so sig attempts *rose* round by round
+ * (+21 % R3 vs R1, FIGHT_DATA §2.5 kickboxing -8 %, boxing late rounds
+ * -15-25 %) while `f` climbed past 0.8. Flat below `f0`, linear above;
+ * shots (the most expensive action, DAMAGE_PHYSIOLOGY §4.3) fall faster. [E]
+ */
+export const FATIGUE_PACE = Object.freeze({ f0: 0.3, slope: 0.4, shotSlope: 0.7 });
+
+export function fatiguePaceMult(f: number, slope: number = FATIGUE_PACE.slope): number {
+  return Math.max(0.35, 1 - slope * Math.max(0, f - FATIGUE_PACE.f0));
+}
+
+/**
+ * Realism pass: takedown propensity by weight class. Lighter fighters shoot
+ * more and heavier fighters less (FIGHT_DATA §3 #60: FLW 4.8 .. HW 3.1
+ * attempts per 15 min; WRESTLING §9 r20 `grap.tdPropensity*`, a registry
+ * table nothing read). The sim ran it the wrong way (FLW 3.5, HW 4.5), so the
+ * multiplier carries both the propensity and the correction. [D]
+ */
+export const TD_CLASS_MULT: Readonly<Record<string, number>> = Object.freeze({
+  'wc.strawweight': 1.30, 'wc.flyweight': 1.30, 'wc.bantamweight': 1.12, 'wc.featherweight': 1.12,
+  'wc.lightweight': 1.10, 'wc.welterweight': 1.02, 'wc.middleweight': 0.95,
+  'wc.light_heavyweight': 0.85, 'wc.heavyweight': 0.66, 'wc.super_heavyweight': 0.6,
+});
+
+export function tdClassMult(wc: string, sex: string): number {
+  // Women's flyweight/bantam shoot about as often as the men at the same limit.
+  void sex;
+  return TD_CLASS_MULT[wc] ?? 1;
+}
+
 /** Exchange clustering of the strike hazard [E: tuned Phase 9]. */
 export const EXCHANGE = Object.freeze({ windowS: 1.5, inMult: 5.0, outMult: 0.3 });
 
 export const PACE_GOVERNOR = Object.freeze({
-  gain: 1.4,
+  gain: 0.95,
   n: 2.0,
   boost: 3.0,
-  finishMult: 5.0,
+  finishMult: 7.0,
   clinchMult: 0.75,
   groundTopMult: 1.1,
   groundBottomMult: 0.4,
@@ -348,6 +536,23 @@ export interface AiState {
    * yes and the axis never fired.
    */
   lastSetupTick: number;
+  /** Realism pass: the last combination begun, damped on the next choice. */
+  lastMacroId: string | null;
+  /** Realism pass: the fighter's own reading of the cards (`ai/scorecard.ts`). */
+  score: ScoreBelief;
+  /** Realism pass: this tick's scorecard urgency. */
+  urgency: Urgency;
+  /** Realism pass: decayed attempts/landings per strike family (`worksWeight`). */
+  works: Record<string, { a: number; l: number; t: number }>;
+  /** Realism pass: how strongly this fighter follows what works (IQ x adaptability). */
+  worksGain: number;
+  /** Realism pass: plan B in force (`switchToPlanB`): its weight shift and phase policies. */
+  planB: { mode: ModeId; weights: Partial<Record<ActionFamily, number>>; clinch?: string; top?: string; bottom?: string } | null;
+  /** The plan as plan B reads it (its phase policies), built once at the switch. */
+  planBView: PlanView | null;
+  /** Perf caches. */
+  rangeCache: { oppId: number; intent: string; dStar: number; deadband: number } | null;
+  urgencyTick: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +560,11 @@ export interface AiState {
 // ---------------------------------------------------------------------------
 
 export class MmaPolicy implements DecisionPolicy {
+  /** Development probe (scripts/dev): sees every scored decision. Never set in a bout. */
+  static debugHook: ((info: {
+    fighter: number; tick: number; candidates: readonly Candidate[]; scores: readonly number[]; tau: number;
+    weights: WeightBundle[];
+  }) => void) | null = null;
   private readonly states = new Map<number, AiState>();
 
   /**
@@ -491,6 +701,15 @@ export class MmaPolicy implements DecisionPolicy {
       lastOppFamily: null,
       oppFamilyRepeats: 0,
       lastSetupTick: -Infinity,
+      lastMacroId: null,
+      score: newScoreBelief(),
+      urgency: NO_URGENCY,
+      works: {},
+      planB: null,
+      planBView: null,
+      rangeCache: null,
+      urgencyTick: -1_000_000,
+      worksGain: Math.min(1.25, rt.iqTier / 4) * (0.5 + Math.max(0, Math.min(100, rt.def.mental.adaptability)) / 100),
     };
   }
 
@@ -542,6 +761,7 @@ export class MmaPolicy implements DecisionPolicy {
 
   private think(ctx: DecisionContext, u: Draws): Decision {
     const { world, self } = ctx;
+    this.nowMs = world.nowMs;
     const st = this.stateOf(self, world);
     const rt = self.runtime;
     const nowS = world.nowMs / 1000;
@@ -593,7 +813,7 @@ export class MmaPolicy implements DecisionPolicy {
     }
 
     // --- action layer (draws 5-8) -----------------------------------------
-    const macroStep = this.continueMacro(st, self, cues, distanceM, world.tick);
+    const macroStep = this.continueMacro(st, self, cues, distanceM, world.tick, u.uFeint);
     if (macroStep) return macroStep;
 
     const enumeration = this.buildEnumeration(st, self, world, opp, distanceM);
@@ -640,10 +860,19 @@ export class MmaPolicy implements DecisionPolicy {
     for (const id of st.tierWeights.fired) st.firedRules.push(id);
     self.tells.rules = st.firedRules;
 
+    // Perf: the cards move slowly; re-read them twice a second.
+    if (world.tick - st.urgencyTick >= 5 || st.urgencyTick > world.tick) {
+      st.urgency = this.scoreUrgency(st, self, world, opp.id);
+      st.urgencyTick = world.tick;
+    }
     const inputs = this.considerations(st, self, world, opp, distanceM, cues);
     const phaseTier = phaseTierFor(rt, self.posture, distanceM);
+    // Realism pass: `mmaIntegration.gameplanExecution` — how closely he fights
+    // the fight he meant to — narrows or widens the choice (x1.12 at 20 .. x0.84
+    // at 90) [E]. It was a sub-skill nothing read.
+    const gpe = rt.disciplines.mmaIntegration?.effective.gameplanExecution ?? 50;
     const tau = effectiveTau(
-      tauForTier(decisionTier(phaseTier, st.intent.effectiveIqTier)),
+      tauForTier(decisionTier(phaseTier, st.intent.effectiveIqTier)) * (1.2 - 0.4 * clamp01(gpe / 100)),
       {
         fatigue: fatigueOf(self),
         rocked: isRocked(self),
@@ -655,11 +884,18 @@ export class MmaPolicy implements DecisionPolicy {
 
     const scores = new Array<number>(candidates.length);
     const scorer = new ConsiderationScorer(inputs);
+    this.topNow = isTopRole(world, self);
+    this.worksCache = new Map();
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i];
       scores[i] = scorer.score(c, this.weightsFor(st, self, opp, c));
     }
 
+    if (MmaPolicy.debugHook) {
+      MmaPolicy.debugHook({ fighter: self.id, tick: world.tick, candidates, scores, tau,
+        weights: candidates.map((c) => ({ ...this.weightsFor(st, self, opp, c) })) });
+    }
+    const sel = { residual: 0.5 };
     const pick = softmaxSelect(
       scores, tau, u.uSelect, familyShares(candidates.map((c) => c.family)),
       [
@@ -681,12 +917,30 @@ export class MmaPolicy implements DecisionPolicy {
             * planWeight(st.plan, 'clinchEntry'),
         },
       ],
+      sel,
     );
-    const chosen = candidates[pick < 0 ? 0 : pick];
+    let chosen = candidates[pick < 0 ? 0 : pick];
+    // Realism pass: footwork momentum. A step in straight after a step out
+    // (or the reverse) inside ~0.35 s, while he is already near the distance
+    // he wants, is the in/out wobble the audit counted at ~40 reversals a
+    // minute; a fighter at his range turns the reversal into a lateral step.
+    if (chosen.kind === 'move') {
+      const radial = chosen.family === 'advance' || chosen.family === 'inOut' ? 1
+        : chosen.family === 'retreat' ? -1 : 0;
+      const last = self.step.radial > 0.5 ? 1 : self.step.radial < -0.5 ? -1 : 0;
+      if (radial !== 0 && last !== 0 && radial !== last && world.nowMs - self.step.untilMs < FOOTWORK.momentumMs
+        && Math.abs(distanceM - inputs.intentRangeM) < 3 * (inputs.rangeDeadbandM ?? 0)) {
+        const lateral = candidates.find((c) => c.kind === 'move' && (c.family === 'circle' || c.family === 'lateral'));
+        if (lateral) chosen = lateral;
+      }
+    }
 
     // A macro may start here: the utility layer chose its head action, and the
     // rest of the sequence now runs unless something interrupts it (§2.2.5).
-    this.maybeBeginMacro(st, self, chosen, distanceM, world.tick);
+    // Realism pass: which combination follows the head strike is a weighted
+    // choice (u_feint, now free: feint bites are resolved at commit), not
+    // always the first matching chain in catalogue order.
+    this.maybeBeginMacro(st, self, chosen, distanceM, world.tick, u.uFeint);
 
     if (chosen.isMustNot) {
       st.mustNotViolations.push({ mustNot: chosen.family, tick: world.tick });
@@ -700,8 +954,11 @@ export class MmaPolicy implements DecisionPolicy {
     st.consecutiveFeints = chosen.family === 'feint' ? st.consecutiveFeints + 1 : 0;
     if (isSetupAction(chosen)) st.lastSetupTick = world.tick;
     st.ledger.note('attempt', chosen.family);
+    if (chosen.kind === 'strike' && WORKS_EXPECTED[chosen.family] !== undefined) {
+      noteWorks(st, chosen.family, 'a', world.nowMs / 1000);
+    }
 
-    return this.commit(st, self, chosen, u);
+    return this.commit(st, self, chosen, u, chosen.family === 'feint' ? sel.residual : undefined);
   }
 
   // -------------------------------------------------------------------------
@@ -819,6 +1076,11 @@ export class MmaPolicy implements DecisionPolicy {
     const rt = self.runtime;
     const nowMs = world.nowMs;
     st.pendingDefence = null;
+    // Realism pass (§2.3.4): a fighter who bit a feint is executing the
+    // reaction it sold; he reads nothing else until it is over.
+    if (self.tactic.bitBy >= 0 && nowMs <= self.tactic.bitUntilMs) return;
+    // §2.5.1: while his own strike is recovering his reads are worse.
+    const exposure = nowMs <= self.tactic.exposedUntilMs ? self.tactic.exposedReadLogit : 0;
     const incoming = opp.action !== 'idle' && opp.action !== 'move' && hasTechnique(opp.action);
     st.reads.attempts += incoming ? 1 : 0;
     const spec = incoming ? technique(opp.action) : null;
@@ -832,9 +1094,9 @@ export class MmaPolicy implements DecisionPolicy {
       anxietyPenalty: rt.anticipation.striking?.anxietyReadPenalty ?? 0,
       visionBlocked: nowMs < self.tells.eyesShutUntilMs,
       stanceFamiliarity: familiarityOf(rt, opp.stance),
-      patternMods: st.model.active && spec
+      patternMods: (st.model.active && spec
         ? 2 * (st.model.p(st.lastContext, oppFamilyForSpec(spec.family)) - 1 / 12)
-        : 0,
+        : 0) + exposure,
       suppressed: !incoming,
     });
 
@@ -946,24 +1208,20 @@ export class MmaPolicy implements DecisionPolicy {
     opp: ObservedFighter,
     u: Draws,
   ): void {
-    const feinting = typeof opp.action === 'string' && opp.action.startsWith('feint.');
-    if (!feinting) return;
-    const rt = self.runtime;
-    const p = feintBiteProbabilityFor({
-      baseBiteP: baseFeintBiteP(rt),
-      feintQuality: 0.5,
-      attackerFeintSkill: 50,
-      repeatsInWindow: 0,
-      defenderHurt: isRocked(self),
-      defenderFatigue: fatigueOf(self),
-      defenderVisionBlocked: false,
-    });
-    if (u.uFeint < p) {
-      st.reads.feintBites += 1;
-      // On a bite the next read is skipped; the draw is still taken next tick.
+    // Realism pass: the bite is resolved once per feint, at the feinter's
+    // commit (`bind.commitFeint`); a feint used to be a no-op the defender
+    // could never even see. Here the defender only lives with the
+    // consequence: while he is reacting to a feint he has no counter ready.
+    // `u.uFeint` is no longer read here (the macro choice uses it).
+    void opp; void u;
+    if (self.tactic.bitBy >= 0 && this.nowMs <= self.tactic.bitUntilMs) {
+      if (st.counterWindowUntilMs !== -Infinity) st.reads.feintBites += 1;
       st.counterWindowUntilMs = -Infinity;
     }
   }
+
+  /** The world clock at the current `think` (read by the feint consequence). */
+  private nowMs = 0;
 
   // -------------------------------------------------------------------------
   // §2.6 tactical layer
@@ -999,6 +1257,13 @@ export class MmaPolicy implements DecisionPolicy {
     // evaluation actually goes ahead rather than on every tick.
     const signals = this.signals(st, self, world, cues);
     const rows = candidateAdjustments(signals, st.intent.effectiveIqTier, st.plan);
+    // Realism pass: plan B. When the primary plan is visibly failing — its
+    // shots are stuffed, its strikes stopped landing, he keeps getting taken
+    // down — a fighter with a plan B goes to it (07 §2.5.2 `fallbackMode`,
+    // which the plan carried and nothing ever switched to).
+    if (rows.some((r) => r.id === 'adj.td_stuffed_x2' || r.id === 'adj.drop_family' || r.id === 'adj.taken_down_x2')) {
+      this.switchToPlanB(st, world, 'the plan is not working');
+    }
     if (rows.length === 0) return;
     const dwellS = minDwellS(st.intent.effectiveIqTier);
     const dwellTicks = Number.isFinite(dwellS) ? Math.round(dwellS * 10) : Infinity;
@@ -1009,6 +1274,38 @@ export class MmaPolicy implements DecisionPolicy {
     if (st.adjustments.length !== before || st.adjustments.includes(built)) {
       this.applyPolicyPatch(st, built, world);
     }
+  }
+
+  /** Realism pass: go to the plan's fallback mode (once a bout). */
+  private switchToPlanB(st: AiState, world: World, why: string): void {
+    const fb = st.plan?.fallbackMode;
+    if (!fb || st.planB || fb === st.plan?.primaryMode || fb === 'mode.outnumbered') return;
+    const from = st.plan?.primaryMode;
+    const next = MODE_DEFAULTS[fb as Exclude<ModeId, 'mode.outnumbered'>];
+    const prev = from && from !== 'mode.outnumbered' ? MODE_DEFAULTS[from as Exclude<ModeId, 'mode.outnumbered'>] : null;
+    if (!next) return;
+    const weights: Partial<Record<ActionFamily, number>> = {};
+    for (const [k, v] of Object.entries(next.weights)) weights[k as ActionFamily] = v;
+    if (prev) {
+      for (const [k, v] of Object.entries(prev.weights)) {
+        weights[k as ActionFamily] = (weights[k as ActionFamily] ?? 1) / v;
+      }
+    }
+    st.planB = { mode: fb, weights, clinch: next.clinchPolicy, top: next.groundTopPolicy, bottom: next.groundBottomPolicy };
+    st.planBView = {
+      ...(st.plan ?? {}), clinchPolicy: next.clinchPolicy, groundTopPolicy: next.groundTopPolicy,
+      groundBottomPolicy: next.groundBottomPolicy,
+    };
+    st.rangeCache = null;
+    st.intent.mode = fb;
+    st.intent.rangeTarget = next.rangeTarget;
+    st.intent.since = world.tick;
+    world.emit({
+      tick: world.tick, subMs: 0, round: world.round, kind: 'intentChange',
+      actor: st.fighterId, target: st.targetId ?? -1,
+      text: `goes to plan B: ${fb}`,
+      detail: { from: from ?? '', to: fb, adjustment: why },
+    });
   }
 
   private applyPolicyPatch(st: AiState, adj: Adjustment, world: World): void {
@@ -1232,9 +1529,16 @@ export class MmaPolicy implements DecisionPolicy {
       behind: st.intent.perceivedScore.roundsUp < 0,
       setupRecent: setupActive(st, world) ? 1 : 0,
       expectedThreat: st.model.active ? st.model.expectedThreat(st.lastContext) : 0.3,
-      oppInRecovery: cues.oppInRecovery ? 1 : 0,
+      // Realism pass: a man walking into range is as counterable as one
+      // recovering from a strike — that is the whole art of the counter-
+      // puncher and of the longer fighter's jab (02 §2.5.1; LIT_B §5.10).
+      oppInRecovery: cues.oppInRecovery || this.oppEntering(self, opp, distanceM) ? 1 : 0,
       balance: clamp01(self.balance),
-      riskAppetite: st.intent.riskAppetite,
+      // Realism pass: the cards move the appetite for risk continuously.
+      riskAppetite: clamp(st.intent.riskAppetite
+        + URGENCY_EFFECT.riskPress * st.urgency.press
+        + URGENCY_EFFECT.riskDesperation * st.urgency.desperation
+        - URGENCY_EFFECT.riskProtect * st.urgency.protect, -2, 2),
       // §2.5.5 P-6 is explicit that `c.pace` counts *landed*, not thrown:
       // "pure pressure without landed strikes does not win rounds". The target
       // is `tendencies.paceSLpM`, which is a landed rate, so a thrown rate on
@@ -1247,10 +1551,76 @@ export class MmaPolicy implements DecisionPolicy {
         / (paceTarget / PACE_NOMINAL_ACCURACY),
       dwellExceeded: dwellExceeded(st, self, world),
       lookahead: 0,
-      intentRangeM: rangeTargetMetres(st.intent.rangeTarget, self.runtime),
+      ...this.rangeTargetFor(st, self, world, opp),
       distanceM,
       effectiveIqTier: st.intent.effectiveIqTier,
     };
+  }
+
+  /**
+   * Realism pass: the scorecard urgency of this moment (`ai/scorecard.ts`).
+   * The current round's lead is read from the same visible quantities the
+   * judges weigh, running; the rounds-up belief was set at the last break.
+   */
+  private scoreUrgency(st: AiState, self: FighterWorldState, world: World, oppId: number): Urgency {
+    const rounds = world.ruleset.rounds.count;
+    if (rounds <= 1 || world.ruleset.scoring.judges <= 0) return NO_URGENCY;
+    const jr = world.judges as { ledgers?: RoundLedger[] } | null;
+    const mine = jr?.ledgers?.[self.id];
+    const theirs = jr?.ledgers?.[oppId];
+    const roundS = world.ruleset.rounds.lengthS || 300;
+    const elapsedS = (world.roundTick * world.params.get('core.dtMs')) / 1000;
+    const lead = mine && theirs ? currentRoundLead(visibleMargin(mine, theirs, roundS)) : 0;
+    const u = urgency({
+      roundsUp: st.score.roundsUp,
+      lead,
+      round: world.round,
+      rounds,
+      elapsedFrac: elapsedS / roundS,
+      iqTier: st.intent.effectiveIqTier,
+      holdWhenLosing: self.runtime.def.style.losingBehaviour === 'unchanged'
+        || self.runtime.def.style.whenLosing === 'hold',
+    });
+    return shapeUrgency(u, self.runtime.def.style.losingBehaviour, self.runtime.def.style.whenLosing,
+      self.runtime.def.mental.heart);
+  }
+
+  /** Is the (perceived) opponent stepping into this fighter's range? */
+  private oppEntering(self: FighterWorldState, opp: ObservedFighter, distanceM: number): boolean {
+    if (self.posture !== 'standing' || opp.posture !== 'standing' || distanceM <= 0) return false;
+    const vr = (opp.vx * (self.x - opp.x) + opp.vz * (self.z - opp.z)) / distanceM;
+    if (vr <= FOOTWORK.enteringSpeedMs) return false;
+    let longMax = LONG_MAX_CACHE.get(self.runtime);
+    if (longMax === undefined) {
+      longMax = bandLimits(reachProfile(self.runtime.effectiveReachM, self.runtime.effectiveKickReachM)).longMax;
+      LONG_MAX_CACHE.set(self.runtime, longMax);
+    }
+    return distanceM <= longMax + 0.25;
+  }
+
+  /**
+   * Realism pass: where this fighter wants to stand *against this opponent*
+   * (`footwork.preferredDistance`), with the hold band that stops in/out
+   * wobble. A fighter who is hurt keeps the pre-pass behaviour of his hurt
+   * profile (the adjustment weights decide), which is why only the intent's
+   * range label is read here.
+   */
+  private rangeTargetFor(
+    st: AiState, self: FighterWorldState, world: World, opp: ObservedFighter,
+  ): { intentRangeM: number; rangeDeadbandM: number } {
+    const oppRt = world.fighters[opp.id]?.runtime;
+    if (!oppRt) {
+      return { intentRangeM: rangeTargetMetres(st.intent.rangeTarget, self.runtime), rangeDeadbandM: 0 };
+    }
+    // Perf: the runtimes are fixed for the bout, so the answer only changes
+    // with the opponent or the intent's range label.
+    const c = st.rangeCache;
+    if (c && c.oppId === opp.id && c.intent === st.intent.rangeTarget) {
+      return { intentRangeM: c.dStar, rangeDeadbandM: c.deadband };
+    }
+    const pd = preferredDistance(self.runtime, oppRt, st.intent.rangeTarget);
+    st.rangeCache = { oppId: opp.id, intent: st.intent.rangeTarget, dStar: pd.dStar, deadband: pd.deadband };
+    return { intentRangeM: pd.dStar, rangeDeadbandM: pd.deadband };
   }
 
   /**
@@ -1277,7 +1647,11 @@ export class MmaPolicy implements DecisionPolicy {
     const posMult = self.posture === 'ground'
       ? (onTop ? PACE_GOVERNOR.groundTopMult : PACE_GOVERNOR.groundBottomMult)
       : self.posture === 'clinch' ? PACE_GOVERNOR.clinchMult : 1;
-    const target = (landedTarget / PACE_NOMINAL_ACCURACY) * posMult * tierPaceMult(self.runtime.strikingTier);
+    const u = st.urgency;
+    const scoreMult = 1 + URGENCY_EFFECT.pacePress * u.press + URGENCY_EFFECT.paceDesperation * u.desperation
+      - URGENCY_EFFECT.paceProtect * u.protect;
+    const target = (landedTarget / PACE_NOMINAL_ACCURACY) * posMult * tierPaceMult(self.runtime.strikingTier)
+      * scoreMult * fatiguePaceMult(fatigueOf(self), FATIGUE_PACE.slope * heartFatigueMult(self.runtime.def.mental.heart));
     const est = st.ledger.paceEstimate(target, (world.roundTick * world.params.get('core.dtMs')) / 1000);
     const ratio = est / target;
     const gain = ratio <= 1 ? 1 + PACE_GOVERNOR.boost * (1 - ratio) : Math.pow(1 / ratio, PACE_GOVERNOR.n);
@@ -1298,6 +1672,18 @@ export class MmaPolicy implements DecisionPolicy {
         || (world.tick - st.lastStrikeTick) * dtS < EXCHANGE.windowS
         || (world.tick - self.lastStruckTick) * dtS < EXCHANGE.windowS;
       burst = inExchange ? EXCHANGE.inMult : EXCHANGE.outMult;
+      // Realism pass: who starts the exchange is a style (LIT_B §5.10). A
+      // counter-fighter holds his fire until there is something to counter —
+      // the other man's strike in the air, his recovery, his step in — and
+      // then lets go; a lead fighter starts more of them himself. Same
+      // minute's total (the feedback term), different timing.
+      const style = counterLean(st.intent.initiative, self.runtime.def.style.initiative);
+      if (style !== 0) {
+        const opening = oppStriking || (opp.action !== 'idle' && opp.action !== 'move' && opp.actionPhase > 0.6)
+          || this.oppEntering(self, opp, Math.hypot(self.x - opp.x, self.z - opp.z));
+        burst *= style > 0 ? (opening ? 1 + 2.0 * style : 1 - 0.5 * style)
+          : (opening ? 1 : 1 - 0.8 * style);
+      }
     }
     // A man who smells blood does not pace himself: in the §2.6 finish
     // emergency the plan's pace no longer holds him back.
@@ -1343,8 +1729,10 @@ export class MmaPolicy implements DecisionPolicy {
     const defSkill = Math.max(3, partner?.runtime.grappling.subDefence ?? SUB_SKILL_REF.defence);
     const opportunity = Math.max(0.5, Math.min(3,
       Math.pow(SUB_SKILL_REF.defence / defSkill, SUB_OPPORTUNITY_EXP)));
+    const scoreMult = Math.max(0.2, 1 + URGENCY_EFFECT.subDesperation * st.urgency.desperation
+      + URGENCY_EFFECT.subProtect * st.urgency.protect);
     const perTick = (perMin / 60) * (world.params.get('core.dtMs') / 1000)
-      * (0.3 + 0.7 * skill) * opportunity * hunt;
+      * (0.3 + 0.7 * skill) * opportunity * hunt * scoreMult * SUB_HAZARD_SCALE;
     return { mask, cap: Math.min(1, perTick) };
   }
 
@@ -1362,7 +1750,14 @@ export class MmaPolicy implements DecisionPolicy {
       && isTakedownAttempt(c.id, self.position));
     if (!mask.some(Boolean)) return { mask, cap: 1 };
     const pacing = pacingFor(st.plan, world.round);
-    const perRound = Math.max(TD_GOVERNOR.floorPerRound, pacing?.tdAttemptTarget ?? TD_GOVERNOR.floorPerRound);
+    const grappler = self.runtime.grapplingTier >= self.runtime.strikingTier;
+    const u = st.urgency;
+    const scoreMult = Math.max(0.2, 1
+      + (grappler ? URGENCY_EFFECT.tdPressGrappler : URGENCY_EFFECT.tdPressStriker) * Math.max(u.press, u.desperation)
+      + (grappler ? URGENCY_EFFECT.tdProtectGrappler : URGENCY_EFFECT.tdProtectStriker) * u.protect);
+    const perRound = Math.max(TD_GOVERNOR.floorPerRound, pacing?.tdAttemptTarget ?? TD_GOVERNOR.floorPerRound)
+      * scoreMult * fatiguePaceMult(fatigueOf(self), FATIGUE_PACE.shotSlope)
+      * tdClassMult(self.runtime.body.weightClass, self.runtime.body.sex);
     const roundS = Math.max(60, world.ruleset.rounds.lengthS || 300);
     const dtS = world.params.get('core.dtMs') / 1000;
     const perTick = (perRound / roundS) * dtS;
@@ -1435,13 +1830,32 @@ export class MmaPolicy implements DecisionPolicy {
       adapt *= finisherWeights(st.finisher, opp.posture === 'down')[c.family] ?? 1;
     }
     // §2.4.4 consequence 2: a successful read forces counters up for this tick.
-    if (st.counterWindowUntilMs > 0 && isCounterFamily(c.family)) {
+    // Realism pass (bug): this compared the window's end with 0, so after the
+    // first read-counter of a bout the x2.5 counter boost never switched off —
+    // the sprawl posture and the cross were permanently favoured and the
+    // "standing in a sprawl" posture took ~60 % of all non-strike decisions.
+    if (st.counterWindowUntilMs >= this.nowMs && isCounterFamily(c.family)) {
       adapt *= COUNTER_ON_READ_MULT;
     }
     // 01 §3: the catalogue's own `w(x) xN` clauses. They ride on `w_adapt` so
     // they sit under the same `ai.utility.clamp` as every other multiplier
     // rather than being a parallel, unbounded channel.
     adapt *= st.tierWeights?.weights.get(c.family) ?? 1;
+    // Realism pass: the plan's phase policies (07 §2.5.2 clinch / ground-top /
+    // ground-bottom), which were stored on every plan and read by nothing.
+    adapt *= phasePolicyWeight(st.planBView ?? st.plan, c.family, self.posture, this.topNow);
+    if (c.kind === 'submission' && c.id !== null) adapt *= subFamilyWeight(c.id);
+    adapt *= initiativeWeight(self.runtime.def.style.initiative, c.family);
+    if (st.planB) adapt *= st.planB.weights[c.family] ?? 1;
+    // Realism pass: do more of what lands (see `worksWeight`).
+    if (c.kind === 'strike' && st.worksGain > 0 && WORKS_EXPECTED[c.family] !== undefined) {
+      let ww = this.worksCache.get(c.family);
+      if (ww === undefined) {
+        ww = worksWeight(st, c.family, this.nowMs / 1000);
+        this.worksCache.set(c.family, ww);
+      }
+      adapt *= ww;
+    }
     // Perf: one scratch bundle, filled per candidate and read at once by
     // `scoreValue`; nothing keeps a reference to it.
     const w = this.weightScratch;
@@ -1458,6 +1872,10 @@ export class MmaPolicy implements DecisionPolicy {
   }
 
   private readonly weightScratch: WeightBundle = { style: 1, pref: 1, plan: 1, adapt: 1, matchup: 1, multi: 1 };
+  /** Set once per decision: is this fighter the top/attacking slot right now? */
+  private topNow = false;
+  /** Per decision: `worksWeight` by family (a fresh short-lived map; see SIM_PERF_PASS). */
+  private worksCache = new Map<string, number>();
 
   /**
    * `w_matchup`: the live-geometry terms that cannot sit in the plan because
@@ -1503,6 +1921,7 @@ export class MmaPolicy implements DecisionPolicy {
     cues: Cues,
     distanceM: number,
     tick: number,
+    uFree: number,
   ): Decision | null {
     if (!macroRunning(st.macro)) return null;
     const reason = abortReason(st.macro, self.runtime.strikingTier, {
@@ -1535,7 +1954,11 @@ export class MmaPolicy implements DecisionPolicy {
       moveX: 0,
       moveZ: 0,
       intentTag: `${st.macro.macro?.id ?? 'macro'}:${step.id}`,
-      payload: { macro: st.macro.macro?.id, step: st.macro.step },
+      payload: {
+        macro: st.macro.macro?.id, step: st.macro.step,
+        // A feint inside a macro is sold with this tick's free uniform.
+        ...(step.kind === 'feint' ? { biteU: uFree } : {}),
+      },
     };
   }
 
@@ -1561,6 +1984,7 @@ export class MmaPolicy implements DecisionPolicy {
     chosen: Candidate,
     distanceM: number,
     tick: number,
+    u: number,
   ): void {
     if (macroRunning(st.macro)) return;
     if (chosen.kind !== 'strike') return;
@@ -1580,9 +2004,35 @@ export class MmaPolicy implements DecisionPolicy {
     // run the one the author wrote. A reorder, never an unlock, and no draw —
     // the head action was already chosen by the utility layer.
     const options = preferComboOrder(legal, st.prefs.combos);
+    // Realism pass: a weighted draw over the chains that start with this
+    // strike, not always the first. An authored favourite weighs x3; a single
+    // strike (no combination at all) stays an option, more so for fighters
+    // with little combination craft; and the chain thrown last time is
+    // damped, because a fighter who repeats the same combination is read
+    // (§2.4.3) and every coach says so. The uniform is this tick's u_feint,
+    // which the policy no longer needs for the bite (resolved at commit).
+    const craft = strikingCraft(self.runtime).combinations;
+    const singleW = 0.6 + 1.4 * (1 - Math.min(1, craft / 100));
+    const favourites = new Set(st.prefs.combos.map((c) => c.id));
+    const weights = options.map((m) => {
+      let wgt = favourites.has(m.id) ? 3 : 1;
+      if (m.id === st.lastMacroId) wgt *= COMBO_REPEAT_DAMP;
+      return wgt;
+    });
+    let total = singleW;
+    for (const x of weights) total += x;
+    let r = Math.min(0.999999, Math.max(0, u)) * total;
+    if (r < singleW) return;
+    r -= singleW;
+    let idx = options.length - 1;
+    for (let i = 0; i < options.length; i++) {
+      if (r < weights[i]) { idx = i; break; }
+      r -= weights[i];
+    }
+    const macro = options[idx];
+    st.lastMacroId = macro.id;
     // The head action is already committed this tick, so the macro starts at
     // its second step next tick.
-    const macro = options[0];
     beginMacro(st.macro, macro, tick);
     advanceMacro(st.macro, tick);
   }
@@ -1591,7 +2041,7 @@ export class MmaPolicy implements DecisionPolicy {
   // §2.3 commit
   // -------------------------------------------------------------------------
 
-  private commit(st: AiState, self: FighterWorldState, c: Candidate, u: Draws): Decision {
+  private commit(st: AiState, self: FighterWorldState, c: Candidate, u: Draws, biteU?: number): Decision {
     const rt = self.runtime;
     const exec: ExecutionQuality = executionQuality({
       spec: c.spec ?? null,
@@ -1613,7 +2063,10 @@ export class MmaPolicy implements DecisionPolicy {
       moveX: c.moveX,
       moveZ: c.moveZ,
       intentTag: c.intentTag,
-      payload: { exec, family: c.family, ...(c.short ? { short: true } : {}) },
+      payload: {
+        exec, family: c.family, ...(c.short ? { short: true } : {}),
+        ...(biteU !== undefined ? { biteU } : {}),
+      },
     };
   }
 
@@ -1635,6 +2088,9 @@ export class MmaPolicy implements DecisionPolicy {
     const st = this.states.get(fighterId);
     if (!st) return;
     st.ledger.note(kind, family);
+    if (kind === 'landed' && family !== null && WORKS_EXPECTED[family] !== undefined) {
+      noteWorks(st, family, 'l', this.nowMs / 1000);
+    }
     st.outcomesSeen += 1;
     if (kind === 'knockdown') st.lastKnockdownMs = -Infinity;
   }
@@ -1661,19 +2117,33 @@ export class MmaPolicy implements DecisionPolicy {
       const st = this.stateOf(f, world);
       const rt = f.runtime;
 
-      // SC-1: the fighter's own belief about the cards, sampled once per break.
+      // SC-1 (Realism pass): the fighter scores the round he just fought from
+      // what he could see, through his and his corner's eyes, once per break;
+      // under open scoring he is told the cards (`ai/scorecard.ts`).
       const openScoring = world.config.settings.judgingMode === 'open';
-      const trueRoundsUp = trueCardOf(world, f);
+      const opp = world.fighters.find((o) => o.id !== id && o.team !== f.team);
+      const jr = world.judges as {
+        history?: RoundLedger[][];
+        panel?: { cards: number[][][] } | null;
+      } | null;
+      const hist = jr?.history ?? [];
+      const last = hist.length > 0 ? hist[hist.length - 1] : null;
+      if (last && opp && last[id] && last[opp.id]) {
+        const roundS = world.ruleset.rounds.lengthS || 300;
+        const margin = visibleMargin(last[id], last[opp.id], roundS);
+        const trueWon = openScoring ? panelRoundShare(jr?.panel?.cards ?? null, hist.length - 1, id, opp.id) : null;
+        scoreRoundBelief(st.score, margin, st.intent.effectiveIqTier, normalFromUniform(uScore),
+          trueWon === null ? null : { trueWon });
+      }
+      const lastP = st.score.perRound.length > 0 ? st.score.perRound[st.score.perRound.length - 1] : 0.5;
+      // Plan B at the break: he lost that round clearly (as he saw it).
+      if (rt.iqTier >= 2 && lastP < 0.3 && world.round <= world.ruleset.rounds.count) {
+        this.switchToPlanB(st, world, 'lost the round');
+      }
       st.intent.perceivedScore = {
-        roundsUp: scoreBelief({
-          trueRoundsUp,
-          effectiveIqTier: st.intent.effectiveIqTier,
-          openScoring,
-          isCorner: false,
-          z: normalFromUniform(uScore),
-        }),
+        roundsUp: st.score.roundsUp,
         sigma: openScoring ? 0 : 1,
-        lastRoundEstimate: trueRoundsUp > 0 ? 1 : trueRoundsUp < 0 ? -1 : 0,
+        lastRoundEstimate: lastP > 0.6 ? 1 : lastP < 0.4 ? -1 : 0,
       };
       world.emit({
         tick: world.tick, subMs: 0, round, kind: 'scoreUpdate',
@@ -1860,6 +2330,51 @@ function setupActive(st: AiState, world: World): boolean {
   return world.tick - st.lastSetupTick <= windowTicks;
 }
 
+/**
+ * Realism pass: 07 §2.5.2's phase policies as family multipliers. A plan
+ * says how its fighter wants the clinch (avoid .. wall), the top of the
+ * ground (stand and reset .. hunt the submission) and the bottom (stand up
+ * first .. hunt from guard); these are what make a kickboxer and a wrestler
+ * *behave* differently once the fight leaves the feet. [E] magnitudes, bounded
+ * by the utility clamp like every other multiplier.
+ */
+export const PHASE_POLICY_WEIGHTS = Object.freeze({
+  clinch: {
+    avoid: { clinchEntry: 0.5, cagePin: 0.7, breakClinch: 1.8, clinchStrike: 0.9 },
+    break: { clinchEntry: 0.7, breakClinch: 1.5 },
+    accept: {},
+    seek: { clinchEntry: 1.4, breakClinch: 0.6, cagePin: 1.2 },
+    wall: { clinchEntry: 1.5, cagePin: 1.6, breakClinch: 0.4, clinchStrike: 1.2 },
+  } as Record<string, Partial<Record<ActionFamily, number>>>,
+  top: {
+    standAndReset: { standUp: 3.0, pass: 0.6, submission: 0.5, backTake: 0.7, ride: 0.7 },
+    passByStrikes: { groundStrike: 1.2, pass: 1.2, standUp: 0.5 },
+    ride: { ride: 1.4, pass: 1.1, standUp: 0.3 },
+    gnp: { groundStrike: 1.4, ride: 1.1, standUp: 0.3 },
+    subHunt: { submission: 1.5, backTake: 1.3, pass: 1.2, standUp: 0.3 },
+  } as Record<string, Partial<Record<ActionFamily, number>>>,
+  bottom: {
+    standUpFirst: { standUp: 1.5, wallWalk: 1.5, sweep: 0.8, bottomSubmission: 0.6 },
+    wallWalk: { wallWalk: 2.0, standUp: 1.2 },
+    sweep: { sweep: 1.6, standUp: 0.8 },
+    subHunt: { bottomSubmission: 1.8, sweep: 1.3, standUp: 0.6, wallWalk: 0.6 },
+  } as Record<string, Partial<Record<ActionFamily, number>>>,
+});
+
+export function phasePolicyWeight(
+  plan: PlanView | null, family: ActionFamily, posture: FighterWorldState['posture'], top: boolean,
+): number {
+  if (!plan) return 1;
+  if (posture === 'standing' || posture === 'clinch') {
+    return (plan.clinchPolicy && PHASE_POLICY_WEIGHTS.clinch[plan.clinchPolicy]?.[family]) ?? 1;
+  }
+  if (posture === 'ground') {
+    if (top) return (plan.groundTopPolicy && PHASE_POLICY_WEIGHTS.top[plan.groundTopPolicy]?.[family]) ?? 1;
+    return (plan.groundBottomPolicy && PHASE_POLICY_WEIGHTS.bottom[plan.groundBottomPolicy]?.[family]) ?? 1;
+  }
+  return 1;
+}
+
 /** The standing §03 node a distance puts a free fighter in. */
 function standingNodeFor(
   rt: { effectiveReachM: number; effectiveKickReachM: number },
@@ -1914,8 +2429,10 @@ function familiarityOf(
 }
 
 function isCounterFamily(f: ActionFamily): boolean {
+  // Realism pass: `sprawl` removed — a read *strike* is not countered with a
+  // sprawl; the sprawl answers shots, which 03 resolves on its own terms.
   return f === 'counterWindow' || f === 'parryCross' || f === 'baitCross'
-    || f === 'cross' || f === 'overhand' || f === 'check' || f === 'sprawl';
+    || f === 'cross' || f === 'overhand' || f === 'check';
 }
 
 /**
@@ -1983,14 +2500,20 @@ function phaseOf(intent: Intent, f: FighterWorldState): FighterIntent['phase'] {
 }
 
 /**
- * The true running card, as §06 keeps it. Until the judge module exposes a
- * per-fighter running total the AI may read, the belief is centred on zero and
- * the noise is what the fighter actually acts on — which is the honest state of
- * the coupling rather than a guess dressed up as a card.
+ * Open scoring (SC-0): this fighter's share of the panel's verdict on one
+ * round: 1 when a majority of judges gave it to him, 0 when to the other
+ * man, 0.5 when split evenly or even. Null when there is no panel.
  */
-function trueCardOf(world: World, f: FighterWorldState): number {
-  const judges = world.judges as { runningRoundsUp?: Record<number, number> } | null;
-  const row = judges?.runningRoundsUp;
-  if (row && typeof row[f.id] === 'number') return row[f.id];
-  return 0;
+function panelRoundShare(cards: number[][][] | null, roundIndex: number, self: number, opp: number): number | null {
+  if (!cards || cards.length === 0) return null;
+  let mine = 0;
+  let theirs = 0;
+  for (const judge of cards) {
+    const r = judge[roundIndex];
+    if (!r) continue;
+    if (r[self] > r[opp]) mine++;
+    else if (r[opp] > r[self]) theirs++;
+  }
+  if (mine + theirs === 0) return 0.5;
+  return mine > theirs ? 1 : theirs > mine ? 0 : 0.5;
 }

@@ -1265,10 +1265,18 @@ export function deriveRuntime(
   const rearKickRaw = P('fm.power.kick_pad_ref_n') * techGate(kickGateSkill) * physTerm * kickTerm * P('fm.power.kick_pad_to_fight');
   // §8.4 injury caps and §8.3 handedness split. Both are multipliers of 1.0
   // when unstated, so an older definition is untouched.
-  const rearHand = rearHandRaw * injury.capabilities.punchPower;
+  const rearHand = rearHandRaw * injury.capabilities.punchPower
+    * (((handedness === 'left' && b.stance === 'orthodox') || (handedness === 'right' && b.stance === 'southpaw')) ? 0.96 : 1);
   const rearKick = rearKickRaw * injury.capabilities.kickPower;
   const handSplitZ = (clamp(b.handStrengthSplit ?? 50, 0, 100) - 50) / 50;
-  const leadSplitMult = clamp(1 - P('fm.power.hand_split_slope') * handSplitZ, 0.2, 1.6);
+  // Realism pass: handedness against stance. A left-hander standing
+  // orthodox (or a right-hander southpaw) has his strong hand in front — the
+  // "converted southpaw" whose jab and lead hook carry real power — and gives
+  // up a little on the rear hand [E; BOXING §3 converted stance; LIT_B §3.13
+  // left-handers over-represented among successful fighters].
+  const converted = (handedness === 'left' && b.stance === 'orthodox')
+    || (handedness === 'right' && b.stance === 'southpaw');
+  const leadSplitMult = clamp(1 - P('fm.power.hand_split_slope') * handSplitZ, 0.2, 1.6) * (converted ? 1.12 : 1);
   const powerIndex: PowerIndex = {
     rearHand,
     leadHand: P('fm.power.lead_ratio') * rearHand * leadSplitMult,

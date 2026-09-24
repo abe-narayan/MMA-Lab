@@ -229,7 +229,8 @@ export function summarizeRun(
       case 'strike': {
         const d = e.detail;
         const pair = pairOf.get(e.actor);
-        const ph = phaseOfNode(pair ? pair.node : null);
+        // Engine 6.0: position and significance as thrown (QA2 #6).
+        const ph = d.pos ?? phaseOfNode(pair ? pair.node : null);
         const landed = isStatLanded(d.result);
         lastStrikeTick = e.tick;
         if (e.actor >= 0 && e.actor < n) lastContactTick[e.actor] = e.tick;
@@ -241,7 +242,7 @@ export function summarizeRun(
           hd[e.actor][1]++;
           if (landed) hd[e.actor][0]++;
         }
-        if (!isSignificant(d.technique, ph, d.short === true)) break;
+        if (!(d.sig ?? isSignificant(d.technique, ph, d.short === true))) break;
         const bucket = targetBucket(d.target);
         if (!bucket) break;
         const k = (PHASES.indexOf(ph) * 3 + TARGETS.indexOf(bucket)) * 2;

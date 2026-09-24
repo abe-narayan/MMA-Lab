@@ -88,8 +88,14 @@ export interface ConsiderationInputs {
   dwellExceeded: boolean;
   /** `[E]` reserved (§2.2.6); 0 with the lookahead disabled. */
   lookahead: number;
-  /** Intended range in metres, from the live intent. */
+  /** Intended range in metres, from the live intent (Realism pass: `footwork.preferredDistance`). */
   intentRangeM: number;
+  /**
+   * Realism pass: half-width of the hold band around `intentRangeM`. Optional
+   * so older callers (tests, the Model tab) keep the pre-pass curve: absent
+   * means 0, which reproduces it exactly.
+   */
+  rangeDeadbandM?: number;
   /** Centre-to-centre distance to the target, metres. */
   distanceM: number;
   /** Effective IQ tier, 0-5: drives the `c.mustnot` slip rate. */
@@ -253,6 +259,37 @@ export function paceCurve(family: ActionFamily, ratio: number): number {
 }
 
 /**
+ * `c.range_target` (§2.2.2), Realism pass shape. With `deadband` 0 this is
+ * the pre-pass curve exactly. With a dead band:
+ *
+ *  - inside it (he is where he wants to be) stepping in or out scores low
+ *    and circling scores well — a fighter at his distance moves around, not
+ *    in and out;
+ *  - outside it, the step that closes the gap scores high and the step that
+ *    widens it scores 0.12 (it happens — a feint step, a reset — but rarely),
+ *    where the old curve still gave the wrong direction a quarter of the
+ *    right one's alignment and produced ~48 radial reversals a minute.
+ */
+export function rangeTargetCurve(
+  advancing: boolean, retreating: boolean, distanceM: number, targetM: number, deadband: number,
+): number {
+  if (deadband <= 0) {
+    const gap = Math.abs(distanceM - targetM);
+    const tooFar = distanceM > targetM;
+    const wants = advancing ? tooFar : retreating ? !tooFar : null;
+    const alignment = wants === null ? 0.5 : wants ? 1 : 0.25;
+    return clamp01(0.3 + 0.7 * alignment * clamp01(gap / 0.8));
+  }
+  const gap = distanceM - targetM;
+  const ag = Math.abs(gap);
+  if (ag <= deadband) return advancing || retreating ? 0.3 : 0.6;
+  if (!advancing && !retreating) return 0.5;
+  const wantsIn = gap > 0;
+  const aligned = advancing ? wantsIn : !wantsIn;
+  return aligned ? clamp01(0.6 + 0.4 * clamp01((ag - deadband) / 0.4)) : 0.12;
+}
+
+/**
  * One consideration, by id. Exported so the Model tab can show a fighter's
  * decision broken down axis by axis.
  */
@@ -270,14 +307,10 @@ export function considerationValue(
     }
     case 'c.range_target': {
       if (!MOVEMENT_FAMILIES.has(a.family)) return 1;
-      // Movement scores high when it would move toward the intended range.
-      const gap = Math.abs(x.distanceM - x.intentRangeM);
-      const tooFar = x.distanceM > x.intentRangeM;
-      const wants = ADVANCING_FAMILIES.has(a.family) ? tooFar
-        : RETREATING_FAMILIES.has(a.family) ? !tooFar
-          : null;
-      const alignment = wants === null ? 0.5 : wants ? 1 : 0.25;
-      return clamp01(0.3 + 0.7 * alignment * clamp01(gap / 0.8));
+      return rangeTargetCurve(
+        ADVANCING_FAMILIES.has(a.family), RETREATING_FAMILIES.has(a.family), x.distanceM, x.intentRangeM,
+        x.rangeDeadbandM ?? 0,
+      );
     }
     case 'c.own_fatigue':
       return ownFatigueCurve(a.family, clamp01(x.ownFatigue));
@@ -443,11 +476,8 @@ export function scoreValue(a: ScorableAction, x: ConsiderationInputs, w: WeightB
   // c.range_target
   if (!(fl & FL_MOVEMENT)) c = 1;
   else {
-    const gap = Math.abs(x.distanceM - x.intentRangeM);
-    const tooFar = x.distanceM > x.intentRangeM;
-    const wants = fl & FL_ADVANCING ? tooFar : fl & FL_RETREATING ? !tooFar : null;
-    const alignment = wants === null ? 0.5 : wants ? 1 : 0.25;
-    c = clamp01(0.3 + 0.7 * alignment * clamp01(gap / 0.8));
+    c = rangeTargetCurve((fl & FL_ADVANCING) !== 0, (fl & FL_RETREATING) !== 0, x.distanceM, x.intentRangeM,
+      x.rangeDeadbandM ?? 0);
   }
   product *= comp(c);
   // c.own_fatigue
@@ -569,11 +599,8 @@ export class ConsiderationScorer {
     // [1] c.range_target
     if (!(fl & FL_MOVEMENT)) c = 1;
     else {
-      const gap = Math.abs(x.distanceM - x.intentRangeM);
-      const tooFar = x.distanceM > x.intentRangeM;
-      const wants = fl & FL_ADVANCING ? tooFar : fl & FL_RETREATING ? !tooFar : null;
-      const alignment = wants === null ? 0.5 : wants ? 1 : 0.25;
-      c = clamp01(0.3 + 0.7 * alignment * clamp01(gap / 0.8));
+      c = rangeTargetCurve((fl & FL_ADVANCING) !== 0, (fl & FL_RETREATING) !== 0, x.distanceM, x.intentRangeM,
+        x.rangeDeadbandM ?? 0);
     }
     t[1] = comp(c);
     // [2] c.own_fatigue
@@ -787,7 +814,16 @@ export interface MassCap {
 export function softmaxSelect(
   scores: readonly number[], tau: number, u: number, share?: readonly number[],
   massCaps?: readonly MassCap[],
+  /**
+   * Realism pass: when given, receives the *conditional residual* of `u` —
+   * where inside the chosen candidate's interval the uniform fell, rescaled
+   * to [0, 1). Given the choice it is itself uniform and independent of the
+   * choice, so the caller gets a second uniform out of the one selection draw
+   * (feint bites, combination choice) without touching the draw schedule.
+   */
+  out?: { residual: number },
 ): number {
+  if (out) out.residual = clamp01(u);
   const n = scores.length;
   if (n === 0) return -1;
   if (n === 1) return 0;
@@ -825,9 +861,13 @@ export function softmaxSelect(
 
   let r = clamp01(u) * total;
   for (let i = 0; i < n; i++) {
-    if (r < weights[i]) return i;
+    if (r < weights[i]) {
+      if (out) out.residual = weights[i] > 0 ? clamp01(r / weights[i]) : 0;
+      return i;
+    }
     r -= weights[i];
   }
+  if (out) out.residual = 0.5;
   return n - 1;
 }
 

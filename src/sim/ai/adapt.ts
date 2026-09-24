@@ -312,11 +312,11 @@ export const ADJUSTMENT_ROWS: readonly AdjustmentRow[] = [
       // 01 §2.6 `whenLosing`: the gambler empties the clip, the staller does
       // not change the pace he is already losing with, `press` is the default
       // §2.6.3 row.
-      policy: {
-        paceMult: s.whenLosing === 'gamble' ? 1.35 : s.whenLosing === 'stall' ? 1.0 : 1.25,
-        riskDelta: s.whenLosing === 'gamble' ? 2 : s.whenLosing === 'stall' ? 0 : 1,
-        emergency: 'stealRound',
-      },
+      // Realism pass: pace and risk are driven continuously by the scorecard
+      // urgency (`ai/scorecard.ts`), which reads the same belief; applying
+      // them here as well double-counted and, as a permanent intent patch,
+      // never wore off.
+      policy: { emergency: 'stealRound' },
       label: s.whenLosing === 'gamble'
         ? 'down a round — go and get it'
         : 'down a round — steal it on volume',
@@ -332,7 +332,7 @@ export const ADJUSTMENT_ROWS: readonly AdjustmentRow[] = [
           submission: 1.6, bottomSubmission: 1.6,
           block: 0.7, check: 0.7, longGuard: 0.7, retreat: 0.7,
         },
-        policy: { riskDelta: 2, emergency: 'needFinish' },
+        policy: { emergency: 'needFinish' },
         label: 'he needs the submission',
       }
       : {
@@ -342,7 +342,7 @@ export const ADJUSTMENT_ROWS: readonly AdjustmentRow[] = [
           shoot: 0.6, nakedShot: 0.6, bodylockTd: 0.6, shootOffStrikes: 0.6,
           block: 0.7, check: 0.7, longGuard: 0.7, retreat: 0.7,
         },
-        policy: { riskDelta: 2, emergency: 'needFinish' },
+        policy: { emergency: 'needFinish' },
         label: 'he needs a finish — headhunting',
       }),
   },
@@ -353,7 +353,7 @@ export const ADJUSTMENT_ROWS: readonly AdjustmentRow[] = [
       weights: s.isWrestler
         ? { ride: 1.2, cagePin: 1.2, bodylockTd: 1.2 }
         : { counterWindow: 1.2, parryCross: 1.2 },
-      policy: { riskDelta: -1, cagePolicy: 'centre', comboCapDelta: -1 },
+      policy: { cagePolicy: 'centre', comboCapDelta: -1 },
       label: 'ahead — no need to gamble',
     }),
   },

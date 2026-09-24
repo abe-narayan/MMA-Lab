@@ -332,7 +332,9 @@ export function renderReport(inp: ReportInput): string {
   const lines: string[] = [
     `# ${title}`,
     '',
-    inp.label?.toLowerCase().includes('post-tuning')
+    inp.label?.toLowerCase().includes('realism')
+      ? '> **REALISM PASS REPORT (engine 6.0.0).** The engine after the realism pass (docs/design/REALISM_PASS.md), against the §7 targets, with the Phase 9 post-tuning run (engine 5.0.0) alongside in the Δ column. This run is SMALLER than the Phase 9 one (see the metadata): the UFC population rows and the skill/style/tier/reach cells only, so many rows report NO DATA or WIDE on sample size. Rows whose confidence interval is wider than the §6.6 rule allows are **WIDE** even when on target.'
+      : inp.label?.toLowerCase().includes('post-tuning')
       ? '> **POST-TUNING REPORT (Phase 9).** The calibrated engine against the §7 targets, with the pre-tuning baseline alongside (the Δ column and the headline table below). What changed and why, the bugs fixed and the targets that could not be reached are in `docs/design/PHASE9_TUNING.md`. Rows whose confidence interval is still wider than the §6.6 rule allows are reported **WIDE** even when the estimate is on target.'
       : inp.label?.toLowerCase().includes('pre-tuning')
       ? '> **PRE-TUNING BASELINE.** Produced by the Phase 9 calibration infrastructure before any parameter was tuned, at modest bouts per cell, to prove the pipeline end to end and to give the tuning engineer a starting point. Most confidence intervals are wider than the §6.6 rule allows, so a row within tolerance is reported **WIDE**, not PASS. Nothing here is a sign-off.'

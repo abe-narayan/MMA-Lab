@@ -42,6 +42,8 @@ export interface FighterDamageProfile {
   composureEff: number;
   heart: number;
   discipline: number;
+  /** Realism pass: 01 `balance`, 0-100; resists the flash knockdown (ko.ts). Optional, 50 when absent. */
+  balance?: number;
   /** 01 §2.4.1: `0.1 + 0.9 * (1 - exp(-totalFights/6))`. Debut 0.10. */
   experience: number;
   /** Striking sub-skill mean, for `skillCostMult` (§2.5.1). */
@@ -158,6 +160,7 @@ export function profileFromDefinition(
     composureEff: def.mental.composure,
     heart: def.mental.heart,
     discipline: def.mental.discipline,
+    balance: def.physical.balance,
     experience: experienceFrom(totalFights),
     strikingSkill: skillMean(def, ['boxing', 'muayThai', 'kickboxing', 'karate', 'taekwondo']),
     koLosses: rec.koLosses,

@@ -3177,6 +3177,40 @@ const EDGES_J: readonly GrapplingEdge[] = [
     counters: ['stay chest-to-chest', 'wrist control', 'ground and pound'],
     tag: '[S: MMA_INTEGRATION §2.3 I-15] (25-40 %)',
   }),
+  // Realism pass: the *top* man's way off the floor. The graph had every
+  // bottom exit and no top one, so a striker who sprawled on a shot or landed
+  // on top by accident could only advance — spin behind, take the back — and
+  // strikers ended up controlling wrestlers (3.1 min per 15 in the style
+  // matrix). In MMA the man on top can nearly always stand and walk away:
+  // "stuff, punish, reset to distance" is the sprawl-and-brawl game
+  // [S: MMA_INTEGRATION §2 I-20, §3 S-6; WRESTLING §3.7 "sprawl -> both
+  // stand"]. Closed guard holds him (legs locked) more than an open guard.
+  edge({
+    id: 'tech.sprawl_reset', name: 'Sprawl and reset', group: 'J', kind: 'getup', actor: 'a',
+    from: ['pos.td_sprawl', 'pos.ground_front_headlock'],
+    to: [d('pos.standing_mid', 1)],
+    toOnFailure: [d('same', 1)],
+    requirements: 'hips back, hands on the head, step back out',
+    durationMs: [500, 800], baseP: 0.85, kSkill: 0.5,
+    skills: { attacker: ['wr.sprawl'], defender: ['wr.scramble'] },
+    stateMods: [st('FAT-')],
+    counters: ['re-shot as he steps back', 'hand fight to the legs'],
+    tag: '[S: WRESTLING §3.7 sprawl -> stand; MMA_INTEGRATION I-20] [E: baseP 0.85]',
+  }),
+  edge({
+    id: 'tech.top_stand_away', name: 'Stand up out of the guard', group: 'J', kind: 'getup', actor: 'a',
+    from: ['pos.ground_open_kneeling_top', 'pos.ground_open_legs_up', 'pos.ground_open_butterfly',
+      'pos.ground_open_seated', 'pos.ground_hq', 'pos.ground_half_knee_shield', 'pos.ground_half_butterfly',
+      'pos.ground_closed_posture_up', 'pos.ground_closed_top_standing'],
+    to: [d('pos.standing_mid', 1)],
+    toOnFailure: [d('same', 1)],
+    requirements: { text: "postured; top posture = 'postured'", needsPosture: 'postured' },
+    durationMs: [800, 1400], baseP: 0.70, kSkill: 1.0,
+    skills: { attacker: ['wr.get_up'], defender: ['bjj.retention'] },
+    stateMods: [st('FAT-')],
+    counters: ['ankle pick or sweep as he rises', 'upkick', 'closed-guard lock'],
+    tag: '[S: MMA_INTEGRATION §3 S-6 "strikers stand out of guard"] [E: baseP 0.70]',
+  }),
 ];
 
 // ---------------------------------------------------------------------------
@@ -3266,8 +3300,12 @@ export const GRAPPLING_EDGES: readonly GrapplingEdge[] = [
  * gaeshi, whose conditional bases differ at 0.35 / 0.30 / 0.25) and the
  * outcome row moved into `SCRAMBLE_OUTCOMES` below. Nothing from the chapter
  * is dropped and nothing is invented.
+ *
+ * Realism pass: + 2 edges that are not §2.3 rows — the top man's exits
+ * (`tech.sprawl_reset`, `tech.top_stand_away`), which the chapter's tables
+ * lacked (every exit was a bottom exit). 189 in all.
  */
-export const EDGE_COUNT = 187;
+export const EDGE_COUNT = 189;
 
 const EDGE_BY_ID = new Map<EdgeId, GrapplingEdge>();
 for (const e of GRAPPLING_EDGES) {
