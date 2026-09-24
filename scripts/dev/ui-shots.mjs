@@ -27,6 +27,16 @@ page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 page.on('response', (r) => { if (r.status() >= 500) errors.push(`${r.status()} ${r.url()}`); });
 if (theme) await page.addInitScript((t) => { try { localStorage.setItem('bout-lab.theme', t); } catch {} }, theme);
+// Shared dev server: stub the HMR client so another agent's edit cannot reload the page mid-capture.
+await page.route('**/@vite/client', (route) => route.fulfill({
+  contentType: 'application/javascript',
+  body: `const styles = new Map();
+export function updateStyle(id, css) { let el = styles.get(id); if (!el) { el = document.createElement('style'); document.head.appendChild(el); styles.set(id, el); } el.textContent = css; }
+export function removeStyle(id) { styles.get(id)?.remove(); styles.delete(id); }
+export function injectQuery(url) { return url; }
+export class ErrorOverlay extends (globalThis.HTMLElement ?? class {}) {}
+export function createHotContext() { const noop = () => {}; return { accept: noop, acceptExports: noop, dispose: noop, prune: noop, invalidate: noop, on: noop, off: noop, send: noop, data: {} }; }`,
+}));
 await page.goto(base, { waitUntil: 'load', timeout: 120000 });
 await page.waitForTimeout(1500);
 

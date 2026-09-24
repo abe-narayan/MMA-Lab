@@ -22,7 +22,7 @@ import {
   ARENA_IDS, DAMAGE_REALISM, REFEREE_STRICTNESS, RULESET_IDS, RULESET_LABELS, newSeed, pairingWarning,
 } from '../model/matchModel';
 import {
-  BATCH_MAX, BATCH_SIZES, EtaEstimator, aggregate, formatDuration,
+  BATCH_MAX, BATCH_SIZES, EtaEstimator, MAX_WORKERS, aggregate, formatDuration,
   type BatchAggregate, type BoutSummary, type Interval, type MethodClass,
 } from '../model/batchModel';
 import { defaultWorkerCount, runBatch, type BatchHandle, type BatchOutcome } from '../run/batchRun';
@@ -74,7 +74,12 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [live, setLive] = useState<BatchAggregate | null>(null);
   const handle = useRef<BatchHandle | null>(null);
-  const workers = useMemo(() => defaultWorkerCount(), []);
+  const autoWorkers = useMemo(() => defaultWorkerCount(), []);
+  // "Auto" is cores minus two, at most four. Fewer workers leave more of the
+  // machine free (useful when something else is running); the results are
+  // identical for any choice.
+  const [workerChoice, setWorkerChoice] = useState<string>('auto');
+  const workers = workerChoice === 'auto' ? autoWorkers : Math.max(1, Math.min(MAX_WORKERS, Number(workerChoice)));
   const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency : undefined;
 
   // Sensible defaults once the database is readable: the first two fighters.
@@ -118,6 +123,7 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
     setLive(null);
     setPhase({ kind: 'running', done: 0, errors: 0, total: bouts, eta: null, rate: 0, startedAt });
     const h = runBatch({ template, master: master.trim(), bouts }, {
+      workers,
       onSummary: (s) => collected.push(s),
       onProgress: (p) => {
         const t = performance.now();
@@ -142,7 +148,7 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
         setPhase({ kind: 'failed', message: err instanceof Error ? err.message : String(err) });
       },
     );
-  }, [a, b, arena, bouts, master, problems.length, realism, ruleset, strictness]);
+  }, [a, b, arena, bouts, master, problems.length, realism, ruleset, strictness, workers]);
 
   const cancel = useCallback(() => handle.current?.cancel(), []);
 
@@ -217,6 +223,13 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
                     label="Referee" value={strictness} disabled={running} onChange={setStrictness}
                     options={REFEREE_STRICTNESS.map((r) => ({ value: r.id, label: r.label }))}
                   />
+                  <Select<string>
+                    label="Workers" value={workerChoice} disabled={running} onChange={setWorkerChoice}
+                    options={[
+                      { value: 'auto', label: `Auto (${autoWorkers})` },
+                      ...Array.from({ length: MAX_WORKERS }, (_, i) => ({ value: String(i + 1), label: `${i + 1}` })),
+                    ]}
+                  />
                 </div>
 
                 <div className="ui-field">
@@ -247,7 +260,7 @@ export function BatchSim({ store, revision }: BatchSimProps): JSX.Element {
                   </div>
                   <p className="ui-field-hint">
                     {bouts.toLocaleString()} bouts on {workers} worker{workers === 1 ? '' : 's'}
-                    {cores ? ` (${cores} logical cores, two left free for the page)` : ''}.
+                    {cores ? ` (${cores} logical cores)` : ''}. Results are identical for any worker count.
                   </p>
                 </div>
 

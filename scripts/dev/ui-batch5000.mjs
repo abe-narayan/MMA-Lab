@@ -17,6 +17,7 @@ const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
 const bouts = Number(opt('bouts', '5000'));
 const out = opt('out', 'docs/screenshots/ui-after-batch-5000.png');
+const workers = opt('workers', null);
 const CAP = 0.93;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -40,10 +41,23 @@ page.on('pageerror', (e) => errors.push(e.message));
 const reloads = [];
 page.on('framenavigated', (f) => { if (f === page.mainFrame()) reloads.push(Date.now()); });
 
+// The dev server is shared: another agent's source edit would hot-reload the
+// page and wipe the batch. Replace Vite's HMR client with an inert stub so this
+// page never reloads (styles still apply; only live updates are disabled).
+await page.route('**/@vite/client', (route) => route.fulfill({
+  contentType: 'application/javascript',
+  body: `const styles = new Map();
+export function updateStyle(id, css) { let el = styles.get(id); if (!el) { el = document.createElement('style'); el.setAttribute('data-vite-dev-id', id); document.head.appendChild(el); styles.set(id, el); } el.textContent = css; }
+export function removeStyle(id) { styles.get(id)?.remove(); styles.delete(id); }
+export function injectQuery(url) { return url; }
+export class ErrorOverlay extends (globalThis.HTMLElement ?? class {}) {}
+export function createHotContext() { const noop = () => {}; return { accept: noop, acceptExports: noop, dispose: noop, prune: noop, invalidate: noop, on: noop, off: noop, send: noop, data: {} }; }`,
+}));
 await page.goto('http://127.0.0.1:5180/', { waitUntil: 'load', timeout: 120000 });
 await page.waitForTimeout(1200);
 await page.locator('nav.nav').getByRole('button', { name: 'Batch simulation', exact: true }).click();
 await page.waitForTimeout(800);
+if (workers) await page.getByLabel('Workers', { exact: true }).selectOption(String(workers));
 const preset = String(bouts) === '5000' ? '5,000' : null;
 if (preset) await page.getByRole('radio', { name: preset }).click();
 else {
@@ -54,7 +68,7 @@ reloads.length = 0;
 const t0 = Date.now();
 await page.getByRole('button', { name: /^Run [\d,]+ bouts/ }).click();
 let maxRam = 0; let maxCpu = 0; let maxHeap = 0; let aborted = false;
-let lastProgress = ''; let stalls = 0;
+let lastProgress = ''; let stalls = 0; let cpuHigh = 0;
 for (;;) {
   await sleep(20000);
   const done = await page.getByRole('button', { name: 'Export CSV' }).count();
@@ -70,6 +84,13 @@ for (;;) {
   if (progress === lastProgress) stalls += 1; else stalls = 0;
   lastProgress = progress;
   if (stalls >= 6) { console.log('No progress for two minutes; aborting.'); aborted = true; break; }
+  if (cpu > CAP) cpuHigh += 1; else cpuHigh = 0;
+  if (cpuHigh >= 2) {
+    console.log('Machine CPU above the 93% cap twice running: cancelling the batch.');
+    await page.getByRole('button', { name: 'Cancel batch' }).click();
+    aborted = true;
+    break;
+  }
   if (ram > CAP) {
     console.log('RAM above the 93% cap: cancelling the batch.');
     await page.getByRole('button', { name: 'Cancel batch' }).click();
