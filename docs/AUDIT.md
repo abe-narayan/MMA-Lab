@@ -1,5 +1,10 @@
 # Bout Lab — Phase 0 Codebase Audit
 
+> **Historical (Phase 0).** This audit describes the v3 codebase at commit `9bcdbd7`. Its
+> findings drove the v4 rewrite; most of the files it discusses (`src/engine/`, `src/render/`,
+> `src/ui/`, `src/replay/`, `src/data/replays.ts`, `public/replays/`) no longer exist. For the
+> audit of the current tree see `docs/design/AUDIT_FINAL.md`.
+
 Date: 2026-09-22. Audited at commit `9bcdbd7` ("Bout Lab: deterministic, seed-replayable bout simulator").
 Test status at audit time: `npm test` → 4 files, 128 tests passing; `tsc --noEmit` clean.
 

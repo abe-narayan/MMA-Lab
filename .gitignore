@@ -5,12 +5,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# generated bout corpus
-# Every file under public/replays/ is reproducible with `npm run generate`
-# from the master seed alone - that reproducibility is the point of the
-# project, so the corpus is not committed. src/data/replays.ts IS committed:
-# it is a build input for the single-file bundle, and CI regenerates it and
-# fails if it differs.
+# legacy v3 corpus output (the v3 generator was retired; kept ignored so an old
+# checkout's local corpus is never committed by accident)
 public/replays/
 exports/
 

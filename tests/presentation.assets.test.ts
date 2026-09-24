@@ -57,7 +57,6 @@ describe('asset manifest integrity', () => {
 
   it('every asset id in ASSETS is documented in docs/ASSETS.md with an allowed licence id', () => {
     const ids = [
-      ...Object.values(ASSETS.hdri).map((h) => h.id),
       ...Object.values(ASSETS.textures).map((t) => t.id),
       ASSETS.fonts.broadcast.id,
       ...Object.values(manifest.sources).map((s) => s.asset),
@@ -75,7 +74,7 @@ describe('asset manifest integrity', () => {
     let total = 0;
     const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true })
       .flatMap((d) => (d.isDirectory() ? walk(join(dir, d.name)) : [join(dir, d.name)]));
-    for (const sub of ['motion', 'hdri', 'textures']) {
+    for (const sub of ['motion', 'textures']) {
       for (const f of walk(join(STATIC, 'assets', sub))) {
         const rel = relative(ROOT, f).replace(/\\/g, '/');
         total += statSync(f).size;
@@ -87,6 +86,17 @@ describe('asset manifest integrity', () => {
     for (const u of Object.values(ASSETS.fonts.broadcast.files)) total += statSync(toFile(u)).size;
     expect(existsSync(join(STATIC, 'assets', 'fonts', 'OFL.txt'))).toBe(true);
     expect(total).toBeLessThan(60 * 1024 * 1024);
+  });
+
+  it('ships no texture the manifest does not list (unused maps were removed; keep it that way)', () => {
+    const listed = new Set(allAssetUrls().map((u) => u.replace(/^\/assets\//, '')));
+    const dir = join(STATIC, 'assets', 'textures');
+    for (const set of readdirSync(dir)) {
+      for (const f of readdirSync(join(dir, set))) {
+        expect(listed.has(`textures/${set}/${f}`), `static/assets/textures/${set}/${f} is not in ASSETS`).toBe(true);
+      }
+    }
+    expect(existsSync(join(STATIC, 'assets', 'hdri'))).toBe(false);
   });
 
   it('motion.bin matches the manifest (size, sha256) and stays small', () => {

@@ -10,11 +10,21 @@
  * that would only cause extra requests, and writes `dist/standalone.html`.
  *
  * It then re-reads its own output and fails, loudly and non-zero, if anything
- * that would trigger a network request survives: a remaining `src`/`href` on a
- * script, link, image, iframe or media element; a `url(...)` or `@import` in
- * any inline stylesheet; or a protocol-relative `//host/...` reference. The
- * point of the standalone build is that it works from a file:// URL on a
- * machine with no network at all, so "probably fine" is not good enough.
+ * in the MARKUP would trigger a request: a remaining `src`/`href` on a script,
+ * link, image, iframe or media element; a `url(...)` or `@import` in any inline
+ * stylesheet; or a protocol-relative `//host/...` reference.
+ *
+ * What the standalone page does NOT carry (it is a lite build, not the full
+ * app): the 3D broadcast view fetches its body mesh, motion library, textures
+ * and broadcast font from `/assets/*` at runtime (`static/assets/`, ~16 MB),
+ * and the simulation and batch Web Workers are separate chunks in
+ * `dist/assets/`. Opened from disk, the workers cannot start, so bouts and
+ * batches run on the main thread (the app's built-in fallback), and the 3D
+ * view cannot load its assets, so the presenter falls back to its placeholder
+ * figures. The fighter creator, the simulator, the batch screen and the 2D
+ * view are fully self-contained. For the full 3D broadcast, serve `dist/`
+ * (`npm run preview`, or any static host) instead. The summary printed at the
+ * end lists what stays outside the page.
  *
  * Node 22, ESM, no dependencies outside node: builtins.
  */
@@ -54,7 +64,7 @@ const isInlineable = (url) => url && !isExternal(url) && !url.startsWith('data:'
 function resolveAsset(url) {
   const clean = url.split('?')[0].split('#')[0];
   const candidates = clean.startsWith('/')
-    ? [path.join(DIST, clean.slice(1)), path.join(ROOT, 'public', clean.slice(1))]
+    ? [path.join(DIST, clean.slice(1)), path.join(ROOT, 'static', clean.slice(1))]
     : [path.join(DIST, clean), path.join(path.dirname(INPUT), clean)];
   for (const c of candidates) {
     if (fs.existsSync(c) && fs.statSync(c).isFile()) return c;
@@ -271,5 +281,21 @@ if (uniqueLiterals.length) {
   for (const u of uniqueLiterals.slice(0, 5)) console.log(`                 ${u.length > 90 ? `${u.slice(0, 90)}...` : u}`);
   if (uniqueLiterals.length > 5) console.log(`                 ... and ${uniqueLiterals.length - 5} more`);
 }
+// Runtime fetches the markup audit cannot see: Web Worker chunks and the
+// static asset tree the 3D view loads. Reported, not failed: the page runs
+// without them (main-thread fallback, placeholder 3D figures).
+const distAssets = path.join(DIST, 'assets');
+const workerChunks = fs.existsSync(distAssets)
+  ? fs.readdirSync(distAssets).filter((f) => /worker.*\.js$/i.test(f)) : [];
+const assetDirs = fs.existsSync(distAssets)
+  ? fs.readdirSync(distAssets, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => `assets/${d.name}/`) : [];
+if (workerChunks.length || assetDirs.length) {
+  console.log('  not inlined  : fetched at runtime; the standalone page runs without them');
+  for (const w of workerChunks) console.log(`                 assets/${w} (Web Worker; bouts and batches fall back to the main thread)`);
+  if (assetDirs.length) {
+    console.log(`                 ${assetDirs.join(', ')} (3D view: body mesh, motion, textures, font; placeholders without them)`);
+  }
+}
 console.log('');
-console.log(`Open ${path.relative(ROOT, OUTPUT)} directly from disk - it needs no server and no network.`);
+console.log(`Open ${path.relative(ROOT, OUTPUT)} directly from disk for the creator, simulator, batch and 2D view.`);
+console.log('For the full 3D broadcast, serve dist/ instead (npm run preview).');

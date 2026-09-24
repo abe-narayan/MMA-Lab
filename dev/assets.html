@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Asset viewer: mocap, textures, HDRIs</title>
+  <title>Asset viewer: mocap, textures</title>
   <style>
     html, body { margin: 0; height: 100%; background: #0b0d11; color: #ddd; font: 12px/1.4 system-ui, sans-serif; overflow: hidden; }
     #view { position: absolute; inset: 0; }
@@ -26,7 +26,7 @@
   <div id="view"></div>
   <div id="panel">
     <h1>Asset viewer</h1>
-    <label>View <select id="viewSel"><option value="motion">mocap clip</option><option value="textures">textures × HDRI</option></select></label>
+    <label>View <select id="viewSel"><option value="motion">mocap clip</option><option value="textures">textures</option></select></label>
     <div id="motionUi">
       <label>Clip <select id="clip"></select></label>
       <label>Time <input id="time" type="range" min="0" max="1" step="0.001" value="0"><button id="play" type="button">▶</button></label>
@@ -38,7 +38,6 @@
       <canvas id="timeline" width="600" height="68"></canvas>
     </div>
     <div id="texUi" hidden>
-      <label>HDRI <select id="hdri"><option>arena</option><option>street</option><option>gym</option></select></label>
       <label>Exposure <input id="exposure" type="range" min="0.1" max="3" step="0.05" value="1"></label>
     </div>
     <div id="info"></div>

@@ -1,5 +1,5 @@
 name: Modelling question
-description: Challenge an assumption in src/engine/params.ts, or the reasoning behind one.
+description: Challenge a parameter in the src/sim/params registry, or the reasoning behind one.
 title: "[model] "
 labels:
   - modelling
@@ -9,10 +9,11 @@ body:
       value: |
         This is the most useful kind of issue this project can receive.
 
-        Every probability, coefficient and threshold in Bout Lab is a hand-chosen modelling
-        assumption. None of them is fitted to real fight data; most were chosen because they
-        produced a bout that looked plausible on screen. They all live in one file,
-        `src/engine/params.ts`, precisely so that they can be argued with one at a time.
+        Every probability, coefficient and threshold in Bout Lab is a modelling assumption.
+        They all live in one registry, `src/sim/params/` (one `*.params.ts` file per design
+        chapter), each with its unit and a provenance tag saying whether it is sourced
+        (`[S: ...]`), derived (`[D: ...]`) or simply estimated (`[E]`), precisely so that they
+        can be argued with one at a time.
 
         "This looks implausible on screen" is a legitimate argument here, and is honestly how
         most of the current values were arrived at. Just say so plainly rather than presenting
@@ -26,9 +27,9 @@ body:
     attributes:
       label: Which parameter
       description: >-
-        The field name in src/engine/params.ts, or the derivation constant in
-        src/engine/fighter.ts. One per issue where possible.
-      placeholder: "flushChance, or the 0.70 + 0.30 * techniqueIndex power gate"
+        The parameter id in src/sim/params/ (for example `p.strike.geom.jabReachAdd`), or the
+        derivation constant in src/sim/fighter/. One per issue where possible.
+      placeholder: "p.strike.geom.jabReachAdd"
     validations:
       required: true
 
@@ -36,7 +37,7 @@ body:
     id: current-value
     attributes:
       label: Its current value
-      placeholder: "0.05"
+      placeholder: "0.27 m"
     validations:
       required: true
 
@@ -45,7 +46,7 @@ body:
     attributes:
       label: What you think it should be
       description: A value or a range. "Lower, but I do not know by how much" is an acceptable answer - say that.
-      placeholder: "0.02, or 0.01 to 0.03"
+      placeholder: "0.22 m, or 0.18 to 0.25 m"
     validations:
       required: true
 
@@ -85,8 +86,10 @@ body:
       label: What you expect it to change
       description: >-
         Which outputs should move, and roughly how far. If you have run it, paste the before
-        and after win rates per format, one line each, from `N=200 npx tsx scripts/calibrate.ts`.
-        The shipped corpus gives 1v1 100.0%, 1v2 99.9%, 1v3 96.3%, 1v4 75.2%, 1v5 24.1%.
+        and after numbers from a calibration batch with the parameter overridden
+        (`npm run batch -- --plan ufc_population --n 200 --params overrides.json --out runs/x`,
+        then `npm run calibrate:report -- runs/x --baseline <reference run>`; see
+        docs/CALIBRATION.md). The current reference numbers are in docs/CALIBRATION.md.
       render: shell
 
   - type: textarea

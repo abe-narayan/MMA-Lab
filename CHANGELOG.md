@@ -7,14 +7,36 @@ and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 A note on what a version number means here: the numbers this project produces
-are downstream of hand-chosen constants in `src/engine/params.ts`, so any
-release that touches those constants changes the `paramsHash`, changes every
-recorded bout, and is a breaking change to the shipped corpus whatever the
-version number says.
+are downstream of the parameter registry in `src/sim/params/` (every constant
+with its unit and provenance tag), so any release that touches those constants
+or the tick loop changes results, which is marked by bumping
+`SIM_ENGINE_VERSION` (`src/sim/record/recorder.ts`) and regenerating the golden
+fixture (`tests/fixtures/sim-golden.json`). A v4 replay file records the engine
+version it was made with, and `verifyReplay` reports a mismatch rather than
+silently replaying under different rules.
+
+## [Unreleased]
+
+### Removed
+
+- **The legacy v3 stack.** `src/engine/` (the v3 engine), `src/render/` (its
+  three.js renderer), `src/ui/` (the Replay / Dashboard / Model tabs),
+  `src/replay/` (the v3 player) and `src/data/replays.ts` (the 1.98 MB
+  generated v3 corpus) were no longer imported by the app and are deleted, with
+  the scripts that only drove them (`generate`, `verify`, `consistency`,
+  `exportBout`, the v3 `calibrate`) and their tests (`determinism`, `engine`,
+  `analytics`). The RNG suite now tests `src/sim/rng` directly; the v3 demo
+  athletes live on as fixtures in `tests/fighter.test.ts` for the legacy
+  profile conversion. Determinism is guarded by the v4 golden corpus
+  (`npm run golden:check`, `tests/sim.golden.test.ts`), which CI runs.
+- **Unused static assets** (~31 MB): the Poly Haven HDRIs and every texture map
+  the runtime never loaded (see `docs/ASSETS.md`).
 
 ## [1.0.0] - 2026-09-22
 
-Initial public release.
+Initial public release. (This entry describes the v3 build; the paths it names
+under `src/engine/`, `src/render/`, `src/ui/`, `src/replay/` and `src/data/`, and
+the `public/replays/` corpus, were retired later: see [Unreleased].)
 
 ### Added
 

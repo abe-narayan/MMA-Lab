@@ -3,10 +3,10 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  // `public/replays/` holds the legacy v3 corpus, which is a repo artefact and
-  // must not ship. Runtime assets for the 3D broadcast (body meshes, textures,
-  // HDR environments, motion clips) live in `static/` instead and are served at
-  // the site root, e.g. `static/assets/body/base.bin` -> `/assets/body/base.bin`.
+  // Runtime assets for the 3D broadcast (body mesh, motion clips, textures,
+  // fonts) live in `static/` and are served at the site root, e.g.
+  // `static/assets/body/body.bin` -> `/assets/body/body.bin`. Everything in
+  // `static/` ships, so it holds only files the runtime loads (docs/ASSETS.md).
   publicDir: 'static',
   build: {
     target: 'es2022',

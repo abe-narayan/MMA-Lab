@@ -20,7 +20,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { RNG, Digest, xmur3 } from '../src/engine/rng';
+import { RNG, Digest, xmur3 } from '../src/sim/rng';
 
 const take = (r: RNG, n: number): number[] => Array.from({ length: n }, () => r.next());
 

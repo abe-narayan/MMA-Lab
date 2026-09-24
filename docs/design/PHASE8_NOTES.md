@@ -340,7 +340,7 @@ In-page A/B (alternating ABBA blocks, same frame): fence defocus on vs off on CA
 the rejected depth-writing fence +12 ms. The canvas additions (two fetches, ink/marks ALU) are inside the noise of
 the per-pass `output` timing. Net: within the 1 ms budget on the High main shot; nothing measurable got slower.
 
-**Unused static assets** (none deleted here). Now used: `textures/canvas/{normal,ao}.jpg`, `textures/vinyl/normal.jpg`,
+**Unused static assets** (none deleted here; all of the files listed below were removed in the final cleanup, see docs/ASSETS.md). Now used: `textures/canvas/{normal,ao}.jpg`, `textures/vinyl/normal.jpg`,
 `textures/asphalt/{color,normal,roughness}.jpg`. Still never loaded at runtime, removable (~29 MB):
 `hdri/*` (11 MB; used only by `dev/assets.ts` — the procedural environments stay, because the fill directions and the
 canvas bounce must match the set, see "Lighting design"), `textures/canvas/{color,roughness}.jpg` (4.6 MB),

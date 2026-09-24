@@ -4,6 +4,14 @@ Status: design (Phase 2 output). Binds Phases 3–9. Conventions: `docs/design/0
 sourced, `[D: …]` derived (arithmetic shown once), `[E]` estimate (all listed in §9.2). Existing engine facts are cited as
 `[S: AUDIT §n]`, `[S: CONTRACT]`, `[S: ENGINE_DECISION]` or by file path.
 
+> **Status note (final cleanup, 2026-09-24).** The v3 files this chapter cites as sources
+> (`src/engine/*`, `src/replay/player.ts`, `src/render/*`, `src/ui/*`, `src/data/replays.ts`,
+> `public/replays/`, `scripts/{generate,verify,exportBout,consistency,calibrate}.ts`) have all been
+> deleted; the `[S: src/engine/...]` tags point into git history. Parameters live in
+> `src/sim/params/`, the replay format is v4 (`src/sim/record/`), and determinism is guarded by the
+> golden corpus (`tests/fixtures/sim-golden.json`, `npm run golden:check`). What actually happened to
+> each v3 file is recorded under the §1.7 table.
+
 ## 0. Purpose and scope
 
 This section owns: the module layout of the rewrite (`src/sim`, `src/presentation`, `src/app`, `src/data`, `scripts`),
@@ -393,6 +401,19 @@ ruleset×arena pair listed in §3.3, asserts zero violations, and prints frames 
 | `scripts/generate.ts` | **replaced** by `scripts/batch/` | corpus generation is no longer a product feature. |
 | `scripts/verify.ts`, `scripts/exportBout.ts`, `scripts/inline.mjs` | **kept**, adapted to v4 and `src/sim` | single-file "lite" build stays `[S: ENGINE_DECISION §7]`. |
 | `scripts/consistency.ts`, `scripts/calibrate.ts` | **replaced** by `sweep-invariants.ts` and `scripts/calibrate/` | |
+
+**As built (final cleanup, 2026-09-24).** Every v3 file in the table is deleted. Where the plan
+differed: `scripts/verify.ts` and `scripts/exportBout.ts` were not ported; replay verification is
+`verifyReplay` in `src/sim/record/replay.ts` (used by the app to verify saved and imported
+replays) and the CI determinism check is the golden corpus (`tests/sim.golden.test.ts`,
+`npm run golden:check`, which also asserts recorded and unrecorded runs end on the same digest).
+`sweep-invariants.ts` was not written as a separate script; the I1–I8 sweep runs inside
+`tests/sim.core.test.ts`. `scripts/inline.mjs` is kept and produces a lite page (creator, simulator,
+batch, 2D view; the 3D view fetches `/assets/*` at runtime). The v4 transport lives in
+`src/app/replay/player.ts`, not `src/presentation/`. `tests/rng.test.ts` now imports `src/sim/rng`;
+the v3 `engine`, `determinism` and `analytics` suites were dropped, their intent covered by
+`tests/sim.core.test.ts` (determinism, replay verification, stats-vs-events, invariants) and the golden
+corpus.
 
 **How the 128 tests evolve** (36 rng + 35 engine + 25 determinism + 32 analytics `[S: tests/*.test.ts counts]`):
 

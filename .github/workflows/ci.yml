@@ -28,11 +28,9 @@ jobs:
         run: npx tsc --noEmit
       - name: Unit tests
         run: npm test
-      - name: Grappling-pair invariant sweep
-        run: npm run consistency
 
   determinism:
-    name: Corpus reproduces from the seed
+    name: Simulation reproduces the golden corpus
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,19 +39,23 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # The whole premise of this project is that a bout is a pure function of
-      # its seed. Regenerating the corpus must reproduce the committed bundle
-      # byte for byte; if it does not, either the engine changed without the
-      # bundle being regenerated, or the engine is not deterministic.
-      - name: Regenerate the corpus
-        run: npm run generate
-      - name: Committed bundle must be byte-identical
-        run: git diff --exit-code -- src/data/replays.ts
-      - name: Verify every stored replay reproduces its state stream
-        run: npm run verify
+      # A bout is a pure function of its config and seed. The committed fixture
+      # (tests/fixtures/sim-golden.json, ~40 bouts across every ruleset, mode,
+      # arena and extreme build) stores the digest, tick and RNG-draw counts and
+      # hashes of the result, events, stats and every recorded frame. Re-running
+      # them must reproduce every bit; if not, the sim changed without
+      # SIM_ENGINE_VERSION being bumped and the fixture regenerated, or it is
+      # not deterministic.
+      - name: Golden corpus reproduces bit for bit
+        run: npx vitest run tests/sim.golden.test.ts
+      # The same corpus through the CLI, which also asserts per bout that the
+      # recorded run (frames + snapshots) and the unrecorded hot path (what
+      # batches use) end on the identical digest.
+      - name: Recorded and unrecorded runs agree
+        run: npm run golden:check
 
   build:
-    name: Single-file build
+    name: Build (and the lite standalone page)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,8 +65,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      # Also audits the output: the page must not reference anything external.
-      - name: Inline into a single self-contained page
+      # Lite standalone page: scripts and CSS inlined, markup audited for
+      # external references. The 3D view's /assets/* and the Web Worker chunks
+      # stay outside it (see scripts/inline.mjs): opened from disk it runs the
+      # creator, simulator, batch (main thread) and 2D view.
+      - name: Inline into a single lite page
         run: node scripts/inline.mjs
       - uses: actions/upload-artifact@v4
         with:

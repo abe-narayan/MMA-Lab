@@ -1,9 +1,12 @@
 /**
  * Entry point. Mounts the app shell into #root.
  *
- * Nothing here talks to the network: the simulation, the fighter catalogue
- * and the renderer all ship inside the bundle, which is what lets the whole
- * thing run as one self-contained page.
+ * The simulation, the fighter catalogue and the UI ship inside the bundle and
+ * make no network requests. The 3D broadcast view is the exception: it fetches
+ * its body mesh, motion library, textures and broadcast font from `/assets/*`
+ * (`static/assets/`, see docs/ASSETS.md) at runtime, and falls back to
+ * placeholder figures if they cannot be loaded. Bouts and batches run in Web
+ * Workers (separate chunks), with a main-thread fallback.
  *
  * Stylesheets are imported here, in cascade order: the base reset and shared
  * classes, then the creator and match screens, and finally the design system

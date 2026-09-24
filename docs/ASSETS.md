@@ -178,93 +178,42 @@ frame is a transformed capture frame.
 
 ## Environments (HDRI)
 
-Retrieved 2026-09-23 from the Poly Haven public API (`https://api.polyhaven.com/files/<slug>`; files served from `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/`). Radiance `.hdr`, equirectangular; load with three r186 `HDRLoader` (`three/addons/loaders/HDRLoader.js`; `RGBELoader` still ships as a deprecated alias).
-
-### hdri.polyhaven.circus_arena
-- **What**: "Circus Arena" HDRI (1k + 2k), dark indoor arena with tiered seating and artificial show lighting: reflections/ambient for the cage and ring.
-- **Source**: https://polyhaven.com/a/circus_arena — https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/circus_arena_1k.hdr, https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/circus_arena_2k.hdr
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Circus Arena" by Oliksiy Yakovlyev, Poly Haven (CC0).*
-- **Files**: `static/assets/hdri/circus_arena_1k.hdr` (1581181 B), `static/assets/hdri/circus_arena_2k.hdr` (6189360 B)
-- **Modifications**: none; file names as served by Poly Haven.
-
-### hdri.polyhaven.cobblestone_street_night
-- **What**: "Cobblestone Street Night" HDRI (1k), urban night street under lamps: street-fight mode.
-- **Source**: https://polyhaven.com/a/cobblestone_street_night — https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/cobblestone_street_night_1k.hdr
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Cobblestone Street Night" by Greg Zaal, Jenelle van Heerden, Poly Haven (CC0).*
-- **Files**: `static/assets/hdri/cobblestone_street_night_1k.hdr` (1760191 B)
-- **Modifications**: none; file names as served by Poly Haven.
-
-### hdri.polyhaven.gym_01
-- **What**: "Gym 01" HDRI (1k), fluorescent-lit gym interior: training venue / neutral fill.
-- **Source**: https://polyhaven.com/a/gym_01 — https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/gym_01_1k.hdr
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Gym 01" by Sergej Majboroda, Poly Haven (CC0).*
-- **Files**: `static/assets/hdri/gym_01_1k.hdr` (1723805 B)
-- **Modifications**: none; file names as served by Poly Haven.
+None ship. The arena's image-based lighting is painted at runtime from the set's own geometry
+(`src/presentation/arena/environment.ts`; see `arena.procedural` below), and the texture view of
+`dev/assets.html` uses three's procedural `RoomEnvironment`. Three Poly Haven HDRIs (CC0:
+`circus_arena` 1k + 2k, `cobblestone_street_night` 1k, `gym_01` 1k; 11.3 MB) were downloaded on
+2026-09-23 but were only ever loaded by that dev page, and were removed in the final cleanup
+(2026-09-24). They remain in git history.
 
 ## Textures
 
-PBR sets retrieved 2026-09-23 from the Poly Haven public API (`https://api.polyhaven.com/files/<slug>`; files served from `https://dl.polyhaven.org/file/ph-assets/Textures/jpg/`). Maps: `color` = Poly Haven `Diffuse` (sRGB), `normal` = `nor_gl` (OpenGL convention, what three.js expects), `roughness` = `Rough`, `ao` = `AO`, `metalness` = `Metal` (all non-colour maps linear). 1k JPEG unless noted.
+PBR sets retrieved 2026-09-23 from the Poly Haven public API (`https://api.polyhaven.com/files/<slug>`; files served from `https://dl.polyhaven.org/file/ph-assets/Textures/jpg/`). Maps: `color` = Poly Haven `Diffuse` (sRGB), `normal` = `nor_gl` (OpenGL convention, what three.js expects), `roughness` = `Rough`, `ao` = `AO` (all non-colour maps linear). 1k JPEG unless noted.
+
+Only the maps the runtime loads ship (all loaded by `src/presentation/arena/assets.ts` on Medium
+quality and up, and listed in `src/presentation/assets/manifest.ts`). The other maps of these sets
+(`canvas/{color,roughness}`, `vinyl/{color,roughness,ao}`, `asphalt/ao`) and five whole sets that
+nothing loaded (`metal` = Metal Plate, `leather` = Leather White, `satin` = Crepe Satin, `concrete` =
+Concrete Floor 02, `rubber_mat` = Rubber Tiles; all CC0 Poly Haven) were removed in the final cleanup
+(2026-09-24, 19.7 MB); they remain in git history.
 
 ### tex.polyhaven.rough_linen
-- **What**: "Rough Linen" PBR texture set — mat canvas (heavy woven fabric); color and normal at 2k, roughness and ao at 1k.
+- **What**: "Rough Linen" PBR texture set — mat canvas (heavy woven fabric); normal at 2k, ao at 1k.
 - **Source**: https://polyhaven.com/a/rough_linen (file URLs from https://api.polyhaven.com/files/rough_linen, host dl.polyhaven.org)
 - **Licence id**: CC0-1.0
 - **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
 - **Attribution** (courtesy, not required): *"Rough Linen" by colormass, Rico Cilliers, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/canvas/ao.jpg` (1053808 B), `static/assets/textures/canvas/color.jpg` (3607181 B), `static/assets/textures/canvas/normal.jpg` (3849356 B), `static/assets/textures/canvas/roughness.jpg` (1083725 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
-- **Used at runtime** (arena lookdev pass, 2026-09-24): `normal.jpg` (weave normal) and `ao.jpg` (thread-gap cavity: albedo/roughness breakup of the octagon and ring canvas, same 0.45 m tiling), loaded by `src/presentation/arena/assets.ts` on Medium and up. `color.jpg` and `roughness.jpg` are not loaded.
+- **Files**: `static/assets/textures/canvas/ao.jpg` (1053808 B), `static/assets/textures/canvas/normal.jpg` (3849356 B)
+- **Modifications**: renamed (`<slug>_nor_gl_<res>.jpg` → `normal.jpg`, `_ao_` → `ao.jpg`); no pixel changes.
+- **Used at runtime**: `normal.jpg` (weave normal) and `ao.jpg` (thread-gap cavity: albedo/roughness breakup of the octagon and ring canvas, same 0.45 m tiling).
 
 ### tex.polyhaven.fabric_leather_02
-- **What**: "Fabric Leather 02" PBR texture set — synthetic leather / vinyl for corner pads, post padding, fence top pad.
+- **What**: "Fabric Leather 02" PBR texture set — its normal map gives the competition mats a fine grain.
 - **Source**: https://polyhaven.com/a/fabric_leather_02 (file URLs from https://api.polyhaven.com/files/fabric_leather_02, host dl.polyhaven.org)
 - **Licence id**: CC0-1.0
 - **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
 - **Attribution** (courtesy, not required): *"Fabric Leather 02" by Rob Tuytel, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/vinyl/ao.jpg` (357812 B), `static/assets/textures/vinyl/color.jpg` (663390 B), `static/assets/textures/vinyl/normal.jpg` (170918 B), `static/assets/textures/vinyl/roughness.jpg` (636469 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
-
-### tex.polyhaven.metal_plate
-- **What**: "Metal Plate" PBR texture set — painted/bare steel plate for truss, rails and cage posts (includes a metalness map).
-- **Source**: https://polyhaven.com/a/metal_plate (file URLs from https://api.polyhaven.com/files/metal_plate, host dl.polyhaven.org)
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Metal Plate" by Rob Tuytel, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/metal/ao.jpg` (565996 B), `static/assets/textures/metal/color.jpg` (692234 B), `static/assets/textures/metal/metalness.jpg` (884738 B), `static/assets/textures/metal/normal.jpg` (770307 B), `static/assets/textures/metal/roughness.jpg` (775206 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
-
-### tex.polyhaven.leather_white
-- **What**: "Leather White" PBR texture set — white leather for gloves (neutral albedo so it can be tinted to the corner colour).
-- **Source**: https://polyhaven.com/a/leather_white (file URLs from https://api.polyhaven.com/files/leather_white, host dl.polyhaven.org)
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Leather White" by Rob Tuytel, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/leather/ao.jpg` (875994 B), `static/assets/textures/leather/color.jpg` (728363 B), `static/assets/textures/leather/normal.jpg` (670610 B), `static/assets/textures/leather/roughness.jpg` (675426 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
-
-### tex.polyhaven.crepe_satin
-- **What**: "Crepe Satin" PBR texture set — satin fabric for fight shorts (closest CC0 satin/polyester).
-- **Source**: https://polyhaven.com/a/crepe_satin (file URLs from https://api.polyhaven.com/files/crepe_satin, host dl.polyhaven.org)
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Crepe Satin" by colormass, Rico Cilliers, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/satin/ao.jpg` (691228 B), `static/assets/textures/satin/color.jpg` (604348 B), `static/assets/textures/satin/normal.jpg` (696153 B), `static/assets/textures/satin/roughness.jpg` (824959 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
-
-### tex.polyhaven.concrete_floor_02
-- **What**: "Concrete Floor 02" PBR texture set — concrete floor: street mode and the arena floor outside the cage.
-- **Source**: https://polyhaven.com/a/concrete_floor_02 (file URLs from https://api.polyhaven.com/files/concrete_floor_02, host dl.polyhaven.org)
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Concrete Floor 02" by Rob Tuytel, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/concrete/ao.jpg` (376977 B), `static/assets/textures/concrete/color.jpg` (776097 B), `static/assets/textures/concrete/normal.jpg` (192757 B), `static/assets/textures/concrete/roughness.jpg` (318550 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
+- **Files**: `static/assets/textures/vinyl/normal.jpg` (170918 B)
+- **Modifications**: renamed (`<slug>_nor_gl_<res>.jpg` → `normal.jpg`); no pixel changes.
 
 ### tex.polyhaven.asphalt_02
 - **What**: "Asphalt 02" PBR texture set — asphalt road surface: street mode.
@@ -272,17 +221,8 @@ PBR sets retrieved 2026-09-23 from the Poly Haven public API (`https://api.polyh
 - **Licence id**: CC0-1.0
 - **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
 - **Attribution** (courtesy, not required): *"Asphalt 02" by Rob Tuytel, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/asphalt/ao.jpg` (533336 B), `static/assets/textures/asphalt/color.jpg` (731707 B), `static/assets/textures/asphalt/normal.jpg` (1240122 B), `static/assets/textures/asphalt/roughness.jpg` (544032 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
-
-### tex.polyhaven.rubber_tiles
-- **What**: "Rubber Tiles" PBR texture set — rubber gym floor tiles: training mat / grappling area.
-- **Source**: https://polyhaven.com/a/rubber_tiles (file URLs from https://api.polyhaven.com/files/rubber_tiles, host dl.polyhaven.org)
-- **Licence id**: CC0-1.0
-- **Licence**: > "Once the creator or a subsequent owner of a work applies CC0 to a work, the work is no longer his or hers in any meaningful sense under copyright law. Anyone can then use the work in any way and for any purpose, including commercial purposes [...]" — https://polyhaven.com/license (all Poly Haven assets are CC0; attribution "is appreciated" but not required).
-- **Attribution** (courtesy, not required): *"Rubber Tiles" by Amal Kumar, Poly Haven (CC0).*
-- **Files**: `static/assets/textures/rubber_mat/ao.jpg` (294901 B), `static/assets/textures/rubber_mat/color.jpg` (351085 B), `static/assets/textures/rubber_mat/normal.jpg` (477716 B), `static/assets/textures/rubber_mat/roughness.jpg` (590975 B)
-- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`, `_ao_` → `ao.jpg`, `_metal_` → `metalness.jpg`); no pixel changes.
+- **Files**: `static/assets/textures/asphalt/color.jpg` (731707 B), `static/assets/textures/asphalt/normal.jpg` (1240122 B), `static/assets/textures/asphalt/roughness.jpg` (544032 B)
+- **Modifications**: renamed (`<slug>_diff_<res>.jpg` → `color.jpg`, `_nor_gl_` → `normal.jpg`, `_rough_` → `roughness.jpg`); no pixel changes.
 
 No CC0 skin-detail normal map exists in the Poly Haven catalogue (no skin textures), so none is shipped.
 
@@ -323,13 +263,13 @@ No CC0 skin-detail normal map exists in the Poly Haven catalogue (no skin textur
   reproduced; the marks are deliberately silly project in-jokes.
 
 ### arena.uses — CC0 sets consumed by the arena (listed above under Textures)
-- `tex.polyhaven.rough_linen` — `static/assets/textures/canvas/normal.jpg`: canvas weave normal,
+- `tex.polyhaven.rough_linen` — `static/assets/textures/canvas/{normal,ao}.jpg`: canvas weave normal and thread-gap cavity,
   tiled every 0.45 m on the octagon and ring canvases.
 - `tex.polyhaven.fabric_leather_02` — `static/assets/textures/vinyl/normal.jpg`: fine grain on the
   competition mats, tiled every 0.6 m.
 - `tex.polyhaven.asphalt_02` — `static/assets/textures/asphalt/{color,normal,roughness}.jpg`: the
   street lot, 3 m tiles, darkened and overlaid with procedural paint, oil and damp patches.
-- The Poly Haven HDRIs are **not** used by the arena: its image-based lighting is painted from the
+- No HDRI is used (none ships): the arena's image-based lighting is painted from the
   set's own geometry (see docs/design/PHASE8_NOTES.md, "Arena").
 
 ### finish-and-corner — referee and cornermen outfits, chest patch (runtime-generated)

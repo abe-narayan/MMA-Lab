@@ -1,5 +1,13 @@
 # Module contract (frozen - do not change these signatures)
 
+> **Historical (v3).** This is the frozen inter-module contract the original v3 build was
+> written against (Phase 0 and earlier). The files it names under `src/engine/`, `src/render/`,
+> `src/ui/`, `src/replay/`, `src/workers/`, and the scripts `verify.ts` / `exportBout.ts`, were
+> retired in the final cleanup; they remain in git history. The current architecture is
+> described in `docs/design/09_ARCHITECTURE_MODES_CALIBRATION.md`: the simulation lives in
+> `src/sim/` (parameters in `src/sim/params/`, the v4 replay format in `src/sim/record/`), the
+> 3D presentation contract in `src/presentation/contract.ts`, and the app in `src/app/`.
+
 Four workstreams build against this contract in parallel. Stay inside the files
 assigned to you. Do not edit `src/engine/**` or `src/replay/**` - they are done.
 

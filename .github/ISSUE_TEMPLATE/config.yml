@@ -4,6 +4,6 @@
 # Note for whoever publishes this repo: GitHub requires contact_links entries to
 # carry absolute URLs, so they cannot be added until the repository URL is
 # known. Once it is, useful ones would be the README disclaimer section
-# (#read-this-before-you-read-anything-else), src/engine/params.ts,
+# (#read-this-before-you-read-anything-else), src/sim/params/,
 # CONTRIBUTING.md and .github/SECURITY.md.
 blank_issues_enabled: true

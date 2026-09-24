@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Deterministic, replayable MMA-style bout simulator with a 3D replay viewer. Toy model - not a real-world predictor.",
+  "description": "Deterministic, replayable MMA-style bout simulator with a 3D broadcast viewer. Toy model - not a real-world predictor.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -11,13 +11,9 @@
     "preview": "vite preview --port 4173",
     "test": "vitest run",
     "test:watch": "vitest",
-    "generate": "tsx scripts/generate.ts",
-    "export-bout": "tsx scripts/exportBout.ts",
-    "verify": "tsx scripts/verify.ts",
-    "consistency": "tsx scripts/consistency.ts",
-    "calibrate": "tsx scripts/calibrate.ts",
     "batch": "tsx scripts/batch/run.ts",
-    "calibrate:report": "tsx scripts/calibrate/report.ts"
+    "calibrate:report": "tsx scripts/calibrate/report.ts",
+    "golden:check": "tsx scripts/dev/sim-golden.ts --check tests/fixtures/sim-golden.json"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -41,14 +37,6 @@
   },
   "license": "MIT",
   "author": "Abe",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/USERNAME/bout-lab.git"
-  },
-  "bugs": {
-    "url": "https://github.com/USERNAME/bout-lab/issues"
-  },
-  "homepage": "https://github.com/USERNAME/bout-lab#readme",
   "keywords": [
     "simulation",
     "monte-carlo",

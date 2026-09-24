@@ -7,8 +7,8 @@
 ## Type of change
 
 - [ ] Documentation only
-- [ ] UI / renderer (no effect on any simulation result)
-- [ ] Engine or parameter change (**changes model behaviour** - fill in the section below)
+- [ ] UI / presentation (no effect on any simulation result)
+- [ ] Simulation or parameter change (**changes model behaviour** - fill in the section below)
 - [ ] Tests, scripts or tooling
 - [ ] Dependency change
 
@@ -16,21 +16,22 @@
 
 ## Does this change model behaviour?
 
-- [ ] **No.** No parameter, weight, action definition, referee heuristic, resolution
-      formula, tick-loop ordering or RNG draw was touched, and `npm run verify` passes
-      against the committed corpus unchanged.
-- [ ] **Yes.** Before/after win rates are below.
+- [ ] **No.** No parameter, weight, technique definition, referee heuristic, resolution
+      formula, tick-loop ordering or RNG draw was touched, and `npm run golden:check`
+      reproduces the committed golden corpus (`tests/fixtures/sim-golden.json`) unchanged.
+- [ ] **Yes.** `SIM_ENGINE_VERSION` (`src/sim/record/recorder.ts`) is bumped, the golden
+      fixture is regenerated (`npx tsx scripts/dev/sim-golden.ts --write
+      tests/fixtures/sim-golden.json`), and before/after calibration numbers are below.
 
-If yes, paste both tables. `N=200 npx tsx scripts/calibrate.ts` is the cheapest way to
-get them.
+If yes, run the same calibration batch before and after (same plan and seed, so the
+bouts are common random numbers) and paste the report's delta table:
 
-| format | A wins before | A wins after |
-| --- | --- | --- |
-| 1v1 |  |  |
-| 1v2 |  |  |
-| 1v3 |  |  |
-| 1v4 |  |  |
-| 1v5 |  |  |
+```sh
+npm run batch -- --plan ufc_population --n 200 --seed cal-2026-09 --out runs/after
+npm run calibrate:report -- runs/after --baseline runs/before
+```
+
+(docs/CALIBRATION.md, "How to run calibration", has the details and the governor.)
 
 **Why the numbers moved, in your own words:**
 
@@ -44,22 +45,22 @@ way.
 
 **New or changed constants** (all of them, with their old and new values):
 
-<!-- Every one of these belongs in src/engine/params.ts with a comment saying it is an
-     assumption. If a number is inline in the engine, this PR is not ready. -->
+<!-- Every one of these belongs in the src/sim/params registry with its unit and a
+     provenance tag ([S: ...], [D: ...] or [E]). If a number is inline in the sim, this PR
+     is not ready. -->
 
 ---
 
 ## Checks
 
-- [ ] `npm test` - all 128 tests pass
+- [ ] `npm test` - every test passes (they are all seeded; a failure is never flaky)
 - [ ] `npm run build` - typecheck (`tsc --noEmit`) is clean and the build succeeds
-- [ ] `npm run verify` - every stored replay and a fresh sample re-execute to matching
-      digests
-- [ ] `npm run consistency` - grappling-pair invariant sweep reports 0 violations
-- [ ] If the engine changed: `npm run generate` was re-run and the regenerated corpus
-      (including `src/data/replays.ts`) is committed in this PR
+- [ ] `npm run golden:check` - the golden corpus reproduces bit for bit, and each bout's
+      recorded and unrecorded runs end on the same digest
+- [ ] If the simulation changed on purpose: `SIM_ENGINE_VERSION` is bumped and the
+      regenerated `tests/fixtures/sim-golden.json` is committed in this PR
 - [ ] If the build changed: `npm run build:single` succeeds and `scripts/inline.mjs`
-      reports no surviving network reference
+      reports no surviving markup reference
 
 Paste anything interesting from the output:
 
@@ -72,23 +73,24 @@ Paste anything interesting from the output:
 
 Tick each one, or explain underneath why it does not apply.
 
-- [ ] Every new or changed constant lives in `src/engine/params.ts`, in the right group,
-      with a comment saying what it means, what unit it is in, and that it is an
-      assumption. Nothing numeric was typed inline into the engine.
-- [ ] No term gives either athlete an advantage that is not present in their profile.
+- [ ] Every new or changed constant lives in the `src/sim/params/` registry, in the right
+      chapter file, with its unit and a provenance tag. Nothing numeric was typed inline
+      into the sim.
+- [ ] No term gives any fighter an advantage that is not present in their definition.
       Nothing is keyed on fighter id, team, or which side someone is on.
-- [ ] The six-phase tick-loop ordering in `src/engine/engine.ts` is unchanged, or the
-      change to it is called out explicitly above and the corpus was regenerated.
-- [ ] No RNG draw was added, removed or reordered without regenerating the corpus.
-- [ ] The grappling engagement invariant still holds: one teardown path through
-      `clearEngagement`, `enterGround` frees both sides first, preconditions re-checked
-      on the resolution tick.
-- [ ] No gore, injury depiction or medical modelling was added, in the engine, the
-      renderer, the copy or an asset. Impacts remain abstract.
-- [ ] No runtime dependency was added that the single-file build cannot inline, and the
-      page still makes zero network requests.
-- [ ] The engine still has no DOM and no React, and imports nothing from `src/ui` or
-      `src/render`.
+- [ ] The tick-loop ordering in `src/sim/core/` is unchanged, or the change to it is
+      called out explicitly above and the golden fixture was regenerated.
+- [ ] No RNG draw was added, removed or reordered without bumping `SIM_ENGINE_VERSION`
+      and regenerating the golden fixture.
+- [ ] The engagement invariants (I1-I8, `tests/sim.core.test.ts`) still hold.
+- [ ] Blood and injury depiction stays behind the viewer's blood/injury setting (restrained
+      by default; docs/design/08_PRESENTATION.md), with no gore in the renderer, the copy or
+      an asset.
+- [ ] No runtime dependency was added, and nothing new is fetched from the network: the
+      only runtime fetches are the 3D view's own files under `/assets/*` (`static/assets/`,
+      each listed in `docs/ASSETS.md`).
+- [ ] `src/sim` still has no DOM, no React and no import from `src/app` or
+      `src/presentation`; the presentation never affects a result.
 - [ ] No existing disclaimer was removed or weakened, and nothing in this PR presents a
       model output as a prediction about the real world.
 

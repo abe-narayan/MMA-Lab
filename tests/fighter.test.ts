@@ -30,7 +30,6 @@
 import { describe, it, expect } from 'vitest';
 import { ParamRegistry, type ResolvedParams } from '../src/sim/params/registry';
 import { FIGHTER_PARAMS } from '../src/sim/params/fighter.params';
-import { ATHLETE_A, ATHLETE_B } from '../src/engine/fighter';
 import {
   ANIMATION_TAGS,
   ARCHETYPES,
@@ -53,6 +52,7 @@ import {
   weightClassFor,
   yearsToSkill,
   WEIGHT_CLASS_LIMIT_KG,
+  type AthleteProfile,
   type CoreDisciplineId,
   type FighterDefinition,
   type FighterRuntime,
@@ -109,6 +109,21 @@ function makeFighter(over: Partial<FighterDefinition> = {}): FighterDefinition {
     ...over,
   };
 }
+
+// The two demo athletes of the retired v3 engine (`src/engine/fighter.ts`,
+// removed in the final cleanup), kept verbatim so the legacy-conversion tests
+// (calibration hook C-15) still pin `fromLegacyProfile` to the documented
+// Athlete A / B.
+const ATHLETE_A: AthleteProfile = {
+  id: 'A', name: 'Athlete A', short: 'A', ageYears: 20, heightIn: 70, weightLb: 200,
+  benchLb: 280, squatLb: 365, deadliftLb: 405, taekwondoYears: 5, boxingYears: 3, grapplingYears: 0,
+  conditioning: 0.8, trainingDaysPerWeek: 7,
+};
+const ATHLETE_B: AthleteProfile = {
+  id: 'B', name: 'Athlete B', short: 'B', ageYears: 20, heightIn: 70, weightLb: 150,
+  benchLb: 100, squatLb: 150, deadliftLb: 200, taekwondoYears: 0, boxingYears: 0, grapplingYears: 0,
+  conditioning: 0.5, trainingDaysPerWeek: 0,
+};
 
 // --------------------------------------------------------------------------
 // 1. Tier derivation

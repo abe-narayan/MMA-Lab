@@ -7,25 +7,27 @@
  * frame is marked on the timeline and the striking end effector turns red at
  * contact; planted feet turn green.
  *
- * Texture view: every PBR set on a sphere and a tile under the chosen HDRI.
+ * Texture view: every shipped texture set on a sphere and a tile, lit by
+ * three's procedural RoomEnvironment (no HDRI files ship; see docs/ASSETS.md).
+ * A set shows only the maps that ship for it (e.g. canvas: normal + ao).
  *
  * URL parameters
  *   ?clip=punch.jab.orthodox&t=0.4   clip and a fixed time (seconds; pauses)
  *   ?t=contact | start | end | hold  jump to a marker
  *   ?cam=side|iso|front|back|top|other-side  ?mirror=1  ?inplace=1  ?onion=1  ?play=1  ?speed=0.25
  *   ?sheet=punch.jab.orthodox,punch.cross.orthodox,...   a grid of clips at their contact frames
- *   ?view=textures&hdri=arena|street|gym&exposure=1
+ *   ?view=textures&exposure=1
  *   ?panel=0   hide the side panel (for screenshots)
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import {
   B, BONES, BONE_PARENT, createPose, createWorldPose, defaultRest, forwardKinematics,
   type Pose, type WorldPose,
 } from '../src/presentation/rig/skeleton';
 import { loadMotionLibrary, type MotionClipInfo, type MotionLibrary } from '../src/presentation/assets/motionLibrary';
-import { ASSETS, type HdriName, type TextureName } from '../src/presentation/assets/manifest';
+import { ASSETS, type TextureName } from '../src/presentation/assets/manifest';
 
 const params = new URLSearchParams(location.search);
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -399,26 +401,18 @@ const labels: { el: HTMLElement; pos: THREE.Vector3 }[] = [];
 async function textureView(): Promise<void> {
   $('motionUi').hidden = true;
   $('texUi').hidden = false;
-  const hdriName = (params.get('hdri') ?? 'arena') as HdriName;
-  ($('hdri') as HTMLSelectElement).value = hdriName;
-  $('hdri').addEventListener('change', (e) => { params.set('hdri', (e.target as HTMLSelectElement).value); location.search = params.toString(); });
   const exposure = Number(params.get('exposure') ?? '1');
   renderer.toneMappingExposure = exposure;
   ($('exposure') as HTMLInputElement).value = String(exposure);
   $('exposure').addEventListener('input', (e) => { renderer.toneMappingExposure = Number((e.target as HTMLInputElement).value); });
 
-  const h = ASSETS.hdri[hdriName];
-  const hdr = await new HDRLoader().loadAsync(h.url2k && params.get('res') === '2k' ? h.url2k : h.url1k);
-  hdr.mapping = THREE.EquirectangularReflectionMapping;
   const pmrem = new THREE.PMREMGenerator(renderer);
-  const env = pmrem.fromEquirectangular(hdr).texture;
-  scene.environment = env;
-  scene.background = hdr;
-  scene.backgroundBlurriness = 0.25;
-  scene.backgroundIntensity = 0.6;
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.background = new THREE.Color(0x202226);
 
   const loader = new THREE.TextureLoader();
-  const load = (url: string, srgb: boolean) => {
+  const load = (url: string | undefined, srgb: boolean): THREE.Texture | null => {
+    if (!url) return null;
     const t = loader.load(url);
     t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
     t.wrapS = t.wrapT = THREE.RepeatWrapping;
@@ -426,13 +420,11 @@ async function textureView(): Promise<void> {
     return t;
   };
   const names = Object.keys(ASSETS.textures) as TextureName[];
-  const tint: Partial<Record<TextureName, number>> = { leather: 0xc21d1d, satin: 0x1d3fc2 };
   names.forEach((name, k) => {
     const s = ASSETS.textures[name];
     const mat = new THREE.MeshStandardMaterial({
-      map: load(s.color, true), normalMap: load(s.normal, false), roughnessMap: load(s.roughness, false),
-      aoMap: load(s.ao, false), color: tint[name] ?? 0xffffff,
-      metalness: s.metalness ? 1 : 0, metalnessMap: s.metalness ? load(s.metalness, false) : null,
+      map: load(s.maps.color, true), normalMap: load(s.maps.normal, false), roughnessMap: load(s.maps.roughness, false),
+      aoMap: load(s.maps.ao, false), color: 0xffffff, roughness: s.maps.roughness ? 1 : 0.8, metalness: 0,
     });
     const col = k % 4, row = Math.floor(k / 4);
     const x = (col - 1.5) * 1.35, z = (row - 0.5) * -1.6;
@@ -445,12 +437,12 @@ async function textureView(): Promise<void> {
     scene.add(tile);
     const label = document.createElement('div');
     label.className = 'tex-label';
-    label.textContent = `${name} — ${s.id.replace('tex.polyhaven.', '')}`;
+    label.textContent = `${name} — ${s.id.replace('tex.polyhaven.', '')} (${Object.keys(s.maps).join(', ')})`;
     document.body.appendChild(label);
     labels.push({ el: label, pos: new THREE.Vector3(x, 1.55, z) });
   });
-  $('title').textContent = `HDRI: ${h.id.replace('hdri.polyhaven.', '')}`;
-  $('info').textContent = `${h.role}\n${h.url1k}`;
+  $('title').textContent = 'Shipped texture sets';
+  $('info').textContent = 'Lit by the procedural RoomEnvironment; each set shows only the maps that ship.';
   camera.position.set(0, 2.6, 7.4);
   controls.target.set(0, 0.7, -0.35);
   const loop = () => {

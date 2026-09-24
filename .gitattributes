@@ -4,6 +4,6 @@
 *.gz  binary
 *.zip binary
 
-# Written by scripts/generate.ts - excluded from language stats and collapsed
-# in diffs, but committed because the bundle needs it.
-src/data/replays.ts linguist-generated=true
+# Generated fixture (scripts/dev/sim-golden.ts --write): excluded from language
+# stats and collapsed in diffs.
+tests/fixtures/sim-golden.json linguist-generated=true
