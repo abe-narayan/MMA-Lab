@@ -207,7 +207,19 @@ export class OpponentModel {
     const i = context * OPP_FAMILY_COUNT + oppFamilyIndex(family);
     this.counts[i] += weight;
     this.recent[i] += weight;
+    if (Number.isInteger(context) && this.touched[context] === 0) {
+      this.touched[context] = 1;
+      this.touchedList.push(context);
+    }
   }
+
+  /**
+   * Perf: contexts that have ever been noted. Every other context's counts,
+   * `recent` and `older` are exactly +0 and stay +0 under decay (0 * k = 0,
+   * 0 * ko + 0 * (1 - kr) = 0), so `decay` only walks these.
+   */
+  private readonly touched = new Uint8Array(CONTEXT_COUNT);
+  private readonly touchedList: number[] = [];
 
   /** Record what *we* did, so the caller can build the next context. */
   noteFromAction(context: number, family: ActionFamily, weight = 1): void {
@@ -218,13 +230,26 @@ export class OpponentModel {
   decay(dtS: number): void {
     if (!this.active || dtS <= 0) return;
     const k = Math.exp(-dtS / this.tauMemS);
-    for (let i = 0; i < this.counts.length; i++) this.counts[i] *= k;
     // The KL windows use their own, faster horizons: 30 s recent, 60 s prior.
     const kr = Math.exp(-dtS / 30);
     const ko = Math.exp(-dtS / 60);
-    for (let i = 0; i < this.recent.length; i++) {
-      this.older[i] = this.older[i] * ko + this.recent[i] * (1 - kr);
-      this.recent[i] *= kr;
+    if (!(Number.isFinite(k) && Number.isFinite(kr) && Number.isFinite(ko))) {
+      // Never reached with the policy's fixed dt; kept exact for any caller.
+      for (let i = 0; i < this.counts.length; i++) this.counts[i] *= k;
+      for (let i = 0; i < this.recent.length; i++) {
+        this.older[i] = this.older[i] * ko + this.recent[i] * (1 - kr);
+        this.recent[i] *= kr;
+      }
+      return;
+    }
+    const list = this.touchedList;
+    for (let c = 0; c < list.length; c++) {
+      const base = list[c] * OPP_FAMILY_COUNT;
+      for (let i = base; i < base + OPP_FAMILY_COUNT; i++) {
+        this.counts[i] *= k;
+        this.older[i] = this.older[i] * ko + this.recent[i] * (1 - kr);
+        this.recent[i] *= kr;
+      }
     }
   }
 
@@ -352,6 +377,22 @@ export const PACE_PRIOR_S = 8;
 export class ExchangeLedger {
   private entries: LedgerEntry[] = [];
   private nowS = 0;
+  /**
+   * Perf: the times of the window's strike *attempts* (the entries
+   * `paceEstimate` counts), oldest first, from `strikeHead` on. Entries are
+   * appended in non-decreasing time, so the count since any instant is a scan
+   * back from the end instead of a pass over every entry.
+   */
+  private strikeTs: number[] = [];
+  private strikeHead = 0;
+  /**
+   * Perf: how many window entries there are of each kind (`total`) and of
+   * each (kind, family) pair, kept in step with `entries` by `note` and the
+   * eviction in `advance`. `countKind` reads these integers instead of
+   * scanning the window; the counts are exact, so every rate is unchanged.
+   */
+  private readonly kindTotal = new Map<LedgerEventKind, number>();
+  private readonly kindFamily = new Map<LedgerEventKind, Map<ActionFamily | null, number>>();
 
   /** Per-round totals survive the window, for the corner and the judges' view. */
   readonly round = {
@@ -375,12 +416,34 @@ export class ExchangeLedger {
     if (this.entries.length > 0 && this.entries[0].tS < cutoff) {
       let i = 0;
       while (i < this.entries.length && this.entries[i].tS < cutoff) i++;
-      this.entries = this.entries.slice(i);
+      for (let k = 0; k < i; k++) this.tally(this.entries[k], -1);
+      this.entries.splice(0, i);
     }
+    const ts = this.strikeTs;
+    let h = this.strikeHead;
+    while (h < ts.length && ts[h] < cutoff) h++;
+    if (h > 256 && h * 2 > ts.length) {
+      ts.splice(0, h);
+      h = 0;
+    }
+    this.strikeHead = h;
+  }
+
+  private tally(e: LedgerEntry, d: 1 | -1): void {
+    this.kindTotal.set(e.kind, (this.kindTotal.get(e.kind) ?? 0) + d);
+    let byFamily = this.kindFamily.get(e.kind);
+    if (byFamily === undefined) {
+      byFamily = new Map();
+      this.kindFamily.set(e.kind, byFamily);
+    }
+    byFamily.set(e.family, (byFamily.get(e.family) ?? 0) + d);
   }
 
   note(kind: LedgerEventKind, family: ActionFamily | null = null): void {
-    this.entries.push({ tS: this.nowS, kind, family });
+    const entry: LedgerEntry = { tS: this.nowS, kind, family };
+    this.entries.push(entry);
+    this.tally(entry, 1);
+    if (kind === 'attempt' && family !== null && STRIKE_FAMILIES.has(family)) this.strikeTs.push(this.nowS);
     switch (kind) {
       case 'attempt': this.round.attempts += 1; break;
       case 'landed': this.round.landed += 1; break;
@@ -405,13 +468,8 @@ export class ExchangeLedger {
   }
 
   private countKind(kind: LedgerEventKind, family?: ActionFamily): number {
-    let n = 0;
-    for (const e of this.entries) {
-      if (e.kind !== kind) continue;
-      if (family !== undefined && e.family !== family) continue;
-      n++;
-    }
-    return n;
+    if (family === undefined) return this.kindTotal.get(kind) ?? 0;
+    return this.kindFamily.get(kind)?.get(family) ?? 0;
   }
 
   /**
@@ -452,6 +510,42 @@ export class ExchangeLedger {
 
   /** The family with the best hit rate over the window, for `adj.drop_family`. */
   bestFamily(minAttempts = 3): ActionFamily | null {
+    // Perf: from the running counts. Only a tie for the best rate needs the
+    // window's first-appearance order, which the scan below supplies.
+    // (A threshold below one would admit families seen only as landings; the
+    // scan handles that case exactly.)
+    if (!(minAttempts >= 1)) return this.bestFamilyScan(minAttempts);
+    const att = this.kindFamily.get('attempt');
+    if (att === undefined) return null;
+    const landed = this.kindFamily.get('landed');
+    let best: ActionFamily | null = null;
+    let bestRate = -1;
+    let ties = 0;
+    for (const [family, a] of att) {
+      if (family === null || a < minAttempts) continue;
+      const rate = (landed?.get(family) ?? 0) / a;
+      if (rate > bestRate) {
+        bestRate = rate;
+        best = family;
+        ties = 1;
+      } else if (rate === bestRate) ties++;
+    }
+    if (ties <= 1) return best;
+    // A tie: the scan's Map iterates families in order of first appearance in
+    // the window, so the winner is whichever tied family appears first.
+    const tied = new Set<ActionFamily>();
+    for (const [family, a] of att) {
+      if (family === null || a < minAttempts) continue;
+      if ((landed?.get(family) ?? 0) / a === bestRate) tied.add(family);
+    }
+    for (const e of this.entries) {
+      if (e.family === null || (e.kind !== 'attempt' && e.kind !== 'landed')) continue;
+      if (tied.has(e.family)) return e.family;
+    }
+    return this.bestFamilyScan(minAttempts);
+  }
+
+  private bestFamilyScan(minAttempts: number): ActionFamily | null {
     const byFamily = new Map<ActionFamily, { a: number; l: number }>();
     for (const e of this.entries) {
       if (e.family === null) continue;
@@ -499,11 +593,8 @@ export class ExchangeLedger {
     const span = Math.max(0, Math.min(PACE_WINDOW_S, spanS));
     const since = this.nowS - span;
     let n = 0;
-    for (const e of this.entries) {
-      if (e.kind !== 'attempt' || e.tS < since) continue;
-      if (e.family === null || !STRIKE_FAMILIES.has(e.family)) continue;
-      n++;
-    }
+    const ts = this.strikeTs;
+    for (let i = ts.length - 1; i >= this.strikeHead && ts[i] >= since; i--) n++;
     return (n * 60 + targetPerMin * PACE_PRIOR_S) / (span + PACE_PRIOR_S);
   }
 

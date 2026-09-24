@@ -832,14 +832,19 @@ export function rankDefences(
   candidates: readonly DefenceSpec[],
   spec: TechniqueSpec,
 ): readonly DefenceSpec[] {
-  return [...candidates].sort((a, b) => {
-    const score = (d: DefenceSpec): number =>
-      defenceSuccessFor(d, spec) * (1 + d.counter.bonus);
-    const diff = score(b) - score(a);
+  // Perf: each defence's score is computed once rather than inside every
+  // comparison. The comparator sees the same numbers in the same order, so
+  // the sort produces the same permutation.
+  const rows = candidates.map((d) => ({ d, s: defenceSuccessFor(d, spec) * (1 + d.counter.bonus) }));
+  rows.sort((ra, rb) => {
+    const a = ra.d;
+    const b = rb.d;
+    const diff = rb.s - ra.s;
     // Ties break by id — plain code-unit order, never localeCompare, whose ICU
     // collation can differ between machines (audit C2).
     return diff !== 0 ? diff : (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   });
+  return rows.map((r) => r.d);
 }
 
 /** 01 §2.7.6 `counterOnReadP`: the chance a read becomes a counter, not a defence. */

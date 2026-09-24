@@ -38,6 +38,30 @@ export interface Arena {
 const FT = 0.3048;
 
 /**
+ * Perf: the edge-plane angles of an n-gon and their sines and cosines,
+ * computed once per `n` with exactly the expressions the geometry below used
+ * to evaluate per call (`Math.sin` of the same double is the same double), so
+ * every result is unchanged.
+ */
+interface PolygonTable { ang: Float64Array; sin: Float64Array; cos: Float64Array }
+const POLYGON_TABLES = new Map<number, PolygonTable>();
+function polygonTable(n: number): PolygonTable {
+  let t = POLYGON_TABLES.get(n);
+  if (t !== undefined) return t;
+  const phase = Math.PI / n;
+  const m = Math.max(0, Math.ceil(n)) || 0;
+  t = { ang: new Float64Array(m), sin: new Float64Array(m), cos: new Float64Array(m) };
+  for (let k = 0; k < n; k++) {
+    const ang = phase + (2 * Math.PI * k) / n;
+    t.ang[k] = ang;
+    t.sin[k] = Math.sin(ang);
+    t.cos[k] = Math.cos(ang);
+  }
+  POLYGON_TABLES.set(n, t);
+  return t;
+}
+
+/**
  * Distance from a point to the nearest wall, metres. Infinity when unbounded.
  * Used by chapter 07 (cage proximity, cutting off) and chapter 03 (cage nodes).
  */
@@ -56,11 +80,10 @@ export function distanceToWall(arena: Arena, x: number, z: number): number {
       const a = arena.apothemM ?? 0;
       // Distance to the nearest of n edge planes, each at distance `a` from the
       // centre with outward normal at angle (2*pi*k/n + phase).
-      const phase = Math.PI / n;
+      const tab = polygonTable(n);
       let best = Infinity;
       for (let k = 0; k < n; k++) {
-        const ang = phase + (2 * Math.PI * k) / n;
-        const d = a - (x * Math.sin(ang) + z * Math.cos(ang));
+        const d = a - (x * tab.sin[k] + z * tab.cos[k]);
         if (d < best) best = d;
       }
       return Math.max(0, best);
@@ -80,15 +103,14 @@ export function wallNormalAngle(arena: Arena, x: number, z: number): number {
   }
   const n = arena.sides ?? 8;
   const a = arena.apothemM ?? 0;
-  const phase = Math.PI / n;
+  const tab = polygonTable(n);
   let best = Infinity;
   let bestAng = 0;
   for (let k = 0; k < n; k++) {
-    const ang = phase + (2 * Math.PI * k) / n;
-    const d = a - (x * Math.sin(ang) + z * Math.cos(ang));
+    const d = a - (x * tab.sin[k] + z * tab.cos[k]);
     if (d < best) {
       best = d;
-      bestAng = ang;
+      bestAng = tab.ang[k];
     }
   }
   return bestAng;
@@ -115,15 +137,14 @@ export function clampToArena(
   // convex polygon and keep the operation deterministic.
   const n = arena.sides ?? 8;
   const a = (arena.apothemM ?? 0) - margin;
-  const phase = Math.PI / n;
+  const tab = polygonTable(n);
   let cx = x;
   let cz = z;
   let hit = false;
   for (let pass = 0; pass < 2; pass++) {
     for (let k = 0; k < n; k++) {
-      const ang = phase + (2 * Math.PI * k) / n;
-      const sx = Math.sin(ang);
-      const sz = Math.cos(ang);
+      const sx = tab.sin[k];
+      const sz = tab.cos[k];
       const over = cx * sx + cz * sz - a;
       if (over > 0) {
         cx -= sx * over;

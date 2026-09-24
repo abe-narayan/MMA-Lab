@@ -240,15 +240,51 @@ export class EnergyState {
     return clamp(sum / this.t.n('fat.intensityRef'), 0, 1);
   }
 
+  // Perf: `f` is read dozens of times per fighter per tick but only changes
+  // when a pool or the posture does, so the last value is memoised against
+  // exactly the inputs it is a pure function of (compared with `Object.is`, so
+  // a signed zero or a NaN is never mistaken for a hit). The tuning behind
+  // `t.n` is immutable for the life of the bout.
+  private fMemoGrapple = false;
+  private fMemoPcr = Number.NaN;
+  private fMemoLac = Number.NaN;
+  private fMemoAer = Number.NaN;
+  private fMemo = 0;
+  private capsMemoF = Number.NaN;
+  private capsMemo: FatigueCaps | null = null;
+
   /** §2.5.3. The number every other section reads. */
   get f(): number {
-    const t = this.t;
     const grapple = isGrapplePosture(this.ctx.posture);
+    if (grapple === this.fMemoGrapple && Object.is(this.pcr, this.fMemoPcr)
+      && Object.is(this.lac, this.fMemoLac) && Object.is(this.aer, this.fMemoAer)) {
+      return this.fMemo;
+    }
+    const t = this.t;
     const wP = grapple ? t.n('fat.f.w.grapple.pcr') : t.n('fat.f.w.pcr');
     const wL = grapple ? t.n('fat.f.w.grapple.lac') : t.n('fat.f.w.lac');
     const wA = grapple ? t.n('fat.f.w.grapple.aer') : t.n('fat.f.w.aer');
     const lacTerm = clamp((this.lac - t.n('fat.f.lacStart')) / t.n('fat.f.lacSpan'), 0, 1);
-    return clamp(wP * (1 - this.pcr / 100) + wL * lacTerm + wA * this.aer, 0, 1);
+    const f = clamp(wP * (1 - this.pcr / 100) + wL * lacTerm + wA * this.aer, 0, 1);
+    this.fMemoGrapple = grapple;
+    this.fMemoPcr = this.pcr;
+    this.fMemoLac = this.lac;
+    this.fMemoAer = this.aer;
+    this.fMemo = f;
+    return f;
+  }
+
+  /**
+   * `fatigueCaps(t, this.f)`, memoised on `f`. The returned object is shared:
+   * callers read it and must not write to it.
+   */
+  get caps(): Readonly<FatigueCaps> {
+    const f = this.f;
+    if (this.capsMemo === null || !Object.is(f, this.capsMemoF)) {
+      this.capsMemo = fatigueCaps(this.t, f);
+      this.capsMemoF = f;
+    }
+    return this.capsMemo;
   }
 
   /** §2.5.7. The dump is a property of the fighter and the occasion. */
@@ -280,7 +316,7 @@ export class EnergyState {
    */
   get paceBudget(): number {
     const t = this.t;
-    let budget = fatigueCaps(t, this.f).output;
+    let budget = this.caps.output;
     if (this.dumpActive) {
       const d = this.dump;
       budget *= this.ctx.roundTimeS < t.n('fat.dump.rushS')
@@ -294,7 +330,7 @@ export class EnergyState {
   /** Decision-quality multiplier from the energy side only (§2.5.5, §2.5.7). */
   get decisionMult(): number {
     const t = this.t;
-    let d = fatigueCaps(t, this.f).decision;
+    let d = this.caps.decision;
     if (this.dumpActive) d *= 1 - t.n('fat.dump.decisionMult') * this.dump;
     if (this.secondWindActive) d *= 1 + t.n('fat.secondWind.bonus');
     return Math.max(0, d);
@@ -311,16 +347,34 @@ export class EnergyState {
     const bodyMult = 1 + t.n('fat.bodyCostSlope') * clamp(this.ctx.bodyStructural, 0, 100);
     const bodyShotMult = this.nowS < this.bodyShotUntilS ? t.n('fat.bodyShot.costMult') : 1;
     const dumpMult = this.dumpActive ? 1 + t.n('fat.dump.costMult') * this.dump : 1;
-    const weightMult = Math.pow(p.massKg / t.n('dmg.massRef'), t.n('fat.weightCostExp'));
+    // Perf: a `Math.pow` of the fighter's mass on every charge; memoised on
+    // the one input that can change it.
+    if (!Object.is(p.massKg, this.weightMultMass)) {
+      this.weightMult = Math.pow(p.massKg / t.n('dmg.massRef'), t.n('fat.weightCostExp'));
+      this.weightMultMass = p.massKg;
+    }
+    const weightMult = this.weightMult;
     return Math.max(0, skillMult) * bodyMult * bodyShotMult * dumpMult * weightMult;
   }
+
+  private weightMultMass = Number.NaN;
+  private weightMult = 1;
+  private altMemoAltitude = Number.NaN;
+  private altMemoAcclim = false;
+  private altMemo = 1;
 
   private get altLacMult(): number {
     const t = this.t;
     const p = this.profile;
-    return 1 + t.n('fat.alt.lacPerKm')
+    // Perf: memoised on the profile fields it reads (the tuning is immutable).
+    if (Object.is(p.altitudeM, this.altMemoAltitude) && p.acclimatised === this.altMemoAcclim) return this.altMemo;
+    const v = 1 + t.n('fat.alt.lacPerKm')
       * Math.max(0, p.altitudeM - t.n('fat.alt.baseM')) / 1000
       * (p.acclimatised ? t.n('fat.alt.acclimMult') : 1);
+    this.altMemoAltitude = p.altitudeM;
+    this.altMemoAcclim = p.acclimatised;
+    this.altMemo = v;
+    return v;
   }
 
   /** Charge a cost in pool units and mmol/L, with all §2.5.1 modifiers. */

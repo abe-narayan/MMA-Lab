@@ -218,9 +218,12 @@ export function isSelectable(ruleset: SubRulesetId, subId: string): boolean {
 export function isLegalUnderRuleset(ruleset: Ruleset, subId: string): boolean {
   if (!ruleset.submissions.allowed) return false;
   const spec = submission(subId);
-  const legal = new Set<SubmissionClass>(ruleset.submissions.legal);
-  if (!legal.has(spec.legalityClass)) return false;
-  for (const cls of spec.secondaryClasses ?? []) if (!legal.has(cls)) return false;
+  // Perf: a short list, read directly (`includes` is SameValueZero, as a Set);
+  // this runs for every offered submission on every ground tick.
+  const legal: readonly SubmissionClass[] = ruleset.submissions.legal;
+  if (!legal.includes(spec.legalityClass)) return false;
+  const secondary = spec.secondaryClasses;
+  if (secondary) for (const cls of secondary) if (!legal.includes(cls)) return false;
   // Flying and standing entries additionally need standing locks permitted.
   if (spec.role === 'standing' && !ruleset.submissions.standingLocksAllowed) return false;
   return true;

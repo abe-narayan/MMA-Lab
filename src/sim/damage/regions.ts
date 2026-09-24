@@ -60,9 +60,19 @@ export const S = {
 
 export type DamageStateBase = (typeof S)[keyof typeof S];
 
+const SIDE_IDS = new Map<string, { left: string; right: string }>();
+
 /** `state.dead_arm` + 'left' -> `state.dead_arm.left`. */
 export function sideId(base: string, side: Side): string {
-  return `${base}.${side}`;
+  // Perf: the state checks ask for the same few sided ids every tick, and a
+  // freshly concatenated string has to be flattened and hashed before a Map
+  // lookup; the memo hands back the same interned string instead.
+  let pair = SIDE_IDS.get(base);
+  if (pair === undefined) {
+    pair = { left: `${base}.left`, right: `${base}.right` };
+    SIDE_IDS.set(base, pair);
+  }
+  return side === 'left' ? pair.left : side === 'right' ? pair.right : `${base}.${side}`;
 }
 
 /** `state.dead_arm.left` -> `state.dead_arm`. */

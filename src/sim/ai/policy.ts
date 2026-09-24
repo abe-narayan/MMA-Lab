@@ -53,7 +53,7 @@ import {
   type BehaviourWeights, type TierBehaviour,
 } from './behaviour';
 import {
-  decisionTier, effectiveTau, familyShares, scoreAction, softmaxSelect, tauForTier,
+  ConsiderationScorer, decisionTier, effectiveTau, familyShares, softmaxSelect, tauForTier,
   type MassCap,
   type ConsiderationInputs, type WeightBundle,
 } from './utility';
@@ -365,7 +365,9 @@ export class MmaPolicy implements DecisionPolicy {
    * was stopped.
    */
   static drawsPerDecide(world: World): number {
-    return world.live().length > 2 ? DRAWS_PER_DECIDE_MULTI : DRAWS_PER_DECIDE;
+    let live = 0;
+    for (const f of world.fighters) if (!f.out) live++;
+    return live > 2 ? DRAWS_PER_DECIDE_MULTI : DRAWS_PER_DECIDE;
   }
 
   /** What `decide()` itself takes: the budget less the loop's commit jitter. */
@@ -652,9 +654,10 @@ export class MmaPolicy implements DecisionPolicy {
     );
 
     const scores = new Array<number>(candidates.length);
+    const scorer = new ConsiderationScorer(inputs);
     for (let i = 0; i < candidates.length; i++) {
       const c = candidates[i];
-      scores[i] = scoreAction(c, inputs, this.weightsFor(st, self, opp, c)).score;
+      scores[i] = scorer.score(c, this.weightsFor(st, self, opp, c));
     }
 
     const pick = softmaxSelect(
@@ -985,13 +988,16 @@ export class MmaPolicy implements DecisionPolicy {
     });
     st.adjustments = expireAdjustments(st.adjustments, world.tick);
 
-    const signals = this.signals(st, self, world, cues);
     const triggers = this.triggers(st, self, cues);
     if (!evaluationDue(st.intent.effectiveIqTier, nowS - st.lastEvalS, triggers)) return;
     st.lastEvalS = nowS;
 
     if (uEval >= pChange(st.intent.effectiveIqTier, rt.def.mental.adaptability)) return;
 
+    // Perf: `signals` is pure (it reads the ledger, the opponent model and the
+    // runtime and writes nothing), so it is built only on the rare tick an
+    // evaluation actually goes ahead rather than on every tick.
+    const signals = this.signals(st, self, world, cues);
     const rows = candidateAdjustments(signals, st.intent.effectiveIqTier, st.plan);
     if (rows.length === 0) return;
     const dwellS = minDwellS(st.intent.effectiveIqTier);
@@ -1436,18 +1442,22 @@ export class MmaPolicy implements DecisionPolicy {
     // they sit under the same `ai.utility.clamp` as every other multiplier
     // rather than being a parallel, unbounded channel.
     adapt *= st.tierWeights?.weights.get(c.family) ?? 1;
-    return {
-      style: st.style[c.family] ?? 1,
-      // F-3: the authored preference for *this id*. The plan can only speak in
-      // families, and a guillotine specialist differs from an armbar
-      // specialist only by id.
-      pref: preferenceWeight(st.prefs, c.id, c.family),
-      plan: planWeight(st.plan, c.family),
-      adapt,
-      matchup: this.matchupWeight(self, opp, c.family),
-      multi: st.targetChoice.weight,
-    };
+    // Perf: one scratch bundle, filled per candidate and read at once by
+    // `scoreValue`; nothing keeps a reference to it.
+    const w = this.weightScratch;
+    w.style = st.style[c.family] ?? 1;
+    // F-3: the authored preference for *this id*. The plan can only speak in
+    // families, and a guillotine specialist differs from an armbar
+    // specialist only by id.
+    w.pref = preferenceWeight(st.prefs, c.id, c.family);
+    w.plan = planWeight(st.plan, c.family);
+    w.adapt = adapt;
+    w.matchup = this.matchupWeight(self, opp, c.family);
+    w.multi = st.targetChoice.weight;
+    return w;
   }
+
+  private readonly weightScratch: WeightBundle = { style: 1, pref: 1, plan: 1, adapt: 1, matchup: 1, multi: 1 };
 
   /**
    * `w_matchup`: the live-geometry terms that cannot sit in the plan because

@@ -122,7 +122,9 @@ export class BoutLoop {
     // Every fighter consumes the same number of draws whether or not they are
     // free to act, so the stream position after P3 depends only on how many
     // fighters are live - never on what they chose.
-    const multi = w.live().length > 2;
+    let liveCount = 0;
+    for (const f of w.fighters) if (!f.out) liveCount++;
+    const multi = liveCount > 2;
     const drawsPerFighter = multi ? DRAWS_PER_DECIDE_MULTI : DRAWS_PER_DECIDE;
     for (const f of w.fighters) {
       if (f.out) continue;

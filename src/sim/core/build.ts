@@ -307,9 +307,11 @@ class BoutWorld implements World {
   ) {}
 
   liveTeams(): number[] {
-    const teams = new Set<number>();
-    for (const f of this.fighters) if (!f.out) teams.add(f.team);
-    return [...teams].sort((a, b) => a - b);
+    // Perf: read every tick by the referee phase; a handful of fighters, so a
+    // linear `includes` (SameValueZero, as a Set) beats building a Set.
+    const teams: number[] = [];
+    for (const f of this.fighters) if (!f.out && !teams.includes(f.team)) teams.push(f.team);
+    return teams.sort((a, b) => a - b);
   }
 
   live(): FighterWorldState[] {
@@ -323,8 +325,10 @@ class BoutWorld implements World {
   nearestOpponent(f: FighterWorldState): FighterWorldState | null {
     let best: FighterWorldState | null = null;
     let bestD = Infinity;
-    // Ascending id, so an exact tie always resolves the same way.
-    for (const o of this.opponentsOf(f)) {
+    // Ascending id, so an exact tie always resolves the same way. (The
+    // `opponentsOf` filter, inlined: this runs several times a tick.)
+    for (const o of this.fighters) {
+      if (o.out || o.id === f.id || o.team === f.team) continue;
       const d = distanceBetween(f, o);
       if (d < bestD - 1e-12) {
         best = o;

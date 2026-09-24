@@ -187,7 +187,19 @@ export function bandReachable(spec: TechniqueSpec, band: RangeBand): boolean {
 }
 
 export function rangeFit(spec: TechniqueSpec, d: number, profile: ReachProfile, skill = 50): RangeFit {
-  const band = bandFor(d, profile);
+  return rangeFitIn(spec, d, profile, skill, bandFor(d, profile), null);
+}
+
+/**
+ * `rangeFit` with the fighter's band (`bandFor(d, profile)`) and, optionally,
+ * `bandLimits(profile)` already worked out — both depend only on the distance
+ * and the profile, so a caller scoring the whole catalogue at one distance
+ * computes them once (perf; the result is identical).
+ */
+export function rangeFitIn(
+  spec: TechniqueSpec, d: number, profile: ReachProfile, skill: number,
+  band: RangeBand, limits: BandLimits | null,
+): RangeFit {
   const home = spec.band;
   const comfort = (1 - clamp01(skill / 100)) * RANGE_FIT.comfortK;
   const bandsOut = bandDistance(band, home);
@@ -197,7 +209,7 @@ export function rangeFit(spec: TechniqueSpec, d: number, profile: ReachProfile, 
 
   if (bandsOut === 0) {
     // Inside the home band: only the outer 10 cm costs anything.
-    const l = bandLimits(profile);
+    const l = limits ?? bandLimits(profile);
     const upper = bandUpperEdge(band, l);
     const atEdge = Number.isFinite(upper) && upper - d < RANGE_FIT.edgeBandM;
     if (atEdge) {
@@ -228,8 +240,12 @@ function isKickish(family: TechniqueFamily): boolean {
   return family === 'lowKick' || family === 'bodyKick' || family === 'headKick' || family === 'teep';
 }
 
+// Perf: `BAND_ORDER.indexOf`, as a lookup (first index wins, -1 when absent).
+const BAND_INDEX = new Map<RangeBand, number>();
+BAND_ORDER.forEach((b, i) => { if (!BAND_INDEX.has(b)) BAND_INDEX.set(b, i); });
+
 function bandIndex(band: RangeBand): number {
-  return BAND_ORDER.indexOf(band);
+  return BAND_INDEX.get(band) ?? -1;
 }
 
 /** Smallest number of bands between `band` and any of the technique's home bands. */

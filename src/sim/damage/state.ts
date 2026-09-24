@@ -33,10 +33,10 @@ import {
   isBrowZone, isHeadSite, isLegSite, legAcuteMult, legDecayConfig, legKickPower, legKickRate,
   legLoad, legMobility, legCheckSpeed, legSeverity, legStructuralMult, legSubPool, legTdd,
   massScaleTarget, multiplyScalar, neutralCaps, newRegionSet, rearHandPower, recoveryHalfLifeMult,
-  S, shinPenalty, sideId, stateCaps, visionCaps, visionFor,
+  S, SIDES, shinPenalty, sideId, stateCaps, visionCaps, visionFor,
   type CapabilityMultipliers, type Cut, type Joint, type RegionPool, type RegionSet, type Side,
 } from './regions';
-import { EnergyState, fatigueCaps, type BreakOptions, type TechClass } from './fatigue';
+import { EnergyState, type BreakOptions, type TechClass } from './fatigue';
 import type { FighterDamageProfile } from './profile';
 import {
   ABSORBED_WINDOW_S, emptyObservables, INTELLIGENT_DEFENCE_WINDOW_S, KNOCKDOWN_WINDOW_S,
@@ -403,7 +403,7 @@ export class DamageState {
     if (imp.region === 'head' && (imp.defence === 'block_forearm' || imp.defence === 'block_glove')) {
       const toArm = t.n('dmg.blockToArmFraction') * front.absorb * front.raw;
       // 02 does not say which arm blocked, so the load is split evenly.
-      for (const s of ['left', 'right'] as Side[]) {
+      for (const s of SIDES) {
         this.regions.arm[s].addStructural(toArm / 2, t.n('dmg.arm.pFrac'), nowS);
       }
     }
@@ -828,7 +828,7 @@ export class DamageState {
     const head = headDecayConfig(t, rm * fatigueStretch);
     this.regions.head.decay(this.nowS, dtS, head);
     this.regions.body.decay(this.nowS, dtS, bodyDecayConfig(t, rm));
-    for (const side of ['left', 'right'] as Side[]) {
+    for (const side of SIDES) {
       this.regions.leg[side].acute.decay(this.nowS, dtS, legDecayConfig(t, rm));
       this.regions.arm[side].decay(this.nowS, dtS, armDecayConfig(t, rm));
     }
@@ -882,7 +882,7 @@ export class DamageState {
     }
 
     // ---- swelling / eye ---------------------------------------------------
-    for (const side of ['left', 'right'] as Side[]) {
+    for (const side of SIDES) {
       if (this.regions.swell[side] >= t.n('dmg.swell.shutAt')) {
         this.enter(S.eyeSwollenShut, side, Number.POSITIVE_INFINITY, 1);
         this.doctorRequested = true;
@@ -907,7 +907,7 @@ export class DamageState {
     }
 
     // ---- legs -------------------------------------------------------------
-    for (const side of ['left', 'right'] as Side[]) {
+    for (const side of SIDES) {
       const leg = this.regions.leg[side];
       const sev = legSeverity(t, legLoad(t, leg), leg.acute.acute);
       if (sev >= 4) {
@@ -923,7 +923,7 @@ export class DamageState {
     }
 
     // ---- arms -------------------------------------------------------------
-    for (const side of ['left', 'right'] as Side[]) {
+    for (const side of SIDES) {
       const arm = this.regions.arm[side];
       if (arm.structural >= t.n('dmg.arm.deadArmThr')) {
         const existing = this.active.get(sideId(S.deadArm, side));
@@ -995,7 +995,7 @@ export class DamageState {
     // Structural: the recoverable part only (§2.3).
     this.regions.head.breakRecover(t.n('dmg.head.breakRecovery'), breakSeconds);
     this.regions.body.breakRecover(t.n('dmg.body.breakRecovery'), breakSeconds);
-    for (const side of ['left', 'right'] as Side[]) {
+    for (const side of SIDES) {
       const leg = this.regions.leg[side];
       for (const pool of [leg.thigh, leg.calf, leg.shin, leg.knee]) {
         pool.breakRecover(t.n('dmg.leg.breakRecovery'), breakSeconds);
@@ -1075,7 +1075,14 @@ export class DamageState {
     // Vision: swelling compounded with brow/eyelid cuts, per side.
     const vL = visionFor(t, this.regions.swell.left, this.cuts, 'left');
     const vR = visionFor(t, this.regions.swell.right, this.cuts, 'right');
-    multiplyScalar(caps, visionCaps(t, (vL + vR) / 2));
+    {
+      // `multiplyScalar(caps, visionCaps(t, avg))`, inlined (no row object).
+      const avg = (vL + vR) / 2;
+      const df = t.n('dmg.vision.defence.floor');
+      const af = t.n('dmg.vision.accuracy.floor');
+      caps.defence *= df + (1 - df) * avg;
+      caps.accuracy *= af + (1 - af) * avg;
+    }
 
     // Legs: the §2.3.3 curves, per side, then the combined movement multiplier.
     const loads: Record<Side, number> = {
@@ -1088,7 +1095,7 @@ export class DamageState {
     };
     caps.movement *= combinedMovement(t, mob.left, mob.right);
     caps.tdd *= Math.min(legTdd(t, loads.left), legTdd(t, loads.right));
-    for (const side of ['left', 'right'] as Side[]) {
+    for (const side of SIDES) {
       caps.kickPower[side] *= legKickPower(t, loads[side]);
       caps.checkSpeed[side] *= legCheckSpeed(t, loads[side]);
       caps.kickRate[side] *= legKickRate(t, this.severityOf(S.legCompromised, side));
@@ -1128,7 +1135,7 @@ export class DamageState {
 
     // Fatigue (§2.5.5) composes multiplicatively with all of the above.
     const fc = this.energy;
-    const fcaps = fatigueCaps(t, fc.f);
+    const fcaps = fc.caps;
     caps.power *= fcaps.powerLinear;
     caps.powerRotational *= fcaps.powerRotational;
     caps.speed *= fcaps.speed;
@@ -1327,7 +1334,7 @@ export class DamageState {
     if (this.has(S.bodyWorn)) bits |= STATE_BITS.bodyWorn;
     if (this.has(S.winded)) bits |= STATE_BITS.winded;
     if (this.has(S.bodyCollapse)) bits |= STATE_BITS.bodyCollapse;
-    for (const side of ['left', 'right'] as Side[]) {
+    for (const side of SIDES) {
       if (this.has(S.deadLeg, side)) bits |= STATE_BITS.deadLeg;
       if (this.has(S.legCompromised, side)) bits |= STATE_BITS.legCompromised;
       if (this.has(S.legCollapse, side)) bits |= STATE_BITS.legCollapse;

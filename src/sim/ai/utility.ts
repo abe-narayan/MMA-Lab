@@ -370,6 +370,310 @@ export function scoreAction<T extends ScorableAction>(
 }
 
 // ---------------------------------------------------------------------------
+// Perf: the same score without the per-id dispatch (the policy's hot path)
+// ---------------------------------------------------------------------------
+
+const FL_MOVEMENT = 1 << 0;
+const FL_ADVANCING = 1 << 1;
+const FL_RETREATING = 1 << 2;
+const FL_REST = 1 << 3;
+const FL_SHOT = 1 << 4;
+const FL_KICK = 1 << 5;
+const FL_STRIKE = 1 << 6;
+const FL_PRESSURE = 1 << 7;
+const FL_FINISH = 1 << 8;
+const FL_DEFENSIVE = 1 << 9;
+const FL_EXIT = 1 << 10;
+const FL_COUNTER = 1 << 11;
+const FL_LEAD = 1 << 12;
+const FL_BALANCE = 1 << 13;
+
+const FAMILY_FLAGS = new Map<string, number>();
+
+/** Every family-set membership `considerationValue` asks about, as one bitmask. */
+function familyFlags(family: ActionFamily): number {
+  let v = FAMILY_FLAGS.get(family);
+  if (v !== undefined) return v;
+  v = (MOVEMENT_FAMILIES.has(family) ? FL_MOVEMENT : 0)
+    | (ADVANCING_FAMILIES.has(family) ? FL_ADVANCING : 0)
+    | (RETREATING_FAMILIES.has(family) ? FL_RETREATING : 0)
+    | (REST_FAMILIES.has(family) ? FL_REST : 0)
+    | (SHOT_FAMILIES.has(family) ? FL_SHOT : 0)
+    | (KICK_FAMILIES.has(family) ? FL_KICK : 0)
+    | (STRIKE_FAMILIES.has(family) ? FL_STRIKE : 0)
+    | (PRESSURE_FAMILIES.has(family) ? FL_PRESSURE : 0)
+    | (FINISH_FAMILIES.has(family) ? FL_FINISH : 0)
+    | (DEFENSIVE_FAMILIES.has(family) ? FL_DEFENSIVE : 0)
+    | (EXIT_FAMILIES.has(family) ? FL_EXIT : 0)
+    | (COUNTER_FAMILIES.has(family) ? FL_COUNTER : 0)
+    | (LEAD_FAMILIES.has(family) ? FL_LEAD : 0)
+    | (BALANCE_FAMILIES.has(family) ? FL_BALANCE : 0);
+  FAMILY_FLAGS.set(family, v);
+  return v;
+}
+
+/** `compensate(c, CONSIDERATION_COUNT)` with the constant factor hoisted. */
+const COMP_MOD = 1 - 1 / Math.sqrt(Math.max(1, CONSIDERATION_COUNT));
+function comp(c: number): number {
+  const v = clamp01(c);
+  return v + (1 - v) * COMP_MOD * v;
+}
+
+/**
+ * `scoreAction(a, x, w).score`, bit for bit, without the breakdown.
+ *
+ * The nineteen curves are the ones in `considerationValue`, inlined in
+ * `CONSIDERATION_IDS` order so the running product multiplies the same
+ * compensated factors in the same order (floating-point products are not
+ * associative, so the order is part of the result). Family-set lookups are
+ * one memoised bitmask per family. `tests/sim.golden.test.ts` checks the two
+ * against each other.
+ */
+export function scoreValue(a: ScorableAction, x: ConsiderationInputs, w: WeightBundle): number {
+  const fl = familyFlags(a.family);
+  let product = 1;
+  let c: number;
+  // c.range_fit
+  if (fl & FL_MOVEMENT) c = 1;
+  else {
+    const e = clamp(a.rangeError, 0, 1.5);
+    c = clamp01(1 - e * e);
+  }
+  product *= comp(c);
+  // c.range_target
+  if (!(fl & FL_MOVEMENT)) c = 1;
+  else {
+    const gap = Math.abs(x.distanceM - x.intentRangeM);
+    const tooFar = x.distanceM > x.intentRangeM;
+    const wants = fl & FL_ADVANCING ? tooFar : fl & FL_RETREATING ? !tooFar : null;
+    const alignment = wants === null ? 0.5 : wants ? 1 : 0.25;
+    c = clamp01(0.3 + 0.7 * alignment * clamp01(gap / 0.8));
+  }
+  product *= comp(c);
+  // c.own_fatigue
+  {
+    const f = clamp01(x.ownFatigue);
+    c = fl & FL_REST ? clamp01(0.3 + 0.7 * f)
+      : fl & FL_SHOT ? clamp01(1 - 0.7 * f)
+        : fl & FL_KICK ? clamp01(1 - 0.6 * f)
+          : fl & FL_STRIKE ? clamp01(1 - 0.45 * f)
+            : clamp01(1 - 0.3 * f);
+  }
+  product *= comp(c);
+  // c.opp_fatigue
+  c = fl & FL_PRESSURE ? clamp01(0.6 + 0.4 * clamp01(x.oppFatigue)) : 1;
+  product *= comp(c);
+  // c.own_damage
+  c = clamp01(1 - clamp01(a.ownRegionDamage));
+  product *= comp(c);
+  // c.opp_hurt
+  c = x.oppHurt === 0 ? 0.8
+    : fl & FL_FINISH ? 1
+      : fl & FL_DEFENSIVE ? clamp01(0.8 * (1 - 0.3))
+        : 0.8;
+  product *= comp(c);
+  // c.cage
+  {
+    const own = clamp01(x.ownCageDistM / 1.5);
+    const opp = clamp01(x.oppCageDistM / 1.5);
+    c = fl & FL_EXIT ? clamp01(0.35 + 0.65 * (1 - own))
+      : fl & FL_PRESSURE ? clamp01(0.35 + 0.65 * (1 - opp))
+        : clamp01(0.5 + 0.5 * own);
+  }
+  product *= comp(c);
+  // c.round_time
+  if (!(clamp01(x.roundTimeLeftFrac) <= 0.2)) c = 0.75;
+  else if (!(fl & (FL_FINISH | FL_STRIKE))) c = 0.7;
+  else c = x.behind ? 1 : 0.85;
+  product *= comp(c);
+  // c.setup
+  c = fl & FL_SHOT && x.setupRecent === 0 ? 0.4 : 1;
+  product *= comp(c);
+  // c.expected_threat
+  {
+    const t = clamp01(x.expectedThreat);
+    c = fl & FL_COUNTER ? clamp01((0.5 + t) / 1.5)
+      : fl & FL_LEAD ? clamp01((1.2 - 0.4 * t) / 1.2)
+        : 1;
+  }
+  product *= comp(c);
+  // c.opp_recovery
+  c = x.oppInRecovery === 1 && fl & FL_COUNTER ? 1 : 1 / 1.8;
+  product *= comp(c);
+  // c.balance
+  c = fl & FL_BALANCE ? clamp01(x.balance) : 1;
+  product *= comp(c);
+  // c.position_value
+  c = clamp01(a.positionValue);
+  product *= comp(c);
+  // c.risk
+  c = clamp01(1 - Math.max(0, a.risk - (0.5 + 0.25 * clamp(x.riskAppetite, -2, 2))));
+  product *= comp(c);
+  // c.mustnot
+  c = mustNotCurve(a.isMustNot, x.effectiveIqTier);
+  product *= comp(c);
+  // c.pace (applied outside the product; reported as 1)
+  product *= comp(1);
+  // c.dwell
+  c = !x.dwellExceeded ? 1 : fl & FL_EXIT ? 1 : 0.5;
+  product *= comp(c);
+  // c.shield
+  c = a.shield > 0 ? 1 : 0.85;
+  product *= comp(c);
+  // c.lookahead
+  c = clamp01(0.5 + 0.5 * x.lookahead);
+  product *= comp(c);
+
+  const weightProduct = clamp(
+    w.style * preferenceFactor(w.pref) * w.plan * w.adapt * w.matchup,
+    WEIGHT_CLAMP_MIN,
+    WEIGHT_CLAMP_MAX,
+  );
+  return Math.max(0, a.base) * product * weightProduct * Math.max(0, w.multi);
+}
+
+const COMP_ONE = comp(1);
+const COMP_SHIELD_OFF = comp(0.85);
+
+/**
+ * `scoreValue` for every candidate of one decision, sharing the work that does
+ * not depend on the candidate.
+ *
+ * Thirteen of the nineteen factors are functions of the family and the tick's
+ * `ConsiderationInputs` only, so each family's compensated factors are
+ * computed once per decision (with exactly `scoreValue`'s expressions) and the
+ * per-candidate loop multiplies the same values into the product in the same
+ * `CONSIDERATION_IDS` order. Build one per decision: it caches against the
+ * `x` it was built with, which must not change while it is in use.
+ */
+export class ConsiderationScorer {
+  // Plain arrays, not Float64Array: a typed array this size gets an off-heap
+  // backing store, and one per family per decision is a lot of those.
+  private readonly tables = new Map<ActionFamily, number[]>();
+  /** `comp(mustNotCurve(true, x.effectiveIqTier))`; `false` is `comp(1)`. */
+  private readonly mustNotComp: number;
+  /** The `0.5 + 0.25 * clamp(riskAppetite)` term of `c.risk`. */
+  private readonly riskShift: number;
+
+  constructor(private readonly x: ConsiderationInputs) {
+    this.mustNotComp = comp(mustNotCurve(true, x.effectiveIqTier));
+    this.riskShift = 0.5 + 0.25 * clamp(x.riskAppetite, -2, 2);
+  }
+
+  private table(family: ActionFamily, fl: number): number[] {
+    let t = this.tables.get(family);
+    if (t !== undefined) return t;
+    const x = this.x;
+    t = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+    let c: number;
+    // [1] c.range_target
+    if (!(fl & FL_MOVEMENT)) c = 1;
+    else {
+      const gap = Math.abs(x.distanceM - x.intentRangeM);
+      const tooFar = x.distanceM > x.intentRangeM;
+      const wants = fl & FL_ADVANCING ? tooFar : fl & FL_RETREATING ? !tooFar : null;
+      const alignment = wants === null ? 0.5 : wants ? 1 : 0.25;
+      c = clamp01(0.3 + 0.7 * alignment * clamp01(gap / 0.8));
+    }
+    t[1] = comp(c);
+    // [2] c.own_fatigue
+    {
+      const f = clamp01(x.ownFatigue);
+      c = fl & FL_REST ? clamp01(0.3 + 0.7 * f)
+        : fl & FL_SHOT ? clamp01(1 - 0.7 * f)
+          : fl & FL_KICK ? clamp01(1 - 0.6 * f)
+            : fl & FL_STRIKE ? clamp01(1 - 0.45 * f)
+              : clamp01(1 - 0.3 * f);
+    }
+    t[2] = comp(c);
+    // [3] c.opp_fatigue
+    t[3] = comp(fl & FL_PRESSURE ? clamp01(0.6 + 0.4 * clamp01(x.oppFatigue)) : 1);
+    // [5] c.opp_hurt
+    t[5] = comp(x.oppHurt === 0 ? 0.8
+      : fl & FL_FINISH ? 1
+        : fl & FL_DEFENSIVE ? clamp01(0.8 * (1 - 0.3))
+          : 0.8);
+    // [6] c.cage
+    {
+      const own = clamp01(x.ownCageDistM / 1.5);
+      const opp = clamp01(x.oppCageDistM / 1.5);
+      t[6] = comp(fl & FL_EXIT ? clamp01(0.35 + 0.65 * (1 - own))
+        : fl & FL_PRESSURE ? clamp01(0.35 + 0.65 * (1 - opp))
+          : clamp01(0.5 + 0.5 * own));
+    }
+    // [7] c.round_time
+    if (!(clamp01(x.roundTimeLeftFrac) <= 0.2)) c = 0.75;
+    else if (!(fl & (FL_FINISH | FL_STRIKE))) c = 0.7;
+    else c = x.behind ? 1 : 0.85;
+    t[7] = comp(c);
+    // [8] c.setup
+    t[8] = comp(fl & FL_SHOT && x.setupRecent === 0 ? 0.4 : 1);
+    // [9] c.expected_threat
+    {
+      const th = clamp01(x.expectedThreat);
+      t[9] = comp(fl & FL_COUNTER ? clamp01((0.5 + th) / 1.5)
+        : fl & FL_LEAD ? clamp01((1.2 - 0.4 * th) / 1.2)
+          : 1);
+    }
+    // [10] c.opp_recovery
+    t[10] = comp(x.oppInRecovery === 1 && fl & FL_COUNTER ? 1 : 1 / 1.8);
+    // [11] c.balance
+    t[11] = comp(fl & FL_BALANCE ? clamp01(x.balance) : 1);
+    // [15] c.pace
+    t[15] = COMP_ONE;
+    // [16] c.dwell
+    t[16] = comp(!x.dwellExceeded ? 1 : fl & FL_EXIT ? 1 : 0.5);
+    // [18] c.lookahead
+    t[18] = comp(clamp01(0.5 + 0.5 * x.lookahead));
+    this.tables.set(family, t);
+    return t;
+  }
+
+  /** `scoreAction(a, x, w).score`, bit for bit. */
+  score(a: ScorableAction, w: WeightBundle): number {
+    const fl = familyFlags(a.family);
+    const t = this.table(a.family, fl);
+    let product = 1;
+    // [0] c.range_fit
+    if (fl & FL_MOVEMENT) product *= COMP_ONE;
+    else {
+      const e = clamp(a.rangeError, 0, 1.5);
+      product *= comp(clamp01(1 - e * e));
+    }
+    product *= t[1];
+    product *= t[2];
+    product *= t[3];
+    // [4] c.own_damage
+    product *= comp(clamp01(1 - clamp01(a.ownRegionDamage)));
+    product *= t[5];
+    product *= t[6];
+    product *= t[7];
+    product *= t[8];
+    product *= t[9];
+    product *= t[10];
+    product *= t[11];
+    // [12] c.position_value
+    product *= comp(clamp01(a.positionValue));
+    // [13] c.risk
+    product *= comp(clamp01(1 - Math.max(0, a.risk - this.riskShift)));
+    // [14] c.mustnot
+    product *= a.isMustNot ? this.mustNotComp : COMP_ONE;
+    product *= t[15];
+    product *= t[16];
+    // [17] c.shield
+    product *= a.shield > 0 ? COMP_ONE : COMP_SHIELD_OFF;
+    product *= t[18];
+
+    const weightProduct = clamp(
+      w.style * preferenceFactor(w.pref) * w.plan * w.adapt * w.matchup,
+      WEIGHT_CLAMP_MIN,
+      WEIGHT_CLAMP_MAX,
+    );
+    return Math.max(0, a.base) * product * weightProduct * Math.max(0, w.multi);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // §2.2.4 — softmax with tier temperature
 // ---------------------------------------------------------------------------
 
@@ -385,9 +689,14 @@ export function scoreAction<T extends ScorableAction>(
  * what the priors were written for.
  */
 export function familyShares(families: readonly string[]): number[] {
+  // A fresh Map per call on purpose: a long-lived one cleared per call keeps
+  // handing its new backing tables to the old generation (measured: it tripled
+  // promoted bytes).
   const count = new Map<string, number>();
   for (const f of families) count.set(f, (count.get(f) ?? 0) + 1);
-  return families.map((f) => 1 / (count.get(f) ?? 1));
+  const out = new Array<number>(families.length);
+  for (let i = 0; i < families.length; i++) out[i] = 1 / (count.get(families[i]) ?? 1);
+  return out;
 }
 
 /** `ai.temp.tier`: T0 near-lottery, T5 close to argmax without reaching it. */

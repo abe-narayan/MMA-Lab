@@ -22,7 +22,7 @@ import {
   TECHNIQUES, hasTechnique, technique, techniqueLegal, type StrikingRulesetFlags, type TechniqueSpec,
   type GloveType as StrikeGloveType,
 } from '../striking/catalogue';
-import { bandFor, rangeFit, reachProfile, MOVEMENTS, type ReachProfile } from '../striking/range';
+import { bandFor, bandLimits, rangeFitIn, reachProfile, MOVEMENTS, type ReachProfile } from '../striking/range';
 import { feintsForTier, type FeintSpec } from '../striking/combos';
 import { edgesFrom, hasPositionNode, positionNode, roleFor, type GrapplingEdge } from '../grappling/graph';
 import { BOTTOM_GNP, gnpProfile } from '../grappling/gnp';
@@ -259,15 +259,17 @@ function mk(
   partial: Omit<Candidate, 'base' | 'risk' | 'ownRegionDamage' | 'positionValue' | 'isMustNot' | 'shield'>
   & Partial<Pick<Candidate, 'base' | 'risk' | 'positionValue'>>,
 ): Candidate {
-  return {
-    ...partial,
-    base: partial.base ?? basePrior(partial.family),
-    risk: partial.risk ?? riskClass(partial.family),
-    ownRegionDamage: regionDamage(ctx, partial.family, partial.spec),
-    positionValue: partial.positionValue ?? ctx.positionValue,
-    isMustNot: isMustNot(partial.family, ctx.mustNots, partial.spec),
-    shield: partial.family === 'clinchEntry' ? ctx.shield : 0,
-  };
+  // Perf: every caller passes a fresh object literal, so the missing fields
+  // are filled in on it rather than spread into a second copy. The resulting
+  // object has the same keys, values and key order as `{ ...partial, ... }`.
+  const c = partial as Candidate;
+  c.base = partial.base ?? basePrior(partial.family);
+  c.risk = partial.risk ?? riskClass(partial.family);
+  c.ownRegionDamage = regionDamage(ctx, partial.family, partial.spec);
+  c.positionValue = partial.positionValue ?? ctx.positionValue;
+  c.isMustNot = isMustNot(partial.family, ctx.mustNots, partial.spec);
+  c.shield = partial.family === 'clinchEntry' ? ctx.shield : 0;
+  return c;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,37 +297,76 @@ export function strikingAllowed(ruleset: Ruleset): boolean {
   return ruleset.family !== 'grappling' && ruleset.family !== 'judo';
 }
 
-export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
-  if (!ctx.hasTarget || !strikingAllowed(ctx.ruleset)) return [];
-  if (ctx.posture === 'ground' || ctx.posture === 'down' || ctx.posture === 'out') return [];
-  const flags = strikingFlagsFor(ctx.ruleset);
-  const profile = profileOf(ctx.self);
-  const tier = ctx.self.strikingTier;
-  const inClinch = ctx.posture === 'clinch';
-  const band = bandFor(ctx.distanceM, profile);
-  const behaviour = tierBehaviourFor(ctx.self);
-  const out: Candidate[] = [];
+/**
+ * Perf: the part of the strike filter that cannot change during a bout — tier,
+ * `counterOnly`, ruleset legality and the tier repertoire, all pure functions
+ * of the (immutable) runtime and ruleset — computed once per fighter and
+ * ruleset. `TECHNIQUES` order is kept, so the candidate list is unchanged.
+ */
+interface StaticStrike {
+  spec: TechniqueSpec;
+  family: ActionFamily;
+  homeInClinch: boolean;
+  homeClose: boolean;
+}
+interface StaticStrikes {
+  ruleset: Ruleset;
+  tier: number;
+  list: StaticStrike[];
+  clinchStrikeAllowed: boolean;
+}
+const STATIC_STRIKES = new WeakMap<FighterRuntime, StaticStrikes>();
 
+function staticStrikesFor(self: FighterRuntime, ruleset: Ruleset): StaticStrikes {
+  const hit = STATIC_STRIKES.get(self);
+  if (hit && hit.ruleset === ruleset && hit.tier === self.strikingTier) return hit;
+  const flags = strikingFlagsFor(ruleset);
+  const tier = self.strikingTier;
+  const behaviour = tierBehaviourFor(self);
+  const list: StaticStrike[] = [];
   for (const spec of TECHNIQUES) {
     if (spec.minTier > tier) continue;
     if (spec.flags.includes('counterOnly')) continue;
     if (!techniqueLegal(spec, flags)) continue;
-    // In the clinch only clinch-band techniques are on the table, and at range
-    // the clinch-only ones are not.
-    const homeInClinch = spec.band.includes('clinch');
-    if (inClinch && !homeInClinch && !spec.band.includes('close')) continue;
-    if (!inClinch && band === 'clinch' && !homeInClinch) continue;
-
-    const skill = ctx.self.strikingMean;
-    const fit = rangeFit(spec, ctx.distanceM, profile, skill);
-    if (!fit.available) continue;
-
     const family = familyForTechnique(spec.family, spec.limb, spec.targets[0]);
-    const asFamily: ActionFamily = inClinch && homeInClinch ? 'clinchStrike' : family;
     // 01 §3 repertoire: `spec.minTier` is the striking aggregate, but the
     // catalogue keys kicks on the Muay Thai tier and elbows on their own row.
     if (!repertoireAllows(behaviour, family, spec)) continue;
-    if (asFamily !== family && !repertoireAllows(behaviour, asFamily)) continue;
+    list.push({
+      spec, family,
+      homeInClinch: spec.band.includes('clinch'),
+      homeClose: spec.band.includes('close'),
+    });
+  }
+  const out: StaticStrikes = {
+    ruleset, tier, list, clinchStrikeAllowed: repertoireAllows(behaviour, 'clinchStrike'),
+  };
+  STATIC_STRIKES.set(self, out);
+  return out;
+}
+
+export function strikeCandidates(ctx: EnumerationContext): Candidate[] {
+  if (!ctx.hasTarget || !strikingAllowed(ctx.ruleset)) return [];
+  if (ctx.posture === 'ground' || ctx.posture === 'down' || ctx.posture === 'out') return [];
+  const profile = profileOf(ctx.self);
+  const inClinch = ctx.posture === 'clinch';
+  const band = bandFor(ctx.distanceM, profile);
+  const limits = bandLimits(profile);
+  const statics = staticStrikesFor(ctx.self, ctx.ruleset);
+  const out: Candidate[] = [];
+
+  for (const { spec, family, homeInClinch, homeClose } of statics.list) {
+    // In the clinch only clinch-band techniques are on the table, and at range
+    // the clinch-only ones are not.
+    if (inClinch && !homeInClinch && !homeClose) continue;
+    if (!inClinch && band === 'clinch' && !homeInClinch) continue;
+
+    const skill = ctx.self.strikingMean;
+    const fit = rangeFitIn(spec, ctx.distanceM, profile, skill, band, limits);
+    if (!fit.available) continue;
+
+    const asFamily: ActionFamily = inClinch && homeInClinch ? 'clinchStrike' : family;
+    if (asFamily !== family && !statics.clinchStrikeAllowed) continue;
     out.push(mk(ctx, {
       kind: 'strike',
       id: spec.id,
@@ -809,16 +850,21 @@ export function enumerateActions(
   toTargetX = 0,
   toTargetZ = 1,
 ): Candidate[] {
-  const out: Candidate[] = [];
-  out.push(...strikeCandidates(ctx));
-  out.push(...groundStrikeCandidates(ctx));
-  out.push(...feintCandidates(ctx));
-  out.push(...grapplingCandidates(ctx));
-  out.push(...submissionCandidates(ctx));
-  out.push(...movementCandidates(ctx, toTargetX, toTargetZ));
-  out.push(...defensiveCandidates(ctx));
+  // The strike list is usually the longest, so it becomes the output array
+  // and the rest are appended in the same order as before.
+  const out: Candidate[] = strikeCandidates(ctx);
+  append(out, groundStrikeCandidates(ctx));
+  append(out, feintCandidates(ctx));
+  append(out, grapplingCandidates(ctx));
+  append(out, submissionCandidates(ctx));
+  append(out, movementCandidates(ctx, toTargetX, toTargetZ));
+  append(out, defensiveCandidates(ctx));
   out.push(waitCandidate(ctx));
   return out;
+}
+
+function append(out: Candidate[], xs: readonly Candidate[]): void {
+  for (let i = 0; i < xs.length; i++) out.push(xs[i]);
 }
 
 /** The technique ids a strike candidate may carry, for the tests. */
