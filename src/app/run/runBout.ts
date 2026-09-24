@@ -156,6 +156,8 @@ export function runBout(config: SimConfig, opts: RunBoutOptions = {}): BoutRunHa
       finish();
       onMain('The bout worker failed to load; this bout ran on the main thread.');
     };
+
+    worker.postMessage(message);
   });
 
   return { id, promise, cancel: () => cancel() };

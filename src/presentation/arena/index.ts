@@ -522,6 +522,9 @@ class Venue implements VenueSet {
     });
     this.built.env.dispose();
     for (const t of this.extraTextures) t.dispose();
+    // Freed resources alone leave the venue in the scene graph, where the next
+    // bout's venue would render alongside it (doubled lights and shadows).
+    this.object3d.removeFromParent();
   }
 }
 
